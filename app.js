@@ -23,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.3.1';
+  var APP_VERSION = '1.3.2';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -1453,6 +1453,22 @@
     return m;
   }
 
+  /** 상단 바 제목 아래 앱 버전. 새 버전을 받아 두었으면 누르면 바로 적용되는 [업데이트] 버튼으로 바뀐다 */
+  function versionBadge() {
+    if (SW.updateReady) {
+      return h('button', {
+        type: 'button', class: 'tb-ver tb-ver-update', 'aria-label': '새 버전이 준비됐어요. 눌러서 새로고침',
+        onclick: reloadForUpdate
+      }, '업데이트');
+    }
+    return h('span', { class: 'tb-ver', 'aria-label': '앱 버전 ' + APP_VERSION, text: 'v' + APP_VERSION });
+  }
+
+  function refreshVersionBadge() {
+    var old = document.querySelector('#topbar .tb-ver');
+    if (old) old.replaceWith(versionBadge());
+  }
+
   function setTopbar(o) {
     var bar = $('#topbar');
     bar.textContent = '';
@@ -1462,7 +1478,10 @@
         icon('back'), h('span', { text: '뒤로' })));
     }
     // tabindex=-1: 화면이 바뀌면 이 제목으로 초점을 옮겨 VoiceOver 가 새 화면 이름을 읽게 한다
-    bar.append(left, h('h1', { class: 'tb-title', id: 'tb-title', tabindex: '-1', text: o.title }), h('div', { class: 'tb-right' }, o.actions || []));
+    bar.append(left, h('div', { class: 'tb-center' },
+      h('h1', { class: 'tb-title', id: 'tb-title', tabindex: '-1', text: o.title }),
+      versionBadge()
+    ), h('div', { class: 'tb-right' }, o.actions || []));
     document.title = o.title && o.title !== '임장 체크리스트' ? o.title + ' · 임장체크' : '임장 체크리스트';
   }
 
@@ -4346,6 +4365,7 @@
       if (!hadController) { hadController = true; return; } // 처음 설치: 알릴 필요 없음
       if (SW.reloading) return;
       SW.updateReady = true;
+      refreshVersionBadge(); // 헤더 버전 표시를 [업데이트]로
       // 예전 버전으로 열어 둔 다른 탭이 저장하면 새 필드가 빠질 수 있어(합칠 때 지키지만) 다른 탭도 새로고침하게 알린다
       toast('새 버전이 준비됐어요. 열어 둔 다른 탭도 새로고침해 주세요.', { duration: 15000, action: { label: '새로고침', fn: reloadForUpdate } });
       if (view.name === 'settings' && !busyEditing()) renderSettings(); // 설정 화면에도 [새로고침] 표시
