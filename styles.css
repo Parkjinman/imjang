@@ -1181,3 +1181,29 @@ textarea.imp-text { min-height: 150px; font-family: ui-monospace, SFMono-Regular
 .imp-link .notice-ho p { color: var(--text); }
 details.imp-how-more { margin-top: 0; margin-bottom: 12px; }
 details.imp-how-more[open] > summary { margin-bottom: 4px; }
+
+/* =========================================================
+   1.3.0: 두 기기 합치기(설정의 기기 이름·맞추는 순서, 합치기 결과 대화상자)
+   ========================================================= */
+.set-device { margin-top: 12px; }
+.sync-guide { background: var(--card-2); border-radius: var(--radius-sm); padding: 12px 14px; }
+.sync-guide > * + * { margin-top: 6px; }
+.sync-title { font-size: 0.9412rem; font-weight: 800; color: var(--teal-ink); }
+.sync-steps { padding-left: 1.4em; font-size: 0.9412rem; }
+.sync-steps li + li { margin-top: 4px; }
+.merge-result > * + * { margin-top: 12px; }
+.merge-sum { font-size: 1.0588rem; font-weight: 800; line-height: 1.5; }
+.merge-sum span { white-space: nowrap; }
+.merge-group { border-radius: var(--radius-sm); padding: 12px 14px; background: var(--card-2); }
+.merge-group > * + * { margin-top: 4px; }
+.merge-group.is-kept { background: var(--orange-soft); }
+.merge-group.is-revived { background: var(--teal-soft); }
+.merge-group-title { font-size: 0.9412rem; font-weight: 800; }
+.merge-group.is-kept .merge-group-title { color: var(--orange-ink); }
+.merge-group.is-revived .merge-group-title { color: var(--teal-ink); }
+.merge-names { padding-left: 1.2em; font-size: 0.9412rem; font-weight: 600; overflow-wrap: anywhere; }
+/* 1.3.1: 불러오기 확인·합치기 결과의 주의 상자(예전 버전 백업 등) */
+.dlg-warn { border-radius: var(--radius-sm); padding: 12px 14px; background: var(--orange-soft); color: var(--text); font-size: 0.9412rem; }
+.dlg-warn strong { display: block; color: var(--orange-ink); }
+.dlg-warn > * + * { margin-top: 4px; }
+#set-import:focus, #set-import:focus-visible { outline: none; } /* 불러오기를 마친 뒤 프로그램으로 옮긴 초점(제목). 상단 제목(.tb-title)과 같게 */

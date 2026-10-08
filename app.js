@@ -15,6 +15,7 @@
  *
  * 보안: 사용자 입력은 항상 textContent(또는 value)로만 화면에 넣는다. innerHTML 은 고정 아이콘 SVG 에만 쓴다.
  * 가져오기 코드 해석은 import-parser.js(window.ImjangImport)가 맡는다. data.js 다음, 이 파일 전에 로드된다.
+ * 두 기록 합치기(백업 [합치기]·여러 탭)는 merge.js(window.ImjangMerge)가 맡는다. import-parser.js 다음, 이 파일 전에 로드된다.
  */
 (function () {
   'use strict';
@@ -22,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.2.2';
+  var APP_VERSION = '1.3.1';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -38,6 +39,9 @@
   var IMP = window.ImjangImport || null;
   var IMPORT_TEXT_KEY = 'imjang.import.text'; // 붙여 넣은 글(sessionStorage). Claude 앱에 다녀와도 남게
   var GONE_KEYS_MAX = 600; // 지운 매물 열쇠(goneKeys) 최대 개수
+  // 두 기록 합치기(merge.js). 파일이 없으면 null 이고, 그때는 탭끼리 매물 단위로 합치고(1.2.x 방식) 백업 [합치기]만 막는다
+  var MG = window.ImjangMerge || null;
+  var DEVICE_NAME_MAX = 20; // 기기 이름 최대 글자 수
 
   var STATUSES = [
     { id: 'review', label: '검토 중' },
@@ -171,6 +175,12 @@
     var d = new Date(ts);
     return d.getFullYear() + '.' + pad2(d.getMonth() + 1) + '.' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
+  /** 짧은 날짜·시각: "10월 9일 21:10" (올해가 아니면 앞에 "2025년 ") */
+  function shortDateTime(ts) {
+    var d = new Date(ts);
+    var y = d.getFullYear() !== new Date().getFullYear() ? d.getFullYear() + '년 ' : '';
+    return y + (d.getMonth() + 1) + '월 ' + d.getDate() + '일 ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
   function formatISODate(iso) {
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
     return m ? m[1] + '.' + m[2] + '.' + m[3] : str(iso);
@@ -188,6 +198,30 @@
     return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   }
   function isStandalone() { return window.navigator.standalone === true; }
+  /** 기기 이름 기본값(설정에서 바꾸지 않았을 때): iPad / iPhone / Mac / 기타 */
+  function defaultDeviceName() {
+    var ua = navigator.userAgent || '';
+    if (/iPad/.test(ua)) return 'iPad';
+    if (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) {
+      // iPadOS 는 Mac 처럼 보인다. iPhone Safari 의 "데스크톱 웹사이트 요청"도 같게 보여서 화면 짧은 변으로 가른다
+      var short = Math.min(window.screen.width || 0, window.screen.height || 0);
+      return short && short < 600 ? 'iPhone' : 'iPad';
+    }
+    if (/iPhone|iPod/.test(ua)) return 'iPhone';
+    if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
+    return '기타';
+  }
+  /** 저장·표시용 기기 이름: 줄바꿈·제어 문자를 빼고 앞뒤 공백을 지운 20자 */
+  function cleanDeviceName(v) {
+    return str(v).replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, DEVICE_NAME_MAX);
+  }
+  function deviceName() { return (state && state.ui.deviceName) || defaultDeviceName(); }
+  /** 파일 이름에 넣을 기기 이름: 영문·숫자·한글·-·_ 만 남긴다(나머지는 -) */
+  function fileSafeName(v) {
+    var s = str(v);
+    if (s.normalize) s = s.normalize('NFC');
+    return s.replace(/[^A-Za-z0-9가-힣_-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+  }
   /** 카카오톡·네이버 앱 등 앱 안 브라우저(WebView). 홈 화면 추가 메뉴가 없고 저장 공간이 쉽게 지워진다 */
   function inAppBrowser() {
     var ua = navigator.userAgent || '';
@@ -239,6 +273,10 @@
   }
   function hostOf(url) { try { return new URL(url).hostname; } catch (e) { return ''; } }
   function hasOwn(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+  /** 빈 값('' null undefined)끼리는 같다고 보는 비교 */
+  function sameValue(a, b) {
+    return a === b || ((a === '' || a === null || a === undefined) && (b === '' || b === null || b === undefined));
+  }
   /** 층 표시: "12/25" → "12/25층". 이미 '층'으로 끝나면 그대로 */
   function floorText(f) {
     var s = str(f).trim();
@@ -363,8 +401,13 @@
   // 4. 저장소 (localStorage)
   //    - 바뀐 것이 있을 때만(dirty) 저장한다. 화면을 떠날 때도 dirty 일 때만 쓴다.
   //    - Safari 탭(창)이 여러 개 열려 있어도 기록이 사라지지 않도록, 쓰기 직전에 저장소의 rev 를 읽어
-  //      다른 탭이 먼저 쓴 내용이 있으면 매물별 updatedAt 으로 합친 뒤 쓴다.
-  //    - 다른 탭에서 지운 매물은 deleted { id: 지운 시각 } 로 맞춘다.
+  //      다른 탭이 먼저 쓴 내용이 있으면 합친 뒤 쓴다. 1.3.0 부터 항목 단위(merge.js mergeProperty):
+  //      항목·기본 정보 필드·상태·섹션 메모마다 바뀐 시각(t, fieldsAt, statusAt, sectionMemoAt)이 더 나중인 쪽을 남긴다.
+  //      백업 [합치기](두 기기 맞추기)도 같은 규칙(merge.js mergeStates)을 쓴다.
+  //    - 다른 탭에서 지운 매물은 deleted { id: 지운 시각 } 로 맞춘다. 백업에 실려 다른 기기 [합치기]에서도 지운다.
+  //    - 전체 삭제·[덮어쓰기]는 "이 기기 초기화"라 localDeleted { id: 시각 } 에 따로 남긴다(1.3.1). 이 기기의 다른 탭만
+  //      맞추고(그 시각 전의 예전 사본을 버림), 백업에는 넣지 않아 다른 기기 매물을 지우지 않는다.
+  //    - 새 시각은 늘 바꾸는 값의 시각보다 나중으로 찍는다(stampAfter). 기기 시계가 늦어도 마지막에 고친 값이 이긴다.
   //    - 지운 매물의 중복 판단 열쇠(매물번호·링크·단지명 조합·층)는 goneKeys { 열쇠: 지운 시각 } 에 남겨,
   //      가져오기 코드에 같은 매물이 다시 오면 "전에 지운 매물이에요"라고 알려 준다.
   //    - 업데이트 전에 열어 둔 1.1.0 탭이 저장하면 1.2.0 매물 필드가 키째 빠진다. 합칠 때 키가 없으면 내 값을 지킨다.
@@ -373,8 +416,10 @@
   var loadProblem = null; // 'blocked' | 'broken'
 
   function emptyState() {
-    return { version: SCHEMA_VERSION, rev: '', properties: [], deleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null } };
+    return { version: SCHEMA_VERSION, rev: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null } };
   }
+
+  var ITEM_VALUE_KEYS = ['status', 'memo', 'answer', 'date', 'done']; // 항목 상태의 값 이름(merge.js ITEM_FIELDS 와 같음)
 
   function normalizeItems(items) {
     var out = {};
@@ -389,6 +434,15 @@
       if (v.answer) o.answer = str(v.answer);
       if (v.date) o.date = str(v.date);
       if (v.done) o.done = true;
+      // 1.3.0: 바뀐 시각. t 는 항목 전체, ft 는 값마다 { status: ms, … }.
+      // 값을 모두 지운 항목도 { t, ft } 로 남긴다(다른 기기의 예전 값이 합칠 때 되살아나지 않게)
+      var t = numOrNull(v.t);
+      if (t > 0) o.t = t;
+      if (v.ft && typeof v.ft === 'object') {
+        var ft = {};
+        ITEM_VALUE_KEYS.forEach(function (f) { var x = numOrNull(v.ft[f]); if (x > 0) ft[f] = x; });
+        if (Object.keys(ft).length) o.ft = ft;
+      }
       if (Object.keys(o).length) out[k] = o;
     });
     return out;
@@ -416,9 +470,34 @@
     return out;
   }
 
+  /**
+   * 새로 찍을 시각(1.3.1): now 와, 앞선 시각들(바꾸는 값의 지금 시각 등)보다 1ms 뒤 중 큰 값(merge.js after 와 같음).
+   * 이 기기 시계가 다른 기기보다 늦어도, 합친 뒤에 고친 값·지운 매물이 방금 받은 값에 지지 않게 한다
+   */
+  function stampAfter(now) {
+    var t = now;
+    for (var i = 1; i < arguments.length; i++) {
+      var p = numOrNull(arguments[i]);
+      if (p > 0 && p >= t) t = p + 1;
+    }
+    return t;
+  }
+
+  /** { 키: 양수 시각 } 만 남긴다(merge.js 를 못 불러왔을 때 저장된 변경 시각을 버리지 않으려고) */
+  function timeMapOf(m) {
+    var out = {};
+    if (!m || typeof m !== 'object') return out;
+    Object.keys(m).forEach(function (k) {
+      if (BAD_KEYS[k]) return;
+      var t = numOrNull(m[k]);
+      if (t > 0) out[k] = t;
+    });
+    return out;
+  }
+
   function normalizeProperty(p) {
     var now = Date.now();
-    return {
+    var np = {
       id: str(p.id) || uid(),
       name: str(p.name).trim() || '이름 없는 매물',
       dong: str(p.dong),
@@ -442,8 +521,23 @@
       importedAt: numOrNull(p.importedAt), // 가져오기 코드로 만든 시각(직접 입력이면 null)
       source: str(p.source),               // 'claude-code': 가져오기 코드로 만든 매물
       items: normalizeItems(p.items),
-      sectionMemos: normalizeMemos(p.sectionMemos)
+      sectionMemos: normalizeMemos(p.sectionMemos),
+      // 1.3.0 변경 시각(두 기기 합치기용). 검사와 빈 곳 채우기(예전 기록은 legacyAt)는 merge.js fillTimes
+      fieldsAt: p.fieldsAt,          // { 필드: ms } 기본 정보가 바뀐 시각
+      statusAt: p.statusAt,          // ms 진행 상태·탈락 사유가 바뀐 시각
+      sectionMemoAt: p.sectionMemoAt, // { 섹션id: ms } 섹션 메모가 바뀐 시각(지워도 남김)
+      legacyAt: p.legacyAt           // 1.3.1. ms 시각 없는 예전 기록(1.2.x)을 처음 읽은 때. 그때의 값은 모두 알고 있었다는 뜻
     };
+    if (MG) return MG.fillTimes(np);
+    // merge.js 를 못 불러왔을 때: 저장된 시각은 검사만 하고 그대로 둔다(버리면 다음 합치기에서 예전 값이 새 값을 이길 수 있음).
+    // 비어 있는 시각은 채우지 않는다(다음에 merge.js 가 뜨면 fillTimes 가 legacyAt 으로 채움)
+    var legacy = !p.fieldsAt || typeof p.fieldsAt !== 'object';
+    np.fieldsAt = timeMapOf(p.fieldsAt);
+    np.statusAt = numOrNull(p.statusAt) > 0 ? numOrNull(p.statusAt) : np.updatedAt;
+    np.sectionMemoAt = timeMapOf(p.sectionMemoAt);
+    np.legacyAt = numOrNull(p.legacyAt) > 0 ? numOrNull(p.legacyAt) : (legacy ? np.updatedAt : null);
+    if (!np.legacyAt) delete np.legacyAt;
+    return np;
   }
 
   /** 저장된 데이터를 현재 스키마로 맞춘다. (나중에 version 이 바뀌면 여기서 변환) */
@@ -452,6 +546,7 @@
     if (!data || typeof data !== 'object') return s;
     s.rev = str(data.rev);
     s.deleted = normalizeDeleted(data.deleted);
+    s.localDeleted = normalizeDeleted(data.localDeleted); // 1.3.1: 이 기기 초기화(전체 삭제·덮어쓰기)로 지운 매물
     s.goneKeys = normalizeDeleted(data.goneKeys); // 모양이 같다({ 열쇠: 시각 }, 180일 보관)
     var list = Array.isArray(data.properties) ? data.properties : [];
     var seen = {};
@@ -466,6 +561,8 @@
     if (data.ui && typeof data.ui === 'object') {
       s.ui.dismissedInstallTip = !!data.ui.dismissedInstallTip;
       s.ui.lastBackupAt = numOrNull(data.ui.lastBackupAt);
+      s.ui.deviceName = cleanDeviceName(data.ui.deviceName); // 1.3.0: 사용자가 정한 기기 이름(비면 자동)
+      s.ui.deviceNameAt = numOrNull(data.ui.deviceNameAt);
     }
     return s;
   }
@@ -517,6 +614,20 @@
   var FIELDS_120 = ['sourceUrl', 'floor', 'direction', 'supplyArea', 'articleNo', 'confirmedAt', 'importedAt', 'source'];
   var needResave = false; // 합치면서 예전 탭이 지운 필드를 되살렸으면 다시 저장해 저장본에도 되돌려 놓는다
 
+  /**
+   * 저장본 원문에서 1.3.0 시각(fieldsAt)이 아예 없는 매물 { id: true }.
+   * 업데이트 전에 열어 둔 1.2.x 이하 탭이 쓴 매물이다. 이 탭은 항목을 지울 때 키째 지우고 시각도 남기지 않으므로,
+   * 항목 단위로 합치면 그 탭에서 지운 값이 되살아날 수 있다. 그래서 이런 매물은 예전처럼 매물 단위로 합친다.
+   */
+  function oldTabProps(raw) {
+    var out = {};
+    (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
+      if (!p || typeof p !== 'object' || !p.id || BAD_KEYS[p.id]) return;
+      if (!hasOwn(p, 'fieldsAt')) out[str(p.id)] = true;
+    });
+    return out;
+  }
+
   /** 저장본 원문에서 매물별로 아예 없는 1.2.0 필드 키 { id: [키…] } (빈 값과 구분: 키가 없을 때만) */
   function missingNewFields(raw) {
     var out = {};
@@ -531,11 +642,36 @@
   /**
    * 다른 탭이 저장한 내용(incoming)을 내 state 에 합친다.
    * 매물 객체를 바꿔치기하지 않고 내용만 고쳐 써서, 화면이 쥐고 있는 매물 참조가 그대로 유효하다.
-   * missing: missingNewFields 결과. 예전 버전 탭이 쓴 매물은 그 필드를 내 값으로 지킨다.
-   * 내 state 가 바뀌었으면 true.
+   * 같은 매물은 항목 단위로 합친다(merge.js mergeProperty: 항목·필드마다 더 나중에 고친 쪽).
+   * oldTab: oldTabProps 결과. 예전 버전 탭이 쓴 매물은 예전처럼 매물 단위로 더 나중 것을 쓴다.
+   * missing: missingNewFields 결과. 그중 1.1.0 탭이 쓴 매물은 1.2.0 필드를 내 값으로 지킨다.
+   * 내 state 의 내용이 바뀌었으면 true.
    */
-  function mergeInto(target, incoming, missing) {
+  function mergeInto(target, incoming, missing, oldTab) {
     var changed = false;
+    // 1.3.1: 다른 탭이 이 기기를 초기화(전체 삭제·덮어쓰기)했는데 내가 아직 몰랐으면, 그 전의 내 사본은 버린다.
+    // 저장본에 같은 매물이 있으면(덮어쓰기로 바뀐 것, 초기화 뒤 합치기로 들어온 것) 그것으로 바꾼다(참조는 그대로).
+    // 초기화 뒤에 이 탭에서 고친 매물(updatedAt 이 더 나중)만 아래에서 평소처럼 합친다
+    var ld = Object.assign({}, target.localDeleted);
+    var reset = {};
+    Object.keys(incoming.localDeleted || {}).forEach(function (id) {
+      var t = incoming.localDeleted[id];
+      if (!ld[id] || t > ld[id]) { ld[id] = t; reset[id] = t; }
+    });
+    target.localDeleted = ld;
+    if (Object.keys(reset).length) {
+      var inc = {};
+      incoming.properties.forEach(function (p) { inc[p.id] = p; });
+      target.properties = target.properties.filter(function (mine) {
+        var id = mine.id;
+        if (!hasOwn(reset, id) || (mine.updatedAt || 0) > reset[id]) return true;
+        changed = true;
+        if (!hasOwn(inc, id)) return false;
+        Object.keys(mine).forEach(function (k) { delete mine[k]; });
+        Object.assign(mine, inc[id]);
+        return true;
+      });
+    }
     var del = Object.assign({}, target.deleted);
     Object.keys(incoming.deleted || {}).forEach(function (id) {
       if (!del[id] || incoming.deleted[id] > del[id]) del[id] = incoming.deleted[id];
@@ -550,8 +686,16 @@
     target.properties.forEach(function (p) { byId[p.id] = p; });
     incoming.properties.forEach(function (p) {
       var mine = byId[p.id];
-      if (!mine) { target.properties.push(p); byId[p.id] = p; changed = true; }
-      else if ((p.updatedAt || 0) > (mine.updatedAt || 0)) {
+      if (!mine) { target.properties.push(p); byId[p.id] = p; changed = true; return; }
+      if (MG && !(oldTab && hasOwn(oldTab, p.id))) {
+        // 항목 단위: 양쪽에서 고친 다른 항목이 모두 남고, 같은 항목은 더 나중에 고친 쪽
+        var r = MG.mergeProperty(mine, p);
+        Object.assign(mine, r.prop);
+        if (r.changed) changed = true;
+        return;
+      }
+      // 예전 버전 탭이 쓴 매물(또는 merge.js 를 못 불러옴): 매물 단위로 더 나중 것
+      if ((p.updatedAt || 0) > (mine.updatedAt || 0)) {
         var keep = {};
         (missing && hasOwn(missing, p.id) ? missing[p.id] : []).forEach(function (k) {
           if (mine[k] !== '' && mine[k] !== null && mine[k] !== undefined) keep[k] = mine[k];
@@ -569,6 +713,10 @@
     var last = a && b ? Math.max(a, b) : (a || b || null);
     if (last !== target.ui.lastBackupAt) { target.ui.lastBackupAt = last; changed = true; }
     if (incoming.ui.dismissedInstallTip && !target.ui.dismissedInstallTip) { target.ui.dismissedInstallTip = true; changed = true; }
+    // 기기 이름: 더 나중에 바꾼 쪽(같은 기기의 다른 탭에서 바꾼 이름이 예전 이름으로 돌아가지 않게)
+    var na = numOrNull(target.ui.deviceNameAt) || 0;
+    var nb = numOrNull(incoming.ui.deviceNameAt) || 0;
+    if (nb > na) { target.ui.deviceName = incoming.ui.deviceName; target.ui.deviceNameAt = nb; changed = true; }
     return changed;
   }
 
@@ -579,7 +727,7 @@
     if (!raw) return false;
     var obj = parseStored(raw);
     if (!obj || !obj.rev || str(obj.rev) === knownRev) return false;
-    var changed = mergeInto(state, normalizeState(obj), missingNewFields(obj));
+    var changed = mergeInto(state, normalizeState(obj), missingNewFields(obj), oldTabProps(obj));
     knownRev = str(obj.rev);
     return changed;
   }
@@ -653,10 +801,22 @@
     el.classList.toggle('is-error', saveFailed);
   }
 
-  /** 매물이 바뀌었음을 표시하고 자동 저장(디바운스) */
-  function touch(prop) {
-    prop.updatedAt = Date.now();
+  /**
+   * 매물이 바뀌었음을 표시하고 자동 저장(디바운스). now: 같은 변경의 다른 시각(t, fieldsAt 등)과 맞출 때.
+   * updatedAt 은 줄지 않는다(stampAfter): 지운 시각·다른 기기의 시각과 비교하는 값이라 늘 가장 나중 변경 이상이어야 한다
+   */
+  function touch(prop, now) {
+    prop.updatedAt = stampAfter(now || Date.now(), prop.updatedAt);
     scheduleSave();
+  }
+
+  /** 진행 상태(와 탈락 사유)를 바꾼다. reason 이 undefined 면 탈락 사유는 그대로 */
+  function setPropStatus(prop, status, reason) {
+    var now = stampAfter(Date.now(), prop.statusAt, prop.legacyAt);
+    prop.status = status;
+    if (reason !== undefined) prop.dropReason = reason;
+    prop.statusAt = now; // 두 기기 합치기: 상태는 더 나중에 바꾼 쪽
+    touch(prop, now);
   }
 
   function findProp(id) {
@@ -680,15 +840,37 @@
     }
   }
 
+  /**
+   * 항목 상태를 고친다. 바뀐 시각을 함께 남긴다: t(항목 전체), ft(고친 값마다).
+   * 두 기기를 합칠 때 항목 안의 값마다 더 나중에 고친 쪽을 남기려고(merge.js editItem·mergeItem).
+   * 값을 모두 지워도 항목을 없애지 않고 { t, ft } 만 남긴다. 그래야 다른 기기의 예전 값이 합칠 때 되살아나지 않는다.
+   */
   function setItemState(prop, itemId, patch) {
     if (BAD_KEYS[itemId]) return;
-    var next = Object.assign({}, getItemState(prop, itemId), patch);
-    Object.keys(next).forEach(function (k) {
-      if (next[k] === '' || next[k] === false || next[k] === null || next[k] === undefined) delete next[k];
-    });
-    if (Object.keys(next).length) prop.items[itemId] = next;
-    else delete prop.items[itemId];
-    touch(prop);
+    var cur = getItemState(prop, itemId);
+    var next;
+    if (MG) {
+      // 새 시각은 그 항목의 지금 시각·legacyAt 보다 늘 나중(기기 시계가 늦어도 방금 고친 값이 이김)
+      next = MG.editItem(cur, patch, Date.now(), prop.legacyAt);
+    } else {
+      // merge.js 를 못 불러왔을 때도 값별 시각(ft)은 버리지 않고 고친 값만 갱신한다(merge.js editItem 과 같은 뜻)
+      var now = stampAfter(Date.now(), cur.t, prop.legacyAt);
+      var ft = cur.ft && typeof cur.ft === 'object' ? Object.assign({}, cur.ft) : null;
+      if (!ft) { // 예전 모양(ft 없음): 다른 값들은 그 항목의 t 에 바뀐 것으로
+        ft = {};
+        if (cur.t && cur.t !== prop.legacyAt) ITEM_VALUE_KEYS.forEach(function (k) { ft[k] = cur.t; });
+      }
+      next = {};
+      ITEM_VALUE_KEYS.forEach(function (k) {
+        var v = hasOwn(patch, k) ? patch[k] : cur[k];
+        if (v !== '' && v !== false && v !== null && v !== undefined) next[k] = v;
+        if (hasOwn(patch, k)) ft[k] = now;
+      });
+      next.t = now;
+      next.ft = ft;
+    }
+    prop.items[itemId] = next;
+    touch(prop, next.t);
   }
 
   // =====================================================
@@ -1096,7 +1278,8 @@
   /**
    * 하단 시트 형태의 대화상자. 결과: Promise<{ value, text }>
    * opts: { title, message, content(Node), input: { placeholder, value, label, match, multiline },
-   *         buttons: [{ label, value, kind: 'primary'|'danger'|'secondary'|'accent', needsMatch, action, keepOpen }] }
+   *         buttons: [{ label, value, kind: 'primary'|'danger'|'danger-ghost'|'secondary'|'accent', needsMatch, action, keepOpen }] }
+   *   'danger-ghost' 은 위험하지만 주 버튼이 아닌 동작(테두리만 빨강). 첫 초점은 'danger' 일 때만 취소로 간다
    */
   function openDialog(opts) {
     return new Promise(function (resolve) {
@@ -1106,7 +1289,10 @@
       var msgId = titleId + '-msg';
       var inputEl = null;
       var actions = h('div', { class: 'modal-actions' });
-      var card = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, 'aria-describedby': opts.message ? msgId : null },
+      // 설명: 메시지와 내용(content) 모두. 내용만 있는 대화상자(합치기 결과 등)도 VoiceOver 가 열 때 읽게
+      if (opts.content && !opts.content.id) opts.content.id = titleId + '-body';
+      var describedBy = [opts.message ? msgId : '', opts.content ? opts.content.id : ''].filter(Boolean).join(' ');
+      var card = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, 'aria-describedby': describedBy || null },
         h('h2', { class: 'modal-title', id: titleId, text: opts.title }),
         opts.message ? h('p', { class: 'modal-msg', id: msgId, text: opts.message }) : null,
         opts.content || null
@@ -1149,7 +1335,7 @@
 
       var matchBtns = [];
       (opts.buttons || []).forEach(function (b) {
-        var cls = { danger: 'btn-danger', secondary: 'btn-ghost', accent: 'btn-accent' }[b.kind] || '';
+        var cls = { danger: 'btn-danger', 'danger-ghost': 'btn-danger-ghost', secondary: 'btn-ghost', accent: 'btn-accent' }[b.kind] || '';
         var btn = h('button', { type: 'button', class: 'btn btn-block ' + cls }, b.label);
         btn.addEventListener('click', function () {
           if (b.action) b.action(); // 공유·복사처럼 사용자 동작 안에서 바로 실행해야 하는 일
@@ -1622,10 +1808,24 @@
         });
         return;
       }
+      // 이 화면에서 실제로 고친 칸만 반영하고 바뀐 시각을 남긴다(두 기기 합치기: 필드마다 더 나중에 고친 쪽).
+      // 폼을 연 사이 다른 탭이 고친 칸은 입력 칸에 예전 값이 남아 있어도 덮어쓰지 않는다.
       var v = readForm();
-      if (!v.name) v.name = editing.name;
-      Object.assign(editing, v);
-      touch(editing);
+      var now = Date.now();
+      var last = 0; // 이번에 찍은 가장 나중 시각
+      Object.keys(v).forEach(function (k) {
+        if (sameValue(formBase[k], v[k])) return; // 이 화면에서 손대지 않은 칸
+        formBase[k] = v[k];
+        if (k === 'name' && !v.name) return;     // 단지명이 비면 이전 이름 유지
+        if (sameValue(editing[k], v[k])) return;
+        editing[k] = v[k];
+        // 새 시각은 그 칸의 지금 시각보다 늘 나중(기기 시계가 늦어도 방금 고친 칸이 이김)
+        var t;
+        if (k === 'status' || k === 'dropReason') t = editing.statusAt = stampAfter(now, editing.statusAt, editing.legacyAt);
+        else t = editing.fieldsAt[k] = stampAfter(now, editing.fieldsAt[k], editing.legacyAt);
+        if (t > last) last = t;
+      });
+      if (last) touch(editing, last); // input 뒤 change 처럼 같은 값이 다시 오면 고친 시각을 올리지 않는다
     }
 
     function submit() {
@@ -1636,7 +1836,8 @@
         goBack('/p/' + editing.id, true);
         return;
       }
-      var p = normalizeProperty(Object.assign({ id: uid(), createdAt: Date.now(), updatedAt: Date.now() }, readForm()));
+      // fieldsAt: {} → 새 매물(예전 기록이 아님). 칸 시각은 만든 시각으로 채워진다
+      var p = normalizeProperty(Object.assign({ id: uid(), createdAt: Date.now(), updatedAt: Date.now(), fieldsAt: {} }, readForm()));
       state.properties.unshift(p);
       dirty = true;
       saveNow();
@@ -1691,6 +1892,7 @@
       }
     });
     form.addEventListener('submit', function (e) { e.preventDefault(); }); // 혹시 모를 제출 막기
+    var formBase = null; // 수정 화면: 이 화면이 마지막으로 반영한 값(applyChange 가 비교). 화면에 붙인 뒤 읽는다
     form.addEventListener('input', function (e) {
       if (e.target === f.name) validateName(!!editing || nameErr.hidden === false); // 수정 중에는 바로 알려 줌
       refreshLive();
@@ -1699,6 +1901,7 @@
     form.addEventListener('change', function () { refreshLive(); applyChange(); });
 
     main.append(dataWarning() || '', h('div', { class: 'card' }, form));
+    if (editing) formBase = readForm();
 
     if (editing) {
       main.append(h('div', { class: 'danger-zone' },
@@ -1725,7 +1928,8 @@
     }).then(function (ok) {
       if (!ok) return;
       state.properties = state.properties.filter(function (p) { return p.id !== prop.id; });
-      state.deleted[prop.id] = Date.now(); // 다른 탭에도 지운 것을 알린다
+      // 다른 탭·다른 기기에도 지운 것을 알린다. 이 매물의 마지막 변경(다른 기기에서 받은 것 포함)보다 늘 나중 시각
+      state.deleted[prop.id] = stampAfter(Date.now(), prop.updatedAt);
       rememberGone(prop, state.deleted[prop.id]); // 같은 매물을 코드로 다시 가져오면 알려 주려고
       dirty = true;
       saveNow();
@@ -1871,9 +2075,7 @@
         buttons: [{ label: '탈락 처리', value: 'ok', kind: 'danger' }, { label: '취소', value: null, kind: 'secondary' }]
       }).then(function (r) {
         if (r.value !== 'ok') { revert(); return; }
-        prop.status = 'dropped';
-        prop.dropReason = r.text.trim();
-        touch(prop);
+        setPropStatus(prop, 'dropped', r.text.trim());
         afterStatusChange(prop);
         toast('탈락 처리했어요');
       });
@@ -1905,8 +2107,7 @@
   }
 
   function applyStatus(prop, next) {
-    prop.status = next; // 탈락 사유는 지우지 않고 보관(다시 탈락시킬 때 기본값으로 씀)
-    touch(prop);
+    setPropStatus(prop, next); // 탈락 사유는 지우지 않고 보관(다시 탈락시킬 때 기본값으로 씀)
     afterStatusChange(prop);
     toast('상태: ' + STATUS_LABEL[next]);
   }
@@ -1919,9 +2120,7 @@
   }
 
   function dropProperty(prop) {
-    prop.status = 'dropped';
-    prop.dropReason = suggestedDropReason(prop) || prop.dropReason;
-    touch(prop);
+    setPropStatus(prop, 'dropped', suggestedDropReason(prop) || prop.dropReason);
     saveNow();
     afterStatusChange(prop);
     toast('탈락 처리했어요. 다른 매물을 찾아봐요.');
@@ -2303,9 +2502,11 @@
     var ta = h('textarea', { class: 'input', id: id, rows: rowsFor(memoVal), placeholder: '이 섹션에서 눈여겨본 점을 자유롭게 적어 두세요', value: memoVal });
     ta.addEventListener('input', function () {
       if (BAD_KEYS[sec.id]) return;
+      var now = stampAfter(Date.now(), prop.sectionMemoAt[sec.id], prop.legacyAt);
       if (ta.value) prop.sectionMemos[sec.id] = ta.value;
       else delete prop.sectionMemos[sec.id];
-      touch(prop);
+      prop.sectionMemoAt[sec.id] = now; // 지운 것도 시각을 남긴다(두 기기 합치기)
+      touch(prop, now);
     });
     return h('div', { class: 'sec-notes' },
       h('label', { class: 'field-label', for: id, text: '이 섹션 메모·사진' }),
@@ -2897,9 +3098,26 @@
 
     // 1) 백업 내보내기
     var withPhotos = h('input', { type: 'checkbox', id: 'bk-photos' });
+    // 기기 이름: 백업 파일 이름과 불러오기 확인 창("iPad에서 만든 백업")에 쓴다. 비우면 자동(iPad / iPhone / Mac / 기타)
+    var nameInput = h('input', {
+      class: 'input', id: 'set-device', type: 'text', value: state.ui.deviceName || '', placeholder: defaultDeviceName(),
+      maxlength: DEVICE_NAME_MAX, autocomplete: 'off', enterkeyhint: 'done', 'aria-describedby': 'set-device-hint'
+    });
+    nameInput.addEventListener('input', function () {
+      state.ui.deviceName = cleanDeviceName(nameInput.value);
+      state.ui.deviceNameAt = Date.now();
+      scheduleSave();
+    });
+    nameInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); nameInput.blur(); }
+    });
     main.append(h('section', { class: 'card', 'aria-labelledby': 'set-backup' },
       h('h2', { class: 'card-title', id: 'set-backup', text: '백업 내보내기' }),
       h('p', { class: 'small muted', text: '매물과 체크 기록을 JSON 파일 하나로 저장해요. iPhone 을 바꾸거나 Safari 데이터가 지워졌을 때 이 파일로 되살릴 수 있어요.' }),
+      h('div', { class: 'field set-device' },
+        h('label', { for: 'set-device', text: '이 기기 이름' }),
+        nameInput,
+        h('p', { class: 'field-hint', id: 'set-device-hint', text: '백업 파일 이름과, 다른 기기에서 불러올 때 보여요. 비워 두면 "' + defaultDeviceName() + '"' })),
       h('label', { class: 'toggle' }, withPhotos, '사진도 함께 넣기 (파일이 커져요)'),
       h('button', { type: 'button', class: 'btn btn-block', onclick: function () { createBackup(withPhotos.checked); } }, '백업 파일 만들기'),
       h('p', { class: 'small muted', text: state.ui.lastBackupAt ? '마지막 백업: ' + formatDateTime(state.ui.lastBackupAt) : '아직 백업한 적이 없어요.' })
@@ -2912,10 +3130,25 @@
       fileInput.value = '';
       if (file) importBackup(file);
     });
+    // merge.js 를 못 불러왔으면(배포에 빠졌거나 캐시가 엇갈림) 합치기를 쓸 수 없다고 알린다
+    var mergeMissing = !MG ? h('div', { class: 'notice notice-stop', role: 'alert' },
+      h('strong', { text: '합치기 기능 파일을 못 불러왔어요' }),
+      h('p', { text: '지금은 [합치기]를 쓸 수 없어요. 인터넷에 연결한 뒤 새로고침해 주세요.' }),
+      h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { location.reload(); } }, '새로고침')) : null;
     main.append(h('section', { class: 'card', 'aria-labelledby': 'set-import' },
       h('h2', { class: 'card-title', id: 'set-import', text: '백업 불러오기' }),
+      mergeMissing,
       h('p', { class: 'small muted', text: '이 앱에서 만든 백업 파일(.json)을 고르면, 지금 기록과 합칠지 덮어쓸지 물어봐요.' }),
-      h('label', { class: 'btn btn-ghost btn-block', style: 'position:relative' }, '백업 파일 고르기', fileInput)
+      h('label', { class: 'btn btn-ghost btn-block', style: 'position:relative' }, '백업 파일 고르기', fileInput),
+      // 두 기기(예: iPad·Mac)를 백업 파일로 가끔 맞추는 순서
+      h('div', { class: 'sync-guide', role: 'note', 'aria-labelledby': 'set-sync' },
+        h('h3', { class: 'sync-title', id: 'set-sync', text: '두 기기 맞추는 순서' }),
+        h('p', { class: 'small', text: '먼저 두 기기의 앱 버전(아래 "알아 두세요")이 같은지 보세요. 다르면 인터넷에 연결해 앱을 열고 새로고침해 최신으로 맞춰요. 지금 버전: ' + APP_VERSION }),
+        h('ol', { class: 'sync-steps' },
+          h('li', { text: 'A(예: iPad)에서 백업 파일 만들기 → B(예: Mac)에서 불러오기 → [합치기]' }),
+          h('li', { text: 'B에서 백업 파일 만들기 → A에서 불러오기 → [합치기]' })),
+        h('p', { class: 'small muted', text: '사진도 옮기려면 백업할 때 "사진도 함께 넣기"를 켜세요(이미 있는 사진은 다시 넣지 않아요).' }),
+        h('p', { class: 'small muted', text: '같은 매물을 양쪽에서 고쳐도 항목마다 더 최근에 고친 쪽이 남아요. 한쪽에서 지운 매물은 다른 쪽에서도 지워져요(지워지기 전에 이름을 보여 주고 물어봐요).' }))
     ));
 
     // 3) 저장 공간
@@ -2973,7 +3206,7 @@
     // 5) 전체 삭제
     main.append(h('section', { class: 'card', 'aria-labelledby': 'set-wipe' },
       h('h2', { class: 'card-title', id: 'set-wipe', text: '전체 삭제' }),
-      h('p', { class: 'small muted', text: '이 기기에 저장된 매물·체크 기록·사진을 모두 지워요. 되돌릴 수 없으니 먼저 백업하세요.' }),
+      h('p', { class: 'small muted', text: '이 기기에 저장된 매물·체크 기록·사진을 모두 지워요. 다른 기기의 기록은 그대로예요. 되돌릴 수 없으니 먼저 백업하세요.' }),
       h('button', { type: 'button', class: 'btn btn-danger-ghost btn-block', onclick: wipeAll }, icon('trash', 'ic-sm'), '모든 기록 지우기')
     ));
 
@@ -3031,19 +3264,33 @@
   var BIG_BACKUP_BYTES = 80 * 1024 * 1024;
 
   /**
+   * 백업 파일에 넣을 기록: state 그대로이되 localDeleted(전체 삭제·덮어쓰기로 지운 "이 기기 초기화" 표시)는 뺀다(1.3.1).
+   * 이것이 다른 기기로 가면 그 기기 [합치기]에서 그 기기 매물과 사진이 지워지기 때문
+   */
+  function backupData() {
+    var d = {};
+    Object.keys(state).forEach(function (k) { if (k !== 'localDeleted') d[k] = state[k]; });
+    return d;
+  }
+
+  /**
    * 백업 파일 만들기.
    * 사진을 넣을 때 전체를 문자열 하나(JSON.stringify)로 만들면 iPhone 에서 메모리가 모자라 페이지가 다시 열릴 수 있다.
    * 그래서 사진마다 조각으로 Blob 에 이어 붙이고, 사진 문자열은 바로 놓아 준다.
    */
   function createBackup(includePhotos) {
     saveNow();
+    var made = Date.now();
+    var dev = deviceName();
     var header = {
       app: BACKUP_APP_ID,
       schema: SCHEMA_VERSION,
       appVersion: APP_VERSION,
       checklistVersion: CL.version,
-      exportedAt: new Date().toISOString(),
-      data: state
+      exportedAt: new Date(made).toISOString(),
+      // 1.3.0: 어느 기기에서 언제 만든 백업인지(불러올 때 "iPad에서 10월 9일 21:10에 만든 백업"으로 보여 줌)
+      meta: { deviceName: dev, createdAt: made, appVersion: APP_VERSION },
+      data: backupData() // 삭제 표시(deleted)·지운 매물 열쇠(goneKeys)도 들어 있어 [합치기]가 다른 기기에 전한다
     };
     var headJson = JSON.stringify(header); // 사진이 없는 부분이라 작다
     var TYPE = { type: 'application/json' };
@@ -3096,8 +3343,9 @@
 
     step.then(function (photoBlob) {
       var blob = photoBlob || new Blob([headJson.slice(0, -1), ',"photos":[]}'], TYPE);
-      // 실제로 넣은 사진이 있을 때만 파일 이름에 -photos
-      var fname = 'imjang-backup-' + todayISO() + (photoBlob && photoCount ? '-photos' : '') + '.json';
+      // 파일 이름: imjang-backup-<기기 이름>-YYYY-MM-DD(-photos).json. 실제로 넣은 사진이 있을 때만 -photos
+      var safeDev = fileSafeName(dev);
+      var fname = 'imjang-backup-' + (safeDev ? safeDev + '-' : '') + todayISO() + (photoBlob && photoCount ? '-photos' : '') + '.json';
       var shareFile = null;
       try {
         var f = new File([blob], fname, TYPE);
@@ -3168,6 +3416,37 @@
 
   var BIG_IMPORT_BYTES = 150 * 1024 * 1024;
 
+  /** 백업 data 에서 예전 버전(1.2.x 이하) 앱이 쓴 매물 수: 1.3.0 변경 시각(fieldsAt)이 아예 없는 매물 */
+  function legacyCount(data) {
+    return (Array.isArray(data.properties) ? data.properties : []).filter(function (p) {
+      return p && typeof p === 'object' && (!p.fieldsAt || typeof p.fieldsAt !== 'object');
+    }).length;
+  }
+
+  /**
+   * 지금 기록(다른 탭이 방금 쓴 것까지)에 백업을 합친 결과를 계산만 한다(저장하지 않음). 확인 창과 doImport 가 같이 쓴다.
+   * allowDelete: merge.js mergeStates 의 같은 이름 옵션({ id: true } 만 지움, 없으면 모두)
+   * 결과: { state, report, before(합치기 전 이 기기 매물 id → true) }
+   */
+  function computeMerge(incoming, allowDelete) {
+    pullFromStorage();
+    var candidate = normalizeState(JSON.parse(JSON.stringify(state)));
+    candidate.ui = Object.assign({}, state.ui); // 이 기기 설정(기기 이름 등)은 그대로
+    var before = {};
+    candidate.properties.forEach(function (p) { before[p.id] = true; });
+    var r = MG.mergeStates(candidate, incoming, { now: Date.now(), keepMs: TOMBSTONE_KEEP_MS, goneMax: GONE_KEYS_MAX, allowDelete: allowDelete });
+    r.before = before;
+    return r;
+  }
+
+  /** 대화상자에 넣을 매물 이름 목록(10개까지 + "외 N개") */
+  function nameList(list) {
+    var NAMES_MAX = 10;
+    var names = list.slice(0, NAMES_MAX).map(function (p) { return h('li', { text: p.name || '이름 없는 매물' }); });
+    if (list.length > NAMES_MAX) names.push(h('li', { class: 'muted', text: '외 ' + (list.length - NAMES_MAX) + '개' }));
+    return h('ul', { class: 'merge-names' }, names);
+  }
+
   function importBackup(file) {
     var ask = file.size > BIG_IMPORT_BYTES
       ? confirmDialog({
@@ -3193,27 +3472,46 @@
           alertDialog('백업 파일이 아니에요', '이 파일에서 매물 기록을 찾지 못했어요.');
           return;
         }
-        var incoming = normalizeState(Object.assign({}, data, { deleted: null, goneKeys: null })); // 백업 속 '지운 매물' 표시는 쓰지 않는다
+        // 1.3.0: 백업 속 삭제 표시(deleted)·지운 매물 열쇠(goneKeys)도 읽는다. [합치기]가 백업을 만든 기기에서 지운 매물을 맞춘다
+        // ([덮어쓰기]는 예전처럼 이 기기의 삭제 표시만 쓴다). 백업의 ui(기기 이름 등)·localDeleted 는 쓰지 않는다
+        var oldN = legacyCount(data); // 1.3.1: 예전 버전 앱이 쓴 매물(항목별 시각 없음)
+        var incoming = normalizeState(data);
         var photos = Array.isArray(obj.photos) ? obj.photos.filter(validPhotoEntry) : [];
+        var origin = backupOrigin(obj);
         obj = null;
+        data = null;
+        // 1.3.1: 합치면 이 기기에서 지워질 매물 수를 미리 계산해 보여 준다(저장하지 않음)
+        var willDelete = MG ? computeMerge(incoming).report.removed.length : 0;
+        var info = { legacy: oldN, photoCount: photos.length };
         return openDialog({
           title: '백업 불러오기',
-          message: '백업 파일에 매물 ' + incoming.properties.length + '개' + (photos.length ? ', 사진 ' + photos.length + '장' : '') + '이 들어 있어요.\n\n' +
-            '· 합치기: 지금 기록은 그대로 두고 백업을 더해요. 같은 매물은 더 최근에 고친 쪽을 남겨요.\n' +
-            '· 덮어쓰기: 지금 기록을 모두 지우고 백업 내용으로 바꿔요.',
+          message: origin + ' · 매물 ' + incoming.properties.length + '개' + (photos.length ? ' · 사진 ' + photos.length + '장' : ' · 사진 없음') + '\n\n' +
+            '· 합치기(권장): 두 기록을 항목마다 합쳐요. 같은 항목은 더 최근에 고친 쪽을 남기고, 백업을 만든 기기에서 지운 매물은 여기서도 지워요.' +
+            (willDelete ? ' 지금 합치면 이 기기에서 매물 ' + willDelete + '개가 지워져요(다음 화면에서 확인).' : '') + '\n' +
+            '· 덮어쓰기: 이 기기의 지금 기록을 모두 지우고 백업 내용으로 바꿔요.',
+          content: oldN ? h('div', { class: 'dlg-warn' },
+            h('strong', { text: '예전 버전 앱에서 만든 백업이에요' + (oldN < incoming.properties.length ? ' (매물 ' + oldN + '개)' : '') }),
+            h('p', { text: '항목별로 정확히 합치지 못해, 이 기기에서 고친 내용이 그 기기의 예전 값으로 덮일 수 있어요. 그 기기를 인터넷에 연결해 앱을 새로고침(업데이트)한 뒤 새로 백업해 오세요.' })) : null,
           buttons: [
             { label: '합치기', value: 'merge' },
-            { label: '덮어쓰기', value: 'replace', kind: 'danger' },
+            { label: '덮어쓰기', value: 'replace', kind: 'danger-ghost' }, // 위험하지만 주 버튼은 아님(합치기가 기본)
             { label: '취소', value: null, kind: 'secondary' }
           ]
         }).then(function (r) {
-          if (r.value === 'merge') return doImport('merge', incoming, photos);
+          if (r.value === 'merge') {
+            if (!MG) return doImport('merge', incoming, photos, info); // "합치지 못했어요" 안내
+            return confirmMergeDeletes(incoming).then(function (allow) {
+              if (!allow) return;
+              info.allowDelete = allow;
+              return doImport('merge', incoming, photos, info);
+            });
+          }
           if (r.value === 'replace') {
             return confirmDialog({
               title: '정말 덮어쓸까요?',
-              message: '지금 이 기기에 있는 매물 ' + state.properties.length + '개와 사진이 모두 지워지고 백업 내용으로 바뀌어요.',
+              message: '지금 이 기기에 있는 매물 ' + state.properties.length + '개와 사진이 모두 지워지고 백업 내용으로 바뀌어요. 다른 기기의 기록은 그대로예요.',
               confirmText: '덮어쓰기', danger: true
-            }).then(function (ok) { if (ok) return doImport('replace', incoming, photos); });
+            }).then(function (ok) { if (ok) return doImport('replace', incoming, photos, info); });
           }
         });
       });
@@ -3225,37 +3523,110 @@
   }
 
   /**
-   * 불러오기. 새 기록을 먼저 저장소에 써 보고, 성공했을 때만 메모리의 state 를 바꾸고 사진을 정리한다.
-   * (저장이 실패했는데 사진부터 지우는 일이 없도록)
+   * [합치기] 직전(1.3.1): 백업을 만든 기기에서 지운 매물이라 이 기기에서도 지워질 것이 있으면, 이름을 보여 주고 고르게 한다.
+   * 사진까지 지워지고 되돌릴 수 없어서, 모르는 사이 한꺼번에 지워지지 않게 한다.
+   * 결과 Promise: 지워도 되는 매물 { id: true }(지울 것이 없거나 [지우지 않고 합치기]면 {}), [취소]면 null
    */
-  function doImport(mode, incoming, photos) {
-    pullFromStorage(); // 다른 탭이 방금 쓴 내용까지 포함해서 계산
-    var before = state.properties.length;
-    var now = Date.now();
-    var candidate = normalizeState(JSON.parse(JSON.stringify(state)));
-    candidate.ui = { dismissedInstallTip: state.ui.dismissedInstallTip, lastBackupAt: state.ui.lastBackupAt };
-    var incomingIds = {};
-    incoming.properties.forEach(function (p) { incomingIds[p.id] = true; });
+  function confirmMergeDeletes(incoming) {
+    var list = computeMerge(incoming).report.removed;
+    if (!list.length) return Promise.resolve({});
+    var all = list.length >= state.properties.length;
+    return openDialog({
+      title: all ? '이 기기의 매물이 모두 지워져요' : '매물 ' + list.length + '개가 지워져요',
+      message: '백업을 만든 기기에서 지운 매물이라, 합치면 이 기기에서도 지워져요. 사진도 함께 지워지고 되돌릴 수 없어요.' +
+        (all ? '\n맞는 백업 파일인지, 그 기기에서 정말 모두 지웠는지 확인하세요.' : ''),
+      content: nameList(list),
+      buttons: [
+        { label: '지우고 합치기', value: 'delete', kind: 'danger' },
+        { label: '지우지 않고 합치기', value: 'keep', kind: 'secondary' }, // 위험 대화상자라 첫 초점이 여기로 간다
+        { label: '취소', value: null, kind: 'secondary' }
+      ]
+    }).then(function (r) {
+      if (r.value === 'delete') {
+        var ok = {};
+        list.forEach(function (p) { ok[p.id] = true; }); // 보여 준 매물만 지운다(그사이 늘어난 것은 남김)
+        return ok;
+      }
+      return r.value === 'keep' ? {} : null;
+    });
+  }
 
-    if (mode === 'replace') {
-      // 지금 있는 매물 중 백업에 없는 것은 '지움'으로 표시(다른 탭과 맞추기)
-      candidate.properties.forEach(function (p) { if (!incomingIds[p.id]) candidate.deleted[p.id] = now; });
-      candidate.properties = incoming.properties;
-    } else {
-      incoming.properties.forEach(function (p) {
-        var idx = -1;
-        candidate.properties.forEach(function (x, i) { if (x.id === p.id) idx = i; });
-        if (idx < 0) candidate.properties.push(p);
-        else if ((p.updatedAt || 0) > (candidate.properties[idx].updatedAt || 0)) candidate.properties[idx] = p;
-      });
-    }
-    // 예전에 지운 매물을 백업으로 되살리는 경우: '지움' 표시를 없애고 지금 고친 것으로 본다
-    candidate.properties.forEach(function (p) {
-      if (incomingIds[p.id] && candidate.deleted[p.id]) {
-        delete candidate.deleted[p.id];
-        p.updatedAt = now;
+  /** 백업 파일이 어디서 언제 만들어졌는지: "iPad에서 10월 9일 21:10에 만든 백업" (1.2.x 백업은 기기 이름이 없음) */
+  function backupOrigin(obj) {
+    var meta = obj && obj.meta && typeof obj.meta === 'object' ? obj.meta : {};
+    var dev = cleanDeviceName(meta.deviceName);
+    var at = numOrNull(meta.createdAt) || Date.parse(str(obj && obj.exportedAt)) || null;
+    var when = at ? shortDateTime(at) + '에 ' : '';
+    if (dev) return dev + '에서 ' + when + '만든 백업';
+    return when ? when + '만든 백업' : '만든 때를 알 수 없는 백업';
+  }
+
+  /**
+   * 합친 뒤 같은 매물로 보이는 쌍(1.3.1): 이 기기에 있던 매물과 백업에서 새로 들어온 매물의 매물번호나 링크가 같으면.
+   * 두 기기에서 같은 매물을 따로 "코드로 매물 추가"하면 id 가 달라 둘 다 남는다. 결과 창에서 알려 준다
+   */
+  function crossDuplicates(before, props) {
+    if (!IMP) return [];
+    var olds = [];
+    var news = [];
+    props.forEach(function (p) { (hasOwn(before, p.id) ? olds : news).push({ p: p, info: IMP.dupInfo(p) }); });
+    var out = [];
+    news.forEach(function (n) {
+      for (var i = 0; i < olds.length; i++) {
+        var by = IMP.sameListing(n.info, olds[i].info);
+        if (by === 'a' || by === 'u') {
+          var a = olds[i].p.name || '이름 없는 매물';
+          var b = n.p.name || '이름 없는 매물';
+          out.push({ id: n.p.id, name: a === b ? a + ' (2개)' : a + ' · ' + b });
+          return;
+        }
       }
     });
+    return out;
+  }
+
+  /**
+   * 불러오기. 새 기록을 먼저 저장소에 써 보고, 성공했을 때만 메모리의 state 를 바꾸고 사진을 정리한다.
+   * (저장이 실패했는데 사진부터 지우는 일이 없도록)
+   * - 합치기(1.3.0): merge.js mergeStates. 항목 단위로 합치고, 양쪽 삭제 표시를 지운 시각과 비교해 반영한다.
+   *   info.allowDelete(1.3.1): 확인 창에서 지워도 된다고 한 매물만 지운다.
+   * - 덮어쓰기: 매물 목록을 백업으로 바꾼다. 1.3.1: 지금 매물은 localDeleted(이 기기 초기화)로 표시해 이 기기의 다른 탭만
+   *   맞추고, 백업에 실어 다른 기기로 보내지 않는다(deleted 에 넣으면 다른 기기 [합치기]에서 그 기기 매물까지 지워짐).
+   * info: { legacy(예전 버전 매물 수), photoCount(백업 속 사진 수), allowDelete }
+   */
+  function doImport(mode, incoming, photos, info) {
+    info = info || {};
+    if (mode === 'merge' && !MG) {
+      alertDialog('합치지 못했어요', '합치기에 필요한 앱 파일(merge.js)을 불러오지 못했어요. 인터넷에 연결한 뒤 새로고침하고 다시 해 주세요. 지금 기록은 그대로 두었어요.');
+      return Promise.resolve();
+    }
+    var candidate;
+    var report = null;
+    var dups = [];
+
+    if (mode === 'replace') {
+      pullFromStorage(); // 다른 탭이 방금 쓴 내용까지 포함해서 계산
+      var now = Date.now();
+      candidate = normalizeState(JSON.parse(JSON.stringify(state)));
+      candidate.ui = Object.assign({}, state.ui); // 이 기기 설정(기기 이름 등)은 그대로
+      // 지금 매물은 모두 "이 기기 초기화"로 표시: 다른 탭의 예전 사본을 버리게(그 시각은 매물의 마지막 변경보다 나중)
+      var stamp = now;
+      candidate.properties.forEach(function (p) { stamp = stampAfter(stamp, p.updatedAt); });
+      candidate.properties.forEach(function (p) { candidate.localDeleted[p.id] = stamp; });
+      candidate.properties = incoming.properties;
+      // 예전에 지운 매물을 백업으로 되살리는 경우: '지움' 표시를 없애고 지금 고친 것으로 본다(지운 시각보다 늘 나중)
+      candidate.properties.forEach(function (p) {
+        if (candidate.deleted[p.id]) {
+          p.updatedAt = stampAfter(now, p.updatedAt, candidate.deleted[p.id]);
+          delete candidate.deleted[p.id];
+        }
+      });
+    } else {
+      var merged = computeMerge(incoming, info.allowDelete);
+      candidate = merged.state;
+      report = merged.report;
+      dups = crossDuplicates(merged.before, candidate.properties);
+    }
 
     if (!tryWriteState(candidate)) {
       alertDialog('불러오지 못했어요', '저장 공간이 부족하거나 저장이 막혀 있어요. 지금 기록과 사진은 그대로 두었어요. 사진 없이 만든 백업 파일로 다시 해 보세요.');
@@ -3271,18 +3642,75 @@
       : importPhotos(photos, true);
     toast('사진을 넣는 중…', { duration: 0 });
     return photoStep.then(function (added) {
-      var msg = mode === 'replace'
-        ? '백업으로 바꿨어요: 매물 ' + state.properties.length + '개'
-        : '합쳤어요: 매물 ' + before + '개 → ' + state.properties.length + '개';
-      toast(msg + (added ? ', 사진 ' + added + '장' : ''), { duration: 4000 });
       if (view.name === 'settings') renderSettings();
+      if (mode === 'replace') {
+        toast('백업으로 바꿨어요: 매물 ' + state.properties.length + '개' + (added ? ', 사진 ' + added + '장' : ''), { duration: 4000 });
+        focusImportCard();
+        return;
+      }
+      hideToast();
+      if (report.deleted) cleanDeletedPhotos(); // 백업을 만든 기기에서 지운 매물의 사진도 이 기기에서 정리
+      // 다시 그린 설정 화면 위에 결과를 띄우고, 닫으면 "백업 불러오기" 제목으로 초점을 옮긴다(예전 버튼은 사라졌으므로)
+      return showMergeResult(report, added, { dups: dups, legacy: info.legacy, photoCount: info.photoCount }).then(focusImportCard);
     });
+  }
+
+  /** 불러오기를 마친 뒤 설정 화면의 "백업 불러오기" 제목에 초점(VoiceOver 가 제자리에서 이어 읽게) */
+  function focusImportCard() {
+    if (view.name !== 'settings') return;
+    var t = document.getElementById('set-import');
+    if (!t) return;
+    t.setAttribute('tabindex', '-1');
+    try { t.focus(); } catch (e) { /* 무시 */ }
+  }
+
+  /**
+   * [합치기] 결과 대화상자: 추가·합침·삭제·사진 수와, 지운 뒤 고친 매물·되살린 매물 등의 이름 목록.
+   * extra: { dups(같은 매물로 보이는 쌍), legacy(예전 버전 앱이 쓴 매물 수), photoCount(백업 속 사진 수) }
+   */
+  function showMergeResult(rep, photosAdded, extra) {
+    extra = extra || {};
+    var dups = extra.dups || [];
+    var added = rep.added + rep.revived.length;
+    var mergedN = rep.merged + rep.updated;
+    var sameHere = !added && !mergedN && !rep.deleted && !photosAdded; // 이 기기 기록은 그대로
+    var notes = rep.keptAfterDelete.length + rep.keptLocal.length + rep.revived.length + rep.skipped.length + dups.length; // 따로 알려 줄 매물
+    function group(cls, title, desc, list) {
+      if (!list.length) return null;
+      return h('div', { class: 'merge-group ' + cls },
+        h('h3', { class: 'merge-group-title', text: title + ' ' + list.length + '개' }),
+        h('p', { class: 'small', text: desc }),
+        nameList(list));
+    }
+    var content = h('div', { class: 'merge-result' },
+      h('p', { class: 'merge-sum' },
+        h('span', { text: '추가 ' + added }), ' · ',
+        h('span', { text: '합침 ' + mergedN + (mergedN && rep.items ? '(항목 ' + rep.items + '개)' : '') }), ' · ',
+        h('span', { text: '삭제 ' + rep.deleted }), ' · ',
+        h('span', { text: '사진 ' + (photosAdded || 0) + '장' })),
+      // 이 기기는 그대로지만 이 기기에만 있는 내용이 있으면 "백업과 같았다"고 하지 않는다
+      sameHere ? h('p', { class: 'small muted', text: notes || rep.incomingBehind ? '이 기기 기록은 그대로예요.' : '바뀐 것이 없어요. 이미 백업과 같은 기록이었어요.' }) : null,
+      extra.legacy ? h('div', { class: 'dlg-warn' },
+        h('strong', { text: '예전 버전 앱에서 만든 백업이었어요' }),
+        h('p', { text: '항목별로 정확히 합치지 못했을 수 있어요. 그 기기를 업데이트한 뒤 새로 백업해 다시 맞춰 주세요.' })) : null,
+      group('is-kept', '지운 뒤 고친 매물', '백업을 만든 기기에서는 지웠지만, 이 기기에서 그 뒤에 고쳐서 남겨 뒀어요. 필요 없으면 직접 지워 주세요.', rep.keptAfterDelete),
+      group('is-kept', '지우지 않고 남긴 매물', '백업을 만든 기기에서는 지운 매물이에요. 그 기기에도 다시 넣으려면 여기서 백업 파일을 만들어 그 기기에서 [합치기] 하세요. 필요 없으면 직접 지워 주세요.', rep.keptLocal),
+      group('is-revived', '되살린 매물', '이 기기에서 지웠지만, 백업을 만든 기기에서 그 뒤에 고쳐서 다시 넣었어요.', rep.revived),
+      group('', '지운 매물', '백업을 만든 기기에서 지운 매물이라 여기서도 지웠어요.', rep.removed),
+      group('', '넣지 않은 매물', '이 기기에서 지운 매물이라 넣지 않았어요. 그 기기에서도 지우려면 여기서 백업 파일을 만들어 그 기기에서 [합치기] 하세요.', rep.skipped),
+      group('is-kept', '같은 매물로 보이는 것', '두 기기에서 따로 추가한 같은 매물로 보여요(매물번호나 링크가 같음). 하나를 지우기 전에 양쪽의 체크 기록과 사진을 확인하세요. 지운 쪽의 기록과 사진은 함께 사라져요.', dups),
+      extra.photoCount === 0 ? h('p', { class: 'small muted', text: '이 백업에는 사진이 없어요. 사진도 옮기려면 그 기기에서 "사진도 함께 넣기"를 켜고 백업하세요.' }) : null,
+      rep.incomingBehind
+        ? h('p', { class: 'small muted', text: '이 기기에만 있던 내용도 있어요. 백업을 만든 기기도 맞추려면 여기서 백업 파일을 만들어 그 기기에서 [합치기] 하세요.' })
+        : (sameHere ? null : h('p', { class: 'small muted', text: '이제 이 기기 기록이 백업과 같아요.' }))
+    );
+    return openDialog({ title: sameHere && !notes ? '합쳤어요 · 바뀐 것 없음' : '합쳤어요', content: content, buttons: [{ label: '확인', value: true }] });
   }
 
   function wipeAll() {
     confirmDialog({
       title: '모든 기록을 지울까요?',
-      message: '매물 ' + state.properties.length + '개와 체크 기록, 사진이 이 기기에서 모두 지워져요. 지우기 전에 백업을 권해요.',
+      message: '매물 ' + state.properties.length + '개와 체크 기록, 사진이 이 기기에서 모두 지워져요. 다른 기기의 기록은 그대로예요(그 기기 백업을 [합치기] 하면 그 기록이 다시 들어와요). 지우기 전에 백업을 권해요.',
       confirmText: '다음', danger: true
     }).then(function (ok) {
       if (!ok) return;
@@ -3295,12 +3723,19 @@
         if (!ok2) return;
         pullFromStorage(); // 다른 탭에서 방금 추가한 매물까지 지운 것으로 표시
         var ui = state.ui;
-        var del = Object.assign({}, state.deleted);
-        var now = Date.now();
-        state.properties.forEach(function (p) { del[p.id] = now; });
+        var del = Object.assign({}, state.deleted); // 그 전에 하나씩 지운 매물의 표시는 그대로(다른 기기에도 전함)
+        var ld = Object.assign({}, state.localDeleted);
+        // 1.3.1: 전체 삭제는 "이 기기 초기화"라 localDeleted 에만 남긴다. 이 기기의 다른 탭이 예전 기록을 다시 써 넣지 않게
+        // 하되, 백업에는 넣지 않아 다른 기기 [합치기]에서 그 기기 매물이 지워지지 않는다(시각은 매물의 마지막 변경보다 나중)
+        var stamp = Date.now();
+        state.properties.forEach(function (p) { stamp = stampAfter(stamp, p.updatedAt); });
+        state.properties.forEach(function (p) { ld[p.id] = stamp; });
         state = emptyState(); // goneKeys(지운 매물 열쇠)도 비운다: 처음부터 새로 시작
-        state.deleted = del; // 다른 탭이 예전 기록을 다시 써 넣지 않도록
+        state.deleted = del;
+        state.localDeleted = ld;
         state.ui.dismissedInstallTip = ui.dismissedInstallTip;
+        state.ui.deviceName = ui.deviceName; // 기기 이름은 이 기기 설정이라 남긴다
+        state.ui.deviceNameAt = ui.deviceNameAt;
         dirty = true;
         saveNow();
         localRemove(DRAFT_KEY);
@@ -3318,12 +3753,13 @@
     });
   }
 
-  /** 지운 매물의 사진이 남아 있으면(지울 때 저장소 연결이 끊겼던 경우) 조용히 정리한다 */
+  /** 지운 매물의 사진이 남아 있으면(지울 때 저장소 연결이 끊겼던 경우) 조용히 정리한다. 전체 삭제·덮어쓰기로 지운 매물 포함 */
   function cleanDeletedPhotos() {
     if (loadProblem) return; // 기록을 제대로 못 읽었으면 아무것도 지우지 않는다
     var alive = {};
     state.properties.forEach(function (p) { alive[p.id] = true; });
-    var ids = Object.keys(state.deleted).filter(function (id) { return !alive[id]; });
+    var gone = Object.assign({}, state.localDeleted, state.deleted);
+    var ids = Object.keys(gone).filter(function (id) { return !alive[id]; });
     var chain = Promise.resolve();
     ids.forEach(function (id) {
       chain = chain.then(function () { return Photos.removeByProperty(id); });
@@ -3674,7 +4110,8 @@
           askPrice: p.askPrice, realPrice: p.realPrice, agentName: p.agentName, agentPhone: p.agentPhone,
           memo: memo, sourceUrl: p.sourceUrl, articleNo: p.articleNo, confirmedAt: p.confirmedAt,
           status: 'review', createdAt: now, updatedAt: now - i, // 코드 순서대로 목록 맨 위에
-          importedAt: now, source: IMP.SOURCE_ID
+          importedAt: now, source: IMP.SOURCE_ID,
+          fieldsAt: {} // 새 매물(예전 기록이 아님)
         });
       });
       Array.prototype.unshift.apply(state.properties, made);
