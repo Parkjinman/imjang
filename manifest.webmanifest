@@ -1,0 +1,21 @@
+{
+  "id": "./",
+  "name": "임장 체크리스트",
+  "short_name": "임장체크",
+  "description": "아파트 매수 전, 등기부등본 확인부터 현장 방문(임장), 계약 전 재확인까지 순서대로 기록하는 체크리스트",
+  "lang": "ko",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2F5F6",
+  "theme_color": "#0F4C5C",
+  "categories": ["education", "productivity", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/apple-touch-icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

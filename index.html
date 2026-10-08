@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>임장 체크리스트</title>
+  <meta name="description" content="아파트 매수 전, 등기부등본 확인부터 현장 방문(임장), 계약 전 재확인까지 순서대로 기록하는 체크리스트">
+
+  <!-- iPhone 홈 화면 앱(PWA) 설정 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="임장체크">
+  <meta name="application-name" content="임장체크">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#0F4C5C" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0A2F38" media="(prefers-color-scheme: dark)">
+
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+
+  <!-- 순서 중요: 체크리스트 내용(data.js) → 가져오기 코드 해석기(import-parser.js) → 앱(app.js). file:// 로 열어도 되도록 모듈이 아닌 일반 스크립트 -->
+  <script>window.__bootFail = [];</script>
+  <script defer src="data.js" onerror="__bootFail.push('data.js')"></script>
+  <script defer src="import-parser.js" onerror="__bootFail.push('import-parser.js')"></script>
+  <script defer src="app.js" onerror="__bootFail.push('app.js')"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar" id="topbar">
+      <div class="tb-left"></div>
+      <h1 class="tb-title">임장 체크리스트</h1>
+      <div class="tb-right"></div>
+    </header>
+
+    <div class="save-error" id="save-error" role="alert" hidden></div>
+
+    <main class="main" id="main" tabindex="-1">
+      <noscript>
+        <div class="card">
+          <p>이 체크리스트는 자바스크립트가 켜져 있어야 동작해요. Safari 설정에서 JavaScript 를 켜 주세요.</p>
+        </div>
+      </noscript>
+      <p class="loading" id="boot-msg">불러오는 중…</p>
+    </main>
+
+    <nav class="tabbar" id="tabbar" aria-label="주요 메뉴"></nav>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div id="overlay-root"></div>
+
+  <!-- 시작 실패 안내: app.js 가 화면을 그리면 #boot-msg 가 사라진다. 5초 뒤에도 남아 있으면 원인과 여는 방법을 보여 준다.
+       styles.css 도 못 불러왔을 수 있어서 스타일은 인라인으로 둔다. -->
+  <script>
+    setTimeout(function () {
+      var msg = document.getElementById('boot-msg');
+      if (!msg) return;
+      var isWeb = location.protocol === 'http:' || location.protocol === 'https:';
+      var failed = (window.__bootFail || []).join(', ');
+      var box = document.createElement('div');
+      box.setAttribute('role', 'alert');
+      box.style.cssText = 'margin:16px;padding:16px 18px;border-radius:14px;background:#FDECEA;color:#7A1F14;font:16px/1.55 -apple-system,"Apple SD Gothic Neo",sans-serif;text-align:left';
+      var title = document.createElement('p');
+      title.style.cssText = 'margin:0 0 8px;font-weight:700;font-size:17px';
+      title.textContent = '앱을 시작하지 못했어요';
+      box.appendChild(title);
+      var lines = isWeb
+        ? ['앱 파일' + (failed ? '(' + failed + ')' : '') + '을 받지 못했어요.',
+           '인터넷 연결이나, Mac 에서 켠 서버가 아직 켜져 있는지 확인한 뒤 다시 시도해 주세요.']
+        : ['파일 앱에서 index.html 을 바로 열면 iPhone·iPad 는 같은 폴더의 앱 파일(app.js 등)을 불러오지 못해요.',
+           '웹 주소로 열어 주세요.',
+           '① 같은 Wi-Fi: Mac 터미널에서 "cd ~/Documents/임장체크리스트 && python3 -m http.server 8765" 실행 → iPad Safari 에서 http://<Mac IP>:8765',
+           '② 계속 쓰려면: GitHub Pages 같은 https 주소에 올려 Safari 로 열고 홈 화면에 추가',
+           '자세한 방법은 폴더의 README.md 에 있어요.'];
+      lines.forEach(function (t) {
+        var p = document.createElement('p');
+        p.style.cssText = 'margin:0 0 6px';
+        p.textContent = t;
+        box.appendChild(p);
+      });
+      if (isWeb) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = '다시 시도';
+        b.style.cssText = 'margin-top:8px;min-height:44px;padding:0 18px;border:0;border-radius:10px;background:#0F4C5C;color:#fff;font:600 16px -apple-system,sans-serif';
+        b.onclick = function () { location.reload(); };
+        box.appendChild(b);
+      }
+      msg.replaceWith(box);
+    }, 5000);
+  </script>
+</body>
+</html>
