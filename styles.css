@@ -1208,7 +1208,52 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
 .dlg-warn > * + * { margin-top: 4px; }
 #set-import:focus, #set-import:focus-visible { outline: none; } /* 불러오기를 마친 뒤 프로그램으로 옮긴 초점(제목). 상단 제목(.tb-title)과 같게 */
 
-/* ---------- 상단 바 버전 표시 (1.3.2) ---------- */
+/* =========================================================
+   여러 매물 지우기: 홈 선택 모드([선택] → 체크 → [N개 삭제]), 지우기 확인
+   ========================================================= */
+.list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 4px 2px 10px; }
+.list-head .h2 { margin: 0; }
+.list-head .btn { flex: none; }
+/* 선택 모드 카드: 링크가 아니라 카드 아무 곳을 누르면 체크가 바뀐다 */
+.pcard.pcard-sel { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; -webkit-user-select: none; user-select: none; }
+.pcard.pcard-sel > * + * { margin-top: 0; }
+.pcard-body { flex: 1; min-width: 0; }
+.pcard-body > * + * { margin-top: 10px; }
+.sel-check { flex: none; width: 24px; height: 24px; margin: 3px 0 0; accent-color: var(--teal); cursor: pointer; }
+.pcard.pcard-sel.is-picked { border-color: var(--teal); background: color-mix(in srgb, var(--teal-soft) 60%, var(--card)); opacity: 1; }
+/* 화면 아래(탭 바 위)에 붙는 [N개 삭제] 바 */
+.sel-bar {
+  position: sticky;
+  bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 10px);
+  z-index: 5;
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: 0 6px 22px rgba(10, 40, 50, 0.18);
+}
+.del-confirm > * + * { margin-top: 10px; }
+/* 토스트: 글 길이만큼 넓게(left:50% 때문에 화면 반 폭에서 줄이 바뀌던 것), [되돌리기] 같은 버튼 글은 한 줄로 */
+.toast { width: max-content; }
+.toast-btn { flex: none; white-space: nowrap; }
+/* 선택 모드에서는 [N개 삭제] 바를 가리지 않게 토스트를 그 위로 올린다 */
+.app:has(.sel-bar) ~ .toast { bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 96px); }
+
+/* =========================================================
+   1.4.0: 네이버 매물 화면 글 붙여넣기(가져오기 화면의 방법 2, iPad 단축어 안내, 네이버 글 주의)
+   ========================================================= */
+.imp-way { font-size: 0.9412rem; font-weight: 800; color: var(--teal-ink); padding-top: 6px; }
+.card > .imp-way:not(:first-child) { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.imp-sc { display: grid; gap: 8px; padding: 2px 0 6px; }
+.imp-sc-steps { padding-left: 1.4em; display: grid; gap: 8px; font-size: 0.9412rem; }
+.imp-sc-steps li > * + * { margin-top: 6px; }
+.imp-sc-steps .btn { margin-top: 6px; }
+.imp-sc-code { max-height: none; margin-top: 6px; word-break: normal; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; } /* 코드는 공백에서 먼저 줄을 바꾼다 */
+.imp-sc-title { font-weight: 800; font-size: 0.9412rem; margin-top: 4px; }
+.imp-naver { margin: 0 0 12px; scroll-margin-top: calc(var(--topbar-h) + var(--safe-top) + 12px); }
+.imp-naver p { color: var(--text); }
+
+/* ---------- 상단 바 버전 표시 (1.3.2. 배포 폴더에서 먼저 나간 것을 1.4.0에서 옮김) ---------- */
 .tb-center { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.15; }
 .tb-center .tb-title { max-width: 100%; }
 .tb-ver { font-size: 11px; font-weight: 500; letter-spacing: 0.02em; opacity: 0.72; margin-top: 1px; white-space: nowrap; }
@@ -1218,5 +1263,14 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
   font: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
 }
 .tb-ver-update:focus-visible { outline: 2px solid #FFC59E; outline-offset: 2px; }
-/* 토스트 버튼 글자가 한 글자씩 줄바꿈되지 않게 */
-.toast-btn { white-space: nowrap; flex-shrink: 0; }
+
+/* ---------- 1.4.1: 되돌리기 줄(홈 맨 위), 지우기 확인의 매물 정보 ---------- */
+.undo-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 0 0 12px; padding: 8px 8px 8px 14px;
+  border-radius: var(--radius-sm); background: var(--card-2); border: 1px solid var(--line);
+  font-size: 0.9412rem; font-weight: 700;
+}
+.undo-bar p { min-width: 0; }
+.undo-bar .btn { flex: none; }
+.merge-names .nl-sub { font-weight: 500; color: var(--muted); }

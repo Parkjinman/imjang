@@ -10,11 +10,11 @@
  *   5. 사진 저장소 (IndexedDB 'imjang-photos')
  *   6. 계산: 진행률·위험 신호·요약
  *   7. 공통 UI: DOM 헬퍼, 아이콘, 진행 막대, 토스트, 대화상자, 사진 크게 보기
- *   8. 화면: 홈 / 매물 폼 / 상세 / 요약 / 비교 / 용어 / 설정 / 코드로 매물 추가(Claude 가져오기 코드)
+ *   8. 화면: 홈 / 매물 폼 / 상세 / 요약 / 비교 / 용어 / 설정 / 코드·글로 매물 추가(Claude 가져오기 코드, 네이버 매물 화면 글)
  *   9. 라우터·시작
  *
  * 보안: 사용자 입력은 항상 textContent(또는 value)로만 화면에 넣는다. innerHTML 은 고정 아이콘 SVG 에만 쓴다.
- * 가져오기 코드 해석은 import-parser.js(window.ImjangImport)가 맡는다. data.js 다음, 이 파일 전에 로드된다.
+ * 가져오기 코드·네이버 매물 글 해석은 import-parser.js(window.ImjangImport)가 맡는다. data.js 다음, 이 파일 전에 로드된다.
  * 두 기록 합치기(백업 [합치기]·여러 탭)는 merge.js(window.ImjangMerge)가 맡는다. import-parser.js 다음, 이 파일 전에 로드된다.
  */
 (function () {
@@ -23,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.3.2';
+  var APP_VERSION = '1.4.1';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -35,13 +35,24 @@
   var TOMBSTONE_KEEP_MS = 180 * 24 * 60 * 60 * 1000; // 지운 매물 표시(다른 탭과 맞추기용) 보관 기간
   var SW_CHECK_INTERVAL_MS = 60 * 60 * 1000;
   var BACKUP_APP_ID = 'imjang-checklist';
-  // 가져오기 코드 해석기(import-parser.js). 파일이 없으면 null 이고, 그때는 '코드로 매물 추가' 화면만 안내로 바뀐다
+  // 가져오기 코드·네이버 매물 글 해석기(import-parser.js). 파일이 없으면 null 이고, 그때는 '코드·글로 매물 추가' 화면만 안내로 바뀐다
   var IMP = window.ImjangImport || null;
-  var IMPORT_TEXT_KEY = 'imjang.import.text'; // 붙여 넣은 글(sessionStorage). Claude 앱에 다녀와도 남게
+  var IMPORT_TEXT_KEY = 'imjang.import.text'; // 붙여 넣은 글(sessionStorage). Claude 앱·네이버에 다녀와도 남게
+  var IMPORT_TITLE = '코드·글로 매물 추가'; // 1.4.0: 가져오기 화면 제목(Claude 코드나 네이버 매물 화면 글을 붙여 넣음)
+  // 1.4.1: 홈 [코드·글로 추가] 버튼의 보충 설명(VoiceOver 이름·마우스 풍선). 보이는 글은 320px 한 줄에 맞게 짧게 둔다
+  var IMPORT_HINT = '네이버 매물 화면 글이나 Claude 코드를 붙여 넣어 매물 추가';
   var GONE_KEYS_MAX = 600; // 지운 매물 열쇠(goneKeys) 최대 개수
   // 두 기록 합치기(merge.js). 파일이 없으면 null 이고, 그때는 탭끼리 매물 단위로 합치고(1.2.x 방식) 백업 [합치기]만 막는다
   var MG = window.ImjangMerge || null;
   var DEVICE_NAME_MAX = 20; // 기기 이름 최대 글자 수
+  var UNDO_MS = 10000;      // 매물을 지운 뒤 [되돌리기]를 누를 수 있는 시간. 사진은 이 시간이 지난 뒤에 지운다
+  // 1.4.1: [되돌리기] 토스트나 홈의 되돌리기 줄에 초점·손가락이 있으면 기다린다(VoiceOver·키보드로 닿을 시간). 최대 이만큼
+  var UNDO_HOLD_MAX_MS = 45000;
+  // 지운 지 이만큼 안 된 매물의 사진은 남은 사진 정리(cleanDeletedPhotos, 다른 탭 포함)도 건너뛴다. 되돌리기도 이 안에서만
+  // (1.4.0 은 15초. 1.4.1 에서 기다리는 시간이 늘어 1분)
+  var UNDO_KEEP_MS = 60000;
+  var DIALOG_GUARD_MS = 400; // 1.4.1: 대화상자를 연 직후 이 시간 동안은 버튼·바탕 누름을 무시한다(두 번 눌러 확인 없이 지워지지 않게)
+  var TOAST_RESUME_MS = 4000; // 1.4.1: 멈춰 둔 토스트에서 초점·손가락이 떠나면 적어도 이만큼 더 보여 준다
 
   var STATUSES = [
     { id: 'review', label: '검토 중' },
@@ -1232,11 +1243,15 @@
 
   // ---- 토스트 ----
   var toastTimer = null;
-  /** opts: { action: { label, fn }, duration(ms, 0 이면 직접 닫을 때까지) } */
+  var toastSeq = 0; // 토스트를 띄울 때마다 늘어나는 번호. 내가 띄운 토스트(되돌리기 등)가 아직 떠 있는지 알 때 쓴다
+  var toastEnd = 0;     // 1.4.1: 지금 토스트가 저절로 사라질 시각(0: 직접 닫을 때까지)
+  var toastHeldLeft = -1; // 1.4.1: 멈춰 둔 토스트의 남은 시간(ms). -1 이면 멈추지 않음
+  /** opts: { action: { label, fn }, duration(ms, 0 이면 직접 닫을 때까지) }. 결과: 이 토스트의 번호(toastSeq) */
   function toast(msg, opts) {
     opts = opts || {};
     var el = $('#toast');
-    if (!el) return;
+    if (!el) return 0;
+    toastSeq++;
     el.textContent = '';
     el.append(h('span', { text: msg }));
     if (opts.action) {
@@ -1249,12 +1264,45 @@
     el.classList.toggle('has-action', !!opts.action);
     el.classList.add('show');
     clearTimeout(toastTimer);
-    if (opts.duration !== 0) toastTimer = setTimeout(hideToast, opts.duration || 2800);
+    toastHeldLeft = -1;
+    toastEnd = 0;
+    if (opts.duration !== 0) startToastTimer(opts.duration || 2800);
+    return toastSeq;
+  }
+  function startToastTimer(ms) {
+    clearTimeout(toastTimer);
+    toastEnd = Date.now() + ms;
+    toastTimer = setTimeout(hideToast, ms);
   }
   function hideToast() {
     clearTimeout(toastTimer);
+    toastHeldLeft = -1;
+    toastEnd = 0;
     var el = $('#toast');
     if (el) el.classList.remove('show', 'has-action');
+  }
+  /** 지금 떠 있는 토스트의 번호(없으면 0) */
+  function shownToast() {
+    var el = $('#toast');
+    return el && el.classList.contains('show') ? toastSeq : 0;
+  }
+  /**
+   * 1.4.1: 버튼이 있는 토스트([되돌리기] 등)에 초점이나 손가락(포인터)이 있으면 저절로 사라지지 않게 멈추고,
+   * 떠나면 남은 시간(적어도 TOAST_RESUME_MS)만큼 더 보여 준다. VoiceOver·키보드로 버튼까지 가는 사이에 사라지지 않게
+   */
+  function holdToast(on) {
+    var el = $('#toast');
+    if (!el || !el.classList.contains('show') || !el.classList.contains('has-action')) return;
+    if (on) {
+      if (toastHeldLeft >= 0 || !toastEnd) return; // 이미 멈춤, 또는 직접 닫는 토스트
+      toastHeldLeft = Math.max(0, toastEnd - Date.now());
+      clearTimeout(toastTimer);
+      toastTimer = null;
+    } else if (toastHeldLeft >= 0) {
+      var left = toastHeldLeft;
+      toastHeldLeft = -1;
+      startToastTimer(Math.max(left, TOAST_RESUME_MS));
+    }
   }
 
   // ---- 대화상자 ----
@@ -1280,11 +1328,15 @@
    * opts: { title, message, content(Node), input: { placeholder, value, label, match, multiline },
    *         buttons: [{ label, value, kind: 'primary'|'danger'|'danger-ghost'|'secondary'|'accent', needsMatch, action, keepOpen }] }
    *   'danger-ghost' 은 위험하지만 주 버튼이 아닌 동작(테두리만 빨강). 첫 초점은 'danger' 일 때만 취소로 간다
+   * 1.4.1: 연 뒤 DIALOG_GUARD_MS(0.4초) 동안은 버튼·바탕 누름을 무시한다. 폭이 좁으면 하단 시트의 [지우기]가 방금 누른
+   *   [N개 삭제]와 같은 자리에 떠서, 두 번 빠르게 누르면 이름 목록을 보기도 전에 지워졌다
    */
   function openDialog(opts) {
     return new Promise(function (resolve) {
       var root = $('#overlay-root');
       var prevFocus = document.activeElement;
+      var openedAt = Date.now();
+      function tooSoon() { return Date.now() - openedAt < DIALOG_GUARD_MS; }
       var titleId = 'dlg-' + uid();
       var msgId = titleId + '-msg';
       var inputEl = null;
@@ -1338,6 +1390,7 @@
         var cls = { danger: 'btn-danger', 'danger-ghost': 'btn-danger-ghost', secondary: 'btn-ghost', accent: 'btn-accent' }[b.kind] || '';
         var btn = h('button', { type: 'button', class: 'btn btn-block ' + cls }, b.label);
         btn.addEventListener('click', function () {
+          if (tooSoon()) return; // 대화상자를 연 누름이 한 번 더 들어온 것
           if (b.action) b.action(); // 공유·복사처럼 사용자 동작 안에서 바로 실행해야 하는 일
           if (!b.keepOpen) finish(b.value === undefined ? true : b.value);
         });
@@ -1350,7 +1403,7 @@
           matchBtns.forEach(function (b) { b.disabled = !ok; });
         });
       }
-      overlay.addEventListener('click', function (e) { if (e.target === overlay) cancel(); });
+      overlay.addEventListener('click', function (e) { if (e.target === overlay && !tooSoon()) cancel(); });
       document.addEventListener('keydown', onKey, true);
       openDialogs.push(cancel);
       root.append(overlay);
@@ -1453,7 +1506,10 @@
     return m;
   }
 
-  /** 상단 바 제목 아래 앱 버전. 새 버전을 받아 두었으면 누르면 바로 적용되는 [업데이트] 버튼으로 바뀐다 */
+  /**
+   * 상단 바 제목 아래 앱 버전(1.3.2). 새 버전을 받아 두었으면 누르면 바로 적용되는 [업데이트] 버튼으로 바뀐다.
+   * 1.3.2는 배포 폴더에서 먼저 나갔고, 1.4.0에서 이 폴더로 옮겼다
+   */
   function versionBadge() {
     if (SW.updateReady) {
       return h('button', {
@@ -1477,6 +1533,7 @@
       left.append(h('button', { type: 'button', class: 'tb-btn', 'aria-label': '뒤로 가기', onclick: function () { goBack(o.back); } },
         icon('back'), h('span', { text: '뒤로' })));
     }
+    appendKid(left, o.left); // 뒤로 가기 대신 둘 버튼(홈 선택 모드의 [전체 선택])
     // tabindex=-1: 화면이 바뀌면 이 제목으로 초점을 옮겨 VoiceOver 가 새 화면 이름을 읽게 한다
     bar.append(left, h('div', { class: 'tb-center' },
       h('h1', { class: 'tb-title', id: 'tb-title', tabindex: '-1', text: o.title }),
@@ -1539,7 +1596,13 @@
   }
 
   // ---------------- 홈: 매물 목록 ----------------
-  function propertyCard(p) {
+  function propertyCardClass(p) {
+    var dropped = p.status === 'dropped';
+    return 'pcard' + (dropped ? ' is-dropped' : '') + (!dropped && flagsYes(p, 'stop').length ? ' has-stop' : '');
+  }
+
+  /** 매물 카드 내용(이름·상태·가격·진행·칩). idBase 가 있으면 이름·단위·상태에 id 를 붙인다(선택 모드 체크박스의 이름) */
+  function propertyCardParts(p, idBase) {
     var prog = overallProgress(p);
     var cautions = cautionCount(p);
     var reg = registryResult(p);
@@ -1548,18 +1611,17 @@
     var stops = stopList.length;
     var diff = diffPercent(p.askPrice, p.realPrice);
     var unit = unitText(p);
-    return h('a', {
-      class: 'pcard' + (dropped ? ' is-dropped' : '') + (stops && !dropped ? ' has-stop' : ''),
-      href: '#/p/' + encodeURIComponent(p.id)
-    },
+    var chip = statusChip(p.status);
+    if (idBase) chip.id = idBase + '-st';
+    return [
       h('div', { class: 'pcard-top' },
         h('div', {},
-          h('strong', { class: 'pcard-name', text: p.name }),
-          (unit || p.area) ? h('span', { class: 'pcard-unit', text: [unit, p.area ? '전용 ' + p.area + '㎡' : ''].filter(Boolean).join(' · ') }) : null
+          h('strong', { class: 'pcard-name', id: idBase ? idBase + '-name' : null, text: p.name }),
+          (unit || p.area) ? h('span', { class: 'pcard-unit', id: idBase ? idBase + '-unit' : null, text: [unit, p.area ? '전용 ' + p.area + '㎡' : ''].filter(Boolean).join(' · ') }) : null
         ),
-        statusChip(p.status)
+        chip
       ),
-      h('p', { class: 'pcard-price' },
+      h('p', { class: 'pcard-price', id: idBase ? idBase + '-price' : null },
         p.askPrice ? '호가 ' + formatManwon(p.askPrice) : '호가 입력 안 함',
         diff !== null ? h('span', { class: 'pcard-diff', text: ' · 실거래 대비 ' + pctText(diff) }) : null
       ),
@@ -1572,12 +1634,73 @@
         stops && !dropped ? h('span', { class: 'meta-chip reg-stop', text: stopIsLate(p, stopList) ? '진행 멈춤' : '임장 불필요' }) : null
       ),
       dropped ? h('p', { class: 'pcard-drop', text: '탈락' + (p.dropReason ? ' · ' + p.dropReason : '') }) : null
-    );
+    ];
+  }
+
+  function propertyCard(p) {
+    return h('a', { class: propertyCardClass(p), href: '#/p/' + encodeURIComponent(p.id) }, propertyCardParts(p));
+  }
+
+  // 홈 선택 모드(여러 매물 지우기): { on, ids: { 매물id: true } }.
+  // 다른 탭 동기화로 다시 그려도(tryRefreshView) 유지하고, 다른 화면으로 가거나 지운 뒤에는(onRoute) 끈다
+  var homeSel = { on: false, ids: {} };
+
+  /** 선택 모드를 켜거나([선택]) 끄고([취소]) 홈을 다시 그린다. 켜면 제목("매물 선택")으로, 끄면 [선택] 버튼으로 초점 */
+  function setHomeSelect(on) {
+    homeSel = { on: !!on, ids: {} };
+    var y = window.scrollY;
+    renderHome();
+    window.scrollTo(0, y);
+    var target = on ? document.getElementById('tb-title') : document.querySelector('[data-focus-key="sel-start"]');
+    if (target) { try { target.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+  }
+
+  /**
+   * 선택 모드의 매물 카드: 실제 체크박스 + 카드 내용. 카드 아무 곳을 눌러도 체크가 바뀐다(상세로 가지 않음).
+   * 결과: { el, set(on) }. onPick: 사용자가 체크를 바꿨을 때
+   */
+  function selectCard(p, onPick) {
+    var base = 'sel-' + domId(p.id);
+    var cb = h('input', {
+      type: 'checkbox', class: 'sel-check', id: base, checked: !!homeSel.ids[p.id], 'data-focus-key': 'sel:' + p.id,
+      // 단지명 + 동·호·면적 + 가격 + 상태로 읽는다(같은 단지 매물이 여러 개여도 구분되게. 1.4.1 가격 줄 추가)
+      'aria-labelledby': [base + '-name', (unitText(p) || p.area) ? base + '-unit' : '', base + '-price', base + '-st'].filter(Boolean).join(' ')
+    });
+    var card = h('div', { class: propertyCardClass(p) + ' pcard-sel' + (cb.checked ? ' is-picked' : '') },
+      cb, h('div', { class: 'pcard-body' }, propertyCardParts(p, base)));
+    function set(on) {
+      cb.checked = on;
+      if (on) homeSel.ids[p.id] = true; else delete homeSel.ids[p.id];
+      card.classList.toggle('is-picked', on);
+    }
+    cb.addEventListener('change', function () { set(cb.checked); onPick(); });
+    card.addEventListener('click', function (e) {
+      if (e.target === cb) return; // 체크박스를 직접 누르면 change 가 처리한다
+      set(!cb.checked);
+      onPick();
+    });
+    return { el: card, set: set };
   }
 
   function renderHome() {
+    // 다른 탭 동기화로 다시 그릴 때 초점을 같은 자리(체크박스·선택 버튼)로 되돌리려고 기억해 둔다
+    var ae = document.activeElement;
+    var keepFocus = ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
     newView('home');
-    setTopbar({
+    var props = state.properties.slice().sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+    if (!props.length) homeSel.on = false;
+    var sel = homeSel.on;
+    if (sel) { // 그사이(다른 탭에서) 지워진 매물은 선택에서 뺀다
+      var alive = {};
+      props.forEach(function (p) { alive[p.id] = true; });
+      Object.keys(homeSel.ids).forEach(function (id) { if (!alive[id]) delete homeSel.ids[id]; });
+    }
+    var allBtn = sel ? h('button', { type: 'button', class: 'tb-btn tb-text', 'data-focus-key': 'sel-all' }) : null;
+    setTopbar(sel ? {
+      title: '매물 선택',
+      left: allBtn,
+      actions: [h('button', { type: 'button', class: 'tb-btn tb-text', 'data-focus-key': 'sel-cancel', onclick: function () { setHomeSelect(false); } }, '취소')]
+    } : {
       title: '임장 체크리스트',
       actions: [h('a', { class: 'tb-btn', href: '#/new', 'aria-label': '매물 추가' }, icon('plus'))]
     });
@@ -1585,10 +1708,11 @@
     var main = resetMain();
     appendKid(main, dataWarning());
     appendKid(main, inAppWarning());
-    appendKid(main, installTip());
-    appendKid(main, draftCard());
-
-    var props = state.properties.slice().sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+    if (!sel) {
+      appendKid(main, undoBar()); // 1.4.1: 방금 지운 매물 되돌리기(토스트보다 찾기 쉬운 자리. VoiceOver 는 제목 다음)
+      appendKid(main, installTip());
+      appendKid(main, draftCard());
+    }
 
     if (!props.length) {
       // 홈 화면 앱을 처음 열면 Safari 와 저장 공간이 따로라서 비어 보인다 → 불러오기 안내
@@ -1605,9 +1729,9 @@
         h('p', { class: 'flow-sub', text: '집을 보러 가기 전에 등기부등본부터 봐요. 문제가 있는 집은 보러 갈 필요가 없어요.' }),
         flowList(),
         h('a', { class: 'btn btn-accent btn-block flow-cta', href: '#/new' }, icon('plus'), '첫 매물 추가하기'),
-        h('a', { class: 'btn btn-secondary btn-block', href: '#/import' }, icon('paste'), '코드로 추가'),
+        h('a', { class: 'btn btn-secondary btn-block', href: '#/import', title: IMPORT_HINT, 'aria-label': '코드·글로 추가: ' + IMPORT_HINT }, icon('paste'), '코드·글로 추가'),
         h('p', { class: 'muted small', style: 'text-align:center', text: '중개사에게 동·호수를 받았다면 매물을 추가하고 등기부 체크부터 시작하세요.' }),
-        h('p', { class: 'muted small', style: 'text-align:center', text: '네이버 부동산 매물은 화면을 Claude에게 보내고, 받은 코드로 한 번에 추가할 수 있어요.' })
+        h('p', { class: 'muted small', style: 'text-align:center', text: '네이버 부동산 매물은 상세 화면 글을 복사해 붙여 넣거나, Claude가 준 코드로 한 번에 추가할 수 있어요.' })
       ));
       return;
     }
@@ -1615,28 +1739,82 @@
     var active = props.filter(function (p) { return p.status !== 'dropped'; });
     var dropped = props.filter(function (p) { return p.status === 'dropped'; });
 
-    main.append(h('h2', { class: 'h2', style: 'margin-top:4px' }, '내 매물', h('span', { class: 'count', text: active.length + '개' })));
+    // 선택 모드: 고른 수는 상단 제목과 화면 읽기용 알림 영역(처음부터 둔 빈 영역)에, [N개 삭제]는 화면 아래 고정 바에
+    var cards = [];
+    var live = sel ? h('p', { class: 'sr-only', role: 'status', 'aria-live': 'polite' }) : null;
+    var delBtn = null;
+    function refreshSel(announce) {
+      var n = Object.keys(homeSel.ids).length;
+      var title = document.getElementById('tb-title');
+      if (title) title.textContent = n ? n + '개 선택됨' : '매물 선택';
+      allBtn.textContent = n === props.length ? '선택 해제' : '전체 선택';
+      delBtn.disabled = !n;
+      delBtn.textContent = '';
+      appendKid(delBtn, n ? [icon('trash', 'ic-sm'), n + '개 삭제'] : '지울 매물을 골라 주세요');
+      if (announce) live.textContent = n ? n + '개 선택됨' : '선택한 매물이 없어요';
+    }
+    function cardFor(p) {
+      if (!sel) return propertyCard(p);
+      var c = selectCard(p, function () { refreshSel(true); });
+      cards.push(c);
+      return c.el;
+    }
+
+    appendKid(main, live);
+    main.append(h('div', { class: 'list-head' },
+      h('h2', { class: 'h2' }, '내 매물', h('span', { class: 'count', text: active.length + '개' })),
+      // 여러 매물을 골라 한 번에 지우기(탈락한 매물 포함)
+      sel ? null : h('button', { type: 'button', class: 'btn btn-small btn-ghost', 'data-focus-key': 'sel-start', onclick: function () { setHomeSelect(true); } }, '선택')
+    ));
     if (active.length) {
-      main.append(h('div', { class: 'plist' }, active.map(propertyCard)));
+      main.append(h('div', { class: 'plist' }, active.map(cardFor)));
     } else {
       main.append(h('p', { class: 'muted', text: '검토 중인 매물이 없어요.' }));
     }
-    main.append(h('div', { class: 'btn-row add-row' },
-      h('a', { class: 'btn btn-accent', href: '#/new' }, icon('plus'), '매물 추가'),
-      h('a', { class: 'btn btn-secondary', href: '#/import' }, icon('paste'), '코드로 추가')
-    ));
+    if (!sel) {
+      main.append(h('div', { class: 'btn-row add-row' },
+        h('a', { class: 'btn btn-accent', href: '#/new' }, icon('plus'), '매물 추가'),
+        h('a', { class: 'btn btn-secondary', href: '#/import', title: IMPORT_HINT, 'aria-label': '코드·글로 추가: ' + IMPORT_HINT }, icon('paste'), '코드·글로 추가')
+      ));
+    }
 
     if (dropped.length) {
       main.append(h('h2', { class: 'h2' }, '탈락한 매물', h('span', { class: 'count', text: dropped.length + '개' })));
-      main.append(h('div', { class: 'plist' }, dropped.map(propertyCard)));
+      main.append(h('div', { class: 'plist' }, dropped.map(cardFor)));
     }
 
-    main.append(h('details', { class: 'flow-details card' },
-      h('summary', {}, '올바른 순서 다시 보기'),
-      flowList()
-    ));
-  }
+    if (sel) {
+      delBtn = h('button', {
+        type: 'button', class: 'btn btn-danger btn-block', 'data-focus-key': 'sel-del',
+        onclick: function () {
+          var list = props.filter(function (p) { return homeSel.ids[p.id]; }); // 화면 순서대로
+          if (!list.length) return;
+          confirmDeleteProps(list).then(function (ok) {
+            if (!ok) return;
+            deleteProperties(list);
+            navigate('/', true); // 같은 주소라 다시 그리기만 한다: 선택 모드를 끄고(onRoute) 남은 목록을 그림
+          });
+        }
+      });
+      main.append(h('div', { class: 'sel-bar' }, delBtn));
+      allBtn.addEventListener('click', function () {
+        var all = Object.keys(homeSel.ids).length === props.length; // 모두 골랐으면 [선택 해제], 아니면 [전체 선택]
+        cards.forEach(function (c) { c.set(!all); });
+        refreshSel(true);
+      });
+      refreshSel(false);
+    } else {
+      main.append(h('details', { class: 'flow-details card' },
+        h('summary', {}, '올바른 순서 다시 보기'),
+        flowList()
+      ));
+    }
 
+    if (keepFocus) {
+      var again = document.querySelector('[data-focus-key="' + keepFocus.replace(/["\\]/g, '\\$&') + '"]');
+      if (again) { try { again.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+    }
+  }
   // ---------------- 매물 추가·수정 폼 ----------------
   // 새 매물 폼은 제출 전까지 매물이 없으므로, 입력을 임시 저장(DRAFT_KEY)해 둔다.
   // 전화 걸기·실거래가 찾기로 다른 앱에 다녀오는 사이 iOS 가 앱을 내려도 입력이 남는다.
@@ -1938,26 +2116,206 @@
     return editing && !focusHo ? null : 'focused'; // 새 매물은 단지명, 호수 입력은 호수 칸에 초점을 주므로 제목으로 옮기지 않는다
   }
 
+  // ---------------- 매물 지우기와 되돌리기 ----------------
+  // 수정 화면의 [이 매물 삭제]와 홈 선택 모드의 [N개 삭제]가 같이 쓴다.
+  // 기록은 바로 지우고 한 번 저장한다(삭제 표시 deleted 로 다른 탭·다른 기기 [합치기]에도 전함).
+  // 사진은 [되돌리기]를 누를 수 있는 동안(UNDO_MS) 남겨 두었다가 지운다. 그 전에 앱이 닫히면 다음에 열 때
+  // 남은 사진 정리(cleanDeletedPhotos)가 지운다.
+  // 1.4.1: [되돌리기] 토스트나 홈의 되돌리기 줄(undoBar)에 초점·손가락이 있으면 UNDO_HOLD_MAX_MS 까지 기다린다(pendingTick).
+  // { at, entries: [{ prop, index(목록 위치), deletedAt }], gone: { 열쇠: 지우기 전 시각 | null }, goneNow, timer, toast }
+  var pendingDelete = null;
+
+  /** 되돌리기를 기다리는 중에 사용자가 그 자리를 쓰고 있는지: 그 토스트가 떠 있음(멈춤 포함), 또는 홈 되돌리기 줄에 초점 */
+  function undoInUse(pd, focusOnly) {
+    var a = document.activeElement;
+    var t = $('#toast');
+    var focused = !!(a && ((t && t.contains(a) && pd.toast === shownToast()) || (a.closest && a.closest('.undo-bar'))));
+    if (focusOnly) return focused;
+    return focused || (pd.toast !== 0 && pd.toast === shownToast());
+  }
+
+  /** 되돌리기 시간이 지났는지 본다. 그 자리를 쓰고 있으면(UNDO_HOLD_MAX_MS 까지) 1초 뒤 다시 본다 */
+  function pendingTick(pd) {
+    if (pendingDelete !== pd) return;
+    clearTimeout(pd.timer);
+    if (Date.now() - pd.at < UNDO_HOLD_MAX_MS && undoInUse(pd)) {
+      pd.timer = setTimeout(function () { pendingTick(pd); }, 1000);
+      return;
+    }
+    settlePendingDelete();
+  }
+
+  /** 홈 맨 위의 "방금 매물 N개를 지웠어요 [되돌리기]" 줄(1.4.1). 토스트를 놓쳐도(다른 알림이 덮음, VoiceOver) 되돌릴 수 있게 */
+  function undoBar() {
+    var pd = pendingDelete;
+    if (!pd) return null;
+    var n = pd.entries.filter(function (e) { return !findProp(e.prop.id); }).length;
+    if (!n) return null;
+    return h('div', { class: 'undo-bar', role: 'group', 'aria-label': '방금 지운 매물' },
+      h('p', { text: n > 1 ? '방금 매물 ' + n + '개를 지웠어요' : '방금 매물을 지웠어요' }),
+      h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { restoreDeleted(pd); } }, '되돌리기'));
+  }
+
+  /** 지우기 확인: 이름 목록(5개까지 + "외 N개")과 함께 지워지는 것을 알린다. 위험 대화상자라 첫 초점은 [취소] */
+  function confirmDeleteProps(list, title) {
+    return openDialog({
+      title: title || '매물 ' + list.length + '개를 지울까요?',
+      content: h('div', { class: 'del-confirm' },
+        nameList(list, 5, true),
+        h('p', { text: '체크 기록, 메모, 사진도 함께 지워져요.' })),
+      buttons: [
+        { label: '지우기', value: 'delete', kind: 'danger' },
+        { label: '취소', value: null, kind: 'secondary' }
+      ]
+    }).then(function (r) { return r.value === 'delete'; });
+  }
+
+  /** 수정 화면의 [이 매물 삭제] */
   function deleteProperty(prop) {
-    confirmDialog({
-      title: '이 매물을 삭제할까요?',
-      message: '"' + prop.name + '"의 체크 기록과 사진이 모두 지워지고 되돌릴 수 없어요.',
-      confirmText: '삭제',
-      danger: true
-    }).then(function (ok) {
+    confirmDeleteProps([prop], '이 매물을 지울까요?').then(function (ok) {
       if (!ok) return;
-      state.properties = state.properties.filter(function (p) { return p.id !== prop.id; });
-      // 다른 탭·다른 기기에도 지운 것을 알린다. 이 매물의 마지막 변경(다른 기기에서 받은 것 포함)보다 늘 나중 시각
-      state.deleted[prop.id] = stampAfter(Date.now(), prop.updatedAt);
-      rememberGone(prop, state.deleted[prop.id]); // 같은 매물을 코드로 다시 가져오면 알려 주려고
-      dirty = true;
-      saveNow();
-      // 사진 정리가 실패해도(연결 끊김 등) 다음에 앱을 열 때 지운 매물의 사진을 다시 정리한다(cleanDeletedPhotos)
-      Photos.removeByProperty(prop.id).catch(function (err) { console.warn('사진 정리 실패(다음에 다시 시도)', err); });
-      try { sessionStorage.removeItem('imjang.open.' + prop.id); } catch (e) { /* 무시 */ }
-      toast('매물을 삭제했어요');
+      deleteProperties([prop]);
       navigate('/', true);
     });
+  }
+
+  /**
+   * 매물 여러 개를 한 번에 지운다. 저장은 한 번. 토스트 "N개 지웠어요 [되돌리기]"(UNDO_MS).
+   * 매물마다 삭제 표시(그 매물의 마지막 변경보다 늘 나중 시각, stampAfter)와 지운 매물 열쇠(goneKeys)를 남긴다.
+   * 결과: 지운 수
+   */
+  function deleteProperties(list) {
+    settlePendingDelete(); // 앞서 지운 매물은 되돌리기를 끝내고 사진을 지운다(토스트는 하나뿐이라)
+    var want = {};
+    list.forEach(function (p) { want[p.id] = true; });
+    var entries = [];
+    state.properties.forEach(function (p, i) { if (hasOwn(want, p.id)) entries.push({ prop: p, index: i, deletedAt: 0 }); });
+    if (!entries.length) return 0; // 그사이 다른 탭에서 지워짐
+    var goneBefore = Object.assign({}, state.goneKeys);
+    var now = Date.now();
+    state.properties = state.properties.filter(function (p) { return !hasOwn(want, p.id); });
+    entries.forEach(function (e) {
+      // 다른 탭·다른 기기에도 지운 것을 알린다. 이 매물의 마지막 변경(다른 기기에서 받은 것 포함)보다 늘 나중 시각
+      e.deletedAt = state.deleted[e.prop.id] = stampAfter(now, e.prop.updatedAt);
+      rememberGone(e.prop, e.deletedAt); // 같은 매물을 코드로 다시 가져오면 알려 주려고
+    });
+    // 되돌릴 때 지운 매물 열쇠도 되돌리려고, 이번에 바뀐 열쇠의 앞뒤 값을 남긴다
+    var gone = {};
+    var goneNow = {};
+    Object.keys(state.goneKeys).forEach(function (k) {
+      if (state.goneKeys[k] === goneBefore[k]) return;
+      gone[k] = hasOwn(goneBefore, k) ? goneBefore[k] : null;
+      goneNow[k] = state.goneKeys[k];
+    });
+    dirty = true;
+    saveNow();
+    var pd = { at: Date.now(), entries: entries, gone: gone, goneNow: goneNow, timer: null, toast: 0 };
+    pendingDelete = pd;
+    // 토스트가 사라진 뒤에 사진을 지운다(사라지기 직전에 누른 [되돌리기]와 겹치지 않게 조금 늦게).
+    // 1.4.1: 그때 토스트가 멈춰 있거나 되돌리기 줄에 초점이 있으면 더 기다린다(pendingTick)
+    pd.timer = setTimeout(function () { pendingTick(pd); }, UNDO_MS + 500);
+    var n = entries.length;
+    pd.toast = toast(n > 1 ? n + '개 지웠어요' : '매물을 지웠어요', {
+      duration: UNDO_MS,
+      action: { label: '되돌리기', fn: function () { restoreDeleted(pd); } }
+    });
+    return n;
+  }
+
+  /** 되돌리기를 끝낸다: 아직 지워진 채인 매물의 사진을 지우고, 떠 있는 [되돌리기] 토스트와 홈의 되돌리기 줄을 닫는다 */
+  function settlePendingDelete() {
+    var pd = pendingDelete;
+    if (!pd) return;
+    pendingDelete = null;
+    clearTimeout(pd.timer);
+    // 초점이 사라지는 버튼(토스트·되돌리기 줄)에 있었으면 화면 제목으로 옮긴다
+    var lostFocus = undoInUse(pd, true);
+    if (pd.toast && pd.toast === toastSeq) hideToast();
+    var bar = document.querySelector('.undo-bar');
+    if (bar) bar.remove();
+    if (lostFocus) focusTitle();
+    pd.entries.forEach(function (e) {
+      var id = e.prop.id;
+      if (findProp(id)) return; // 그사이 되살아났다(다른 탭에서 고침 등): 사진을 남긴다
+      sessionRemove('imjang.open.' + id);
+      // 실패해도(연결 끊김 등) 다음에 앱을 열 때 남은 사진 정리(cleanDeletedPhotos)가 다시 지운다
+      Photos.removeByProperty(id).catch(function (err) { console.warn('사진 정리 실패(다음에 다시 시도)', err); });
+    });
+  }
+
+  /**
+   * 앱을 내렸다가 다시 보일 때: 되돌리기 시간이 이미 지났으면 끝낸다(앱이 내려가 있는 동안 타이머가 멈출 수 있음).
+   * 1.4.1: 그 버튼에 초점이 있으면 기다리는 시간(UNDO_HOLD_MAX_MS) 안에서는 남긴다
+   */
+  function expirePendingDelete() {
+    var pd = pendingDelete;
+    if (!pd) return;
+    var age = Date.now() - pd.at;
+    if (age > UNDO_HOLD_MAX_MS || (age > UNDO_MS && !undoInUse(pd, true))) settlePendingDelete();
+  }
+
+  /**
+   * 1.4.1: 방금(UNDO_KEEP_MS 안) 지워 다른 탭에서 [되돌리기]를 기다리고 있을 수 있는 매물 id.
+   * 전체 삭제·[덮어쓰기]가 이 매물도 "이 기기 초기화"(localDeleted)로 표시해, 그 탭이 빈 기록 위에 되살리지 않게 한다(restoreDeleted)
+   */
+  function recentlyDeleted(s) {
+    var now = Date.now();
+    var alive = {};
+    s.properties.forEach(function (p) { alive[p.id] = true; });
+    return Object.keys(s.deleted).filter(function (id) { return !alive[id] && Math.abs(now - s.deleted[id]) < UNDO_KEEP_MS; });
+  }
+
+  /**
+   * [되돌리기]: 지운 매물을 원래 자리에 되살리고 삭제 표시를 지운다. updatedAt 은 지금(삭제 표시보다 늘 나중)으로 올려
+   * "지운 뒤에 고친 매물"로 남게 한다. 그래서 다른 탭이 예전 삭제 표시를 다시 합치거나, 지우기가 실린 백업을 다른 기기에서
+   * [합치기] 해도 다시 지워지지 않는다(deleted[id] 보다 updatedAt 이 나중이면 남김: mergeInto, merge.js mergeStates)
+   */
+  function restoreDeleted(pd) {
+    if (pendingDelete !== pd) return; // 이미 끝났다(사진까지 지움)
+    if (Date.now() - pd.at > UNDO_KEEP_MS) { // 앱을 내렸다가 오래 뒤에 누름: 다른 탭이 사진을 정리했을 수 있다
+      settlePendingDelete();
+      toast('되돌릴 수 있는 시간이 지났어요');
+      return;
+    }
+    pullFromStorage(); // 그사이 다른 탭이 쓴 내용부터 합친다(이미 돌아온 매물을 두 번 넣지 않게)
+    // 1.4.1: 그사이 다른 탭에서 전체 삭제·[덮어쓰기]를 했으면(이 매물도 localDeleted 로 표시됨, 사진 저장소도 비워짐) 되살리지 않는다
+    if (pd.entries.some(function (e) { return (state.localDeleted[e.prop.id] || 0) > e.deletedAt; })) {
+      settlePendingDelete();
+      clearTimeout(refreshTimer);
+      tryRefreshView();
+      var fa = document.activeElement;
+      if (!fa || fa === document.body) focusTitle();
+      toast('다른 창에서 기록을 지우거나 바꿔서 되돌리지 못했어요', { duration: 5000 });
+      return;
+    }
+    pendingDelete = null;
+    clearTimeout(pd.timer);
+    var now = Date.now();
+    var n = 0;
+    pd.entries.slice().sort(function (a, b) { return a.index - b.index; }).forEach(function (e) {
+      var p = findProp(e.prop.id);
+      if (!p) {
+        p = e.prop;
+        state.properties.splice(Math.min(e.index, state.properties.length), 0, p);
+      }
+      p.updatedAt = stampAfter(now, p.updatedAt, e.deletedAt, state.deleted[p.id]);
+      delete state.deleted[p.id];
+      n++;
+    });
+    // 지울 때 남긴 지운 매물 열쇠를 되돌린다. 그사이 바뀐 열쇠(다른 매물을 지움 등)는 그대로 둔다
+    Object.keys(pd.gone).forEach(function (k) {
+      if (state.goneKeys[k] !== pd.goneNow[k]) return;
+      if (pd.gone[k] === null) delete state.goneKeys[k];
+      else state.goneKeys[k] = pd.gone[k];
+    });
+    dirty = true;
+    saveNow();
+    // 지금 화면을 다시 그린다(홈이면 되살린 매물이 다시 보임). 토스트 버튼에 있던 초점은 화면 제목으로
+    clearTimeout(refreshTimer);
+    tryRefreshView();
+    var a = document.activeElement;
+    if (!a || a === document.body || $('#toast').contains(a)) focusTitle();
+    toast(n > 1 ? n + '개를 되돌렸어요' : '매물을 되돌렸어요');
   }
 
   // ---------------- 매물 상세 ----------------
@@ -3108,11 +3466,11 @@
     updateTabbar('settings');
     var main = resetMain();
 
-    // 0) 코드로 매물 추가(Claude 가져오기 코드)
+    // 0) 코드·글로 매물 추가(Claude 가져오기 코드, 네이버 매물 화면 글)
     main.append(h('a', { class: 'link-card set-link', href: '#/import' },
       h('span', { class: 'lc-main' },
-        h('span', { class: 'lc-label', text: '코드로 매물 추가' }),
-        h('span', { class: 'lc-desc', style: 'display:block', text: '네이버 부동산 매물 화면을 Claude에게 보내고, 받은 코드를 붙여 넣어요.' })),
+        h('span', { class: 'lc-label', text: IMPORT_TITLE }),
+        h('span', { class: 'lc-desc', style: 'display:block', text: '네이버 매물 화면 글이나 Claude가 준 코드를 붙여 넣어요.' })),
       icon('paste')));
 
     // 1) 백업 내보내기
@@ -3458,10 +3816,18 @@
     return r;
   }
 
-  /** 대화상자에 넣을 매물 이름 목록(10개까지 + "외 N개") */
-  function nameList(list) {
-    var NAMES_MAX = 10;
-    var names = list.slice(0, NAMES_MAX).map(function (p) { return h('li', { text: p.name || '이름 없는 매물' }); });
+  /**
+   * 대화상자에 넣을 매물 이름 목록(max 개까지, 기본 10개 + "외 N개").
+   * detail(1.4.1, 지우기 확인): 이름 아래에 동·호 · 전용 · 층 · 향 · 호가를 붙인다(같은 단지 매물이 여러 개여도 무엇을 지우는지 보이게)
+   */
+  function nameList(list, max, detail) {
+    var NAMES_MAX = max || 10;
+    var names = list.slice(0, NAMES_MAX).map(function (p) {
+      var name = p.name || '이름 없는 매물';
+      if (!detail) return h('li', { text: name });
+      var sub = [propLine(p), p.askPrice ? '호가 ' + formatManwon(p.askPrice) : ''].filter(Boolean).join(' · ');
+      return h('li', {}, h('span', { class: 'nl-name', text: name }), sub ? h('span', { class: 'nl-sub', text: ' · ' + sub }) : null);
+    });
     if (list.length > NAMES_MAX) names.push(h('li', { class: 'muted', text: '외 ' + (list.length - NAMES_MAX) + '개' }));
     return h('ul', { class: 'merge-names' }, names);
   }
@@ -3619,6 +3985,7 @@
       alertDialog('합치지 못했어요', '합치기에 필요한 앱 파일(merge.js)을 불러오지 못했어요. 인터넷에 연결한 뒤 새로고침하고 다시 해 주세요. 지금 기록은 그대로 두었어요.');
       return Promise.resolve();
     }
+    settlePendingDelete(); // 방금 지운 매물의 [되돌리기]는 끝낸다(불러온 기록 위에 예전 매물을 되살리지 않게)
     var candidate;
     var report = null;
     var dups = [];
@@ -3628,10 +3995,14 @@
       var now = Date.now();
       candidate = normalizeState(JSON.parse(JSON.stringify(state)));
       candidate.ui = Object.assign({}, state.ui); // 이 기기 설정(기기 이름 등)은 그대로
-      // 지금 매물은 모두 "이 기기 초기화"로 표시: 다른 탭의 예전 사본을 버리게(그 시각은 매물의 마지막 변경보다 나중)
+      // 지금 매물은 모두 "이 기기 초기화"로 표시: 다른 탭의 예전 사본을 버리게(그 시각은 매물의 마지막 변경보다 나중).
+      // 1.4.1: 다른 탭에서 방금 지워 [되돌리기]를 기다리는 매물도(그 탭이 되살리지 않게, restoreDeleted)
       var stamp = now;
+      var recent = recentlyDeleted(candidate);
       candidate.properties.forEach(function (p) { stamp = stampAfter(stamp, p.updatedAt); });
+      recent.forEach(function (id) { stamp = stampAfter(stamp, candidate.deleted[id]); });
       candidate.properties.forEach(function (p) { candidate.localDeleted[p.id] = stamp; });
+      recent.forEach(function (id) { candidate.localDeleted[id] = stamp; });
       candidate.properties = incoming.properties;
       // 예전에 지운 매물을 백업으로 되살리는 경우: '지움' 표시를 없애고 지금 고친 것으로 본다(지운 시각보다 늘 나중)
       candidate.properties.forEach(function (p) {
@@ -3740,15 +4111,20 @@
         confirmText: '모두 지우기', danger: true
       }).then(function (ok2) {
         if (!ok2) return;
+        settlePendingDelete(); // 방금 지운 매물은 되돌리지 못하게 끝낸다(사진은 아래에서 모두 비움)
         pullFromStorage(); // 다른 탭에서 방금 추가한 매물까지 지운 것으로 표시
         var ui = state.ui;
         var del = Object.assign({}, state.deleted); // 그 전에 하나씩 지운 매물의 표시는 그대로(다른 기기에도 전함)
         var ld = Object.assign({}, state.localDeleted);
         // 1.3.1: 전체 삭제는 "이 기기 초기화"라 localDeleted 에만 남긴다. 이 기기의 다른 탭이 예전 기록을 다시 써 넣지 않게
         // 하되, 백업에는 넣지 않아 다른 기기 [합치기]에서 그 기기 매물이 지워지지 않는다(시각은 매물의 마지막 변경보다 나중)
+        // 1.4.1: 다른 탭에서 방금 지워 [되돌리기]를 기다리는 매물도 표시한다(그 탭이 빈 기록 위에 되살리지 않게, restoreDeleted)
         var stamp = Date.now();
+        var recent = recentlyDeleted(state);
         state.properties.forEach(function (p) { stamp = stampAfter(stamp, p.updatedAt); });
+        recent.forEach(function (id) { stamp = stampAfter(stamp, state.deleted[id]); });
         state.properties.forEach(function (p) { ld[p.id] = stamp; });
+        recent.forEach(function (id) { ld[id] = stamp; });
         state = emptyState(); // goneKeys(지운 매물 열쇠)도 비운다: 처음부터 새로 시작
         state.deleted = del;
         state.localDeleted = ld;
@@ -3778,7 +4154,16 @@
     var alive = {};
     state.properties.forEach(function (p) { alive[p.id] = true; });
     var gone = Object.assign({}, state.localDeleted, state.deleted);
-    var ids = Object.keys(gone).filter(function (id) { return !alive[id]; });
+    var now = Date.now();
+    var recent = false;
+    var ids = Object.keys(gone).filter(function (id) {
+      if (alive[id]) return false;
+      // 방금 지운 매물(다른 탭에서 [되돌리기]를 기다리는 중일 수 있음)은 사진을 남겨 두고 조금 뒤에 다시 정리한다
+      var t = state.deleted[id];
+      if (t && Math.abs(now - t) < UNDO_KEEP_MS) { recent = true; return false; }
+      return true;
+    });
+    if (recent) setTimeout(cleanDeletedPhotos, UNDO_KEEP_MS);
     var chain = Promise.resolve();
     ids.forEach(function (id) {
       chain = chain.then(function () { return Photos.removeByProperty(id); });
@@ -3786,11 +4171,16 @@
     chain.catch(function (err) { console.warn('지운 매물 사진 정리 실패', err); });
   }
 
-  // ---------------- 코드로 매물 추가 (Claude 가져오기 코드) ----------------
-  // 네이버 부동산은 공식 API 가 없고 브라우저 CORS 때문에 앱이 직접 읽을 수 없다.
-  // 그래서 사용자가 매물 화면(스크린샷·글·링크)을 Claude 채팅에 보내고, Claude 가 답한 "가져오기 코드"(JSON)를 여기에 붙여 넣는다.
-  // 해석 규칙(코드 찾기·값 검사·중복 판단)은 import-parser.js 에 있다. tools/make-import-code.js 도 같은 파일을 쓴다.
+  // ---------------- 코드·글로 매물 추가 (Claude 가져오기 코드, 네이버 매물 화면 글) ----------------
+  // 네이버 부동산은 공식 API 가 없고 브라우저 CORS 때문에 앱이 네이버에 접속해 읽을 수 없다. 그래서 두 가지로 받는다.
+  //  1) 사용자가 매물 화면(스크린샷·글·링크)을 Claude 채팅에 보내고, Claude 가 답한 "가져오기 코드"(JSON)를 붙여 넣는다.
+  //  2) 1.4.0: 네이버 매물 상세 화면의 글을 전체 복사(또는 iPad 단축어로 복사)해 붙여 넣으면 앱이 직접 읽는다(Claude 없이).
+  // 해석 규칙(코드 찾기·네이버 글 읽기·값 검사·중복 판단)은 import-parser.js 에 있다(IMP.parseText: 코드 먼저, 없으면 네이버 글).
+  // tools/make-import-code.js 도 같은 파일을 쓴다.
   // 붙여 넣은 내용은 믿지 않는다: 값은 모두 textContent 로만 보여 주고, [N개 담기]를 눌러야 저장한다.
+
+  // iPad 단축어 '웹 페이지에서 JavaScript 실행'에 넣을 코드: 맨 앞에 주소 한 줄, 그다음 페이지 글 전체
+  var SHORTCUT_JS = "completion('URL: ' + location.href + '\\n' + document.body.innerText);";
 
   /** "c=abc&x=1" 에서 값 하나 */
   function queryParam(query, name) {
@@ -3813,9 +4203,37 @@
       h('p', { class: 'isteps-desc', text: desc }));
   }
 
+  /**
+   * 접히는 안내 "iPad 단축어로 한 번에 복사하기"(1.4.0). Safari 공유 시트에서 페이지 주소와 글 전체를 클립보드에 담는 단축어를
+   * 한 번 만들어 두게 한다. 앱은 단축어를 만들거나 실행하지 않는다(사용자가 단축어 앱에서 직접 만듦)
+   */
+  function shortcutGuide() {
+    function step(kids) { return h('li', {}, kids); }
+    return h('details', { class: 'prompt-box imp-shortcut' },
+      h('summary', {}, 'iPad 단축어로 한 번에 복사하기'),
+      h('div', { class: 'imp-sc' },
+        h('p', { class: 'small', text: '처음 한 번만 만들어 두면, Safari에서 매물 화면을 연 채로 공유 버튼만 눌러 글을 복사할 수 있어요.' }),
+        h('ol', { class: 'imp-sc-steps' },
+          step('단축어 앱을 열고 [+]로 새 단축어를 만들어요. 이름은 "임장체크에 담기".'),
+          step('단축어 정보(ⓘ)에서 "공유 시트에 표시"를 켜고, 받는 입력을 "Safari 웹 페이지"로 해요.'),
+          step([
+            h('span', { text: '동작 "웹 페이지에서 JavaScript 실행"을 넣고, 안의 코드를 모두 지운 뒤 아래 코드를 넣어요.' }),
+            h('pre', { class: 'prompt-text imp-sc-code', text: SHORTCUT_JS }),
+            h('button', {
+              type: 'button', class: 'btn btn-small btn-secondary',
+              onclick: function () { copyText(SHORTCUT_JS, { ok: '단축어 코드를 복사했어요. 단축어 앱에 붙여 넣으세요.', title: '단축어 코드' }); }
+            }, icon('copy', 'ic-sm'), '코드 복사')
+          ]),
+          step('동작 "클립보드에 복사"를 넣어요.'),
+          step('동작 "알림 표시"를 넣고 글을 "복사했어요. 임장체크 앱에서 붙여넣으세요"로 해요.')),
+        h('p', { class: 'imp-sc-title', text: '쓰는 법' }),
+        h('p', { class: 'small', text: 'Safari에서 네이버 매물 상세 화면을 연 채로 공유 → "임장체크에 담기" → 홈 화면의 임장체크 앱 → [코드·글로 추가] → 붙여넣기.' }),
+        h('p', { class: 'small muted', text: '"웹 페이지에서 JavaScript 실행"이 막히면 설정 → 단축어 → 고급 → "스크립트 실행 허용"을 켜요. iPadOS 버전에 따라 메뉴 이름이 조금 다를 수 있어요.' })));
+  }
+
   function renderImport(query) {
     var v = newView('import');
-    setTopbar({ title: '코드로 매물 추가', back: '/' });
+    setTopbar({ title: IMPORT_TITLE, back: '/' });
     updateTabbar('home');
     var main = resetMain();
     appendKid(main, inAppWarning()); // 카카오톡 등 앱 안 브라우저: 기록이 쉽게 지워진다
@@ -3844,10 +4262,11 @@
     // 링크나 지난번 글로 채운 뒤 아직 손대지 않았으면 true. 이때 새로 붙여 넣으면 뒤에 덧붙이지 않고 통째로 바꾼다
     var restored = !!initial;
 
-    // 1) 방법 안내 + 요청문 (딥링크로 열면 접어 두고 미리보기를 먼저 보여 준다)
+    // 1) 방법 안내(Claude 코드 / 네이버 매물 글) + 요청문 + iPad 단축어 (딥링크로 열면 접어 두고 미리보기를 먼저 보여 준다)
     var howBody = [
+      h('h3', { class: 'imp-way', text: '방법 1. Claude에게 코드 받기' }),
       h('ol', { class: 'isteps', role: 'list' },
-        importStep(1, '네이버 부동산 매물 화면을 캡처해요', '글을 복사하거나 매물 링크를 보내도 돼요.'),
+        importStep(1, '네이버 부동산 매물 화면을 캡처해요', '화면 글을 복사해 보내도 돼요. 링크만 보내면 Claude가 읽지 못해요.'),
         importStep(2, 'Claude 앱 채팅에 요청문과 함께 보내요', '[요청문 복사]를 누른 뒤 채팅창에 붙여 넣고, 캡처한 화면을 첨부해요.'),
         importStep(3, 'Claude가 준 코드를 아래에 붙여 넣어요', '답변 전체를 복사해도 돼요. 코드만 찾아 읽어요. 코드가 여러 개면 모두 읽어요.')),
       h('button', {
@@ -3857,12 +4276,20 @@
       h('details', { class: 'prompt-box' },
         h('summary', {}, '요청문 펼쳐 보기'),
         h('pre', { class: 'prompt-text', text: IMP.PROMPT })),
-      h('p', { class: 'small muted', text: '호수는 네이버 부동산에 없어서 담은 뒤 직접 입력해요. Claude가 화면의 숫자를 잘못 읽을 수 있으니 미리보기에서 꼭 확인하세요.' })
+      h('h3', { class: 'imp-way', text: '방법 2. 네이버 매물 글 붙여넣기' }),
+      h('ol', { class: 'isteps', role: 'list' },
+        importStep(1, '네이버 부동산에서 매물 상세 화면을 열어요', 'Safari나 Mac 브라우저에서 매물을 눌러 상세 정보가 보이게 해요.'),
+        importStep(2, '화면 글을 전체 복사해요', 'Mac은 빈 곳을 누르고 ⌘A → ⌘C. iPad는 아래 단축어를 쓰면 한 번에 돼요. 면적 단위를 ㎡로 바꾸고 복사하면 면적이 정확해요.'),
+        importStep(3, '아래 칸에 붙여 넣어요', 'Claude 없이 앱이 바로 읽어요. 옆의 관심·최근 목록이 섞여도 괜찮아요.')),
+      shortcutGuide(),
+      h('p', { class: 'small muted', text: '호수는 네이버 부동산에 없어서 담은 뒤 직접 입력해요. 숫자를 잘못 읽을 수 있으니 미리보기에서 꼭 확인하세요.' })
     ];
-    var howEl = linkMode
-      ? h('details', { class: 'card flow-details imp-how-more' }, h('summary', {}, 'Claude로 매물 정보 가져오는 방법'), howBody)
+    // 1.4.1: 한 번이라도 코드·글로 담은 적이 있으면(가져온 매물이 있음) 안내를 접어 입력 칸 아래로 보낸다(다시 쓸 때 바로 붙여넣기)
+    var returning = !linkMode && state.properties.some(function (p) { return !!p.importedAt; });
+    var howEl = linkMode || returning
+      ? h('details', { class: 'card flow-details imp-how-more' }, h('summary', {}, '매물 정보 가져오는 방법'), howBody)
       : h('section', { class: 'card', 'aria-labelledby': 'imp-how' },
-        h('h2', { class: 'card-title', id: 'imp-how', text: 'Claude로 매물 정보 가져오기' }), howBody);
+        h('h2', { class: 'card-title', id: 'imp-how', text: '매물 정보 가져오기' }), howBody);
 
     // 2) 붙여넣기
     var ta = h('textarea', {
@@ -3877,10 +4304,10 @@
     var clearBtn = h('button', { type: 'button', class: 'btn btn-small btn-ghost', hidden: !initial }, '지우기');
     // 지난번에 붙여 넣은 글을 되살렸을 때(Claude 앱에 다녀오는 사이 페이지가 다시 열려도 남게 보관함): 조용히 채우지 않고 알린다
     var restoredNote = saved ? h('div', { class: 'notice notice-info', role: 'note' },
-      h('strong', { text: '지난번에 붙여 넣은 코드예요' }),
-      h('p', { text: '새 코드를 붙여 넣으면 이 글을 바꿔요. 필요 없으면 [지우기]를 누르세요.' })) : null;
+      h('strong', { text: '지난번에 붙여 넣은 글이에요' }),
+      h('p', { text: '새로 붙여 넣으면 이 글을 바꿔요. 필요 없으면 [지우기]를 누르세요.' })) : null;
     var pasteCard = h('section', { class: 'card', 'aria-labelledby': 'imp-paste' },
-      h('h2', { class: 'card-title', id: 'imp-paste' }, h('label', { for: 'imp-text', text: 'Claude가 준 코드' })),
+      h('h2', { class: 'card-title', id: 'imp-paste' }, h('label', { for: 'imp-text', text: 'Claude 코드나 네이버 매물 글' })),
       linkBad ? h('p', { class: 'notice', role: 'alert', text: '링크 속 코드를 읽지 못했어요. 링크가 잘렸을 수 있어요. Claude 답변의 코드를 복사해 붙여 주세요.' }) : null,
       restoredNote,
       pasteBtn,
@@ -3903,10 +4330,10 @@
             ? '링크는 Safari(또는 앱 안 브라우저)로 열려요. 홈 화면 앱과는 저장 공간이 따로라서, 여기서 담은 매물은 홈 화면 앱에 보이지 않아요.'
             : '여기서 담은 매물은 링크를 연 이 브라우저에만 저장돼요. 다른 기기나 홈 화면 앱에는 보이지 않아요.'
         }),
-        h('p', { text: '[코드 복사]를 누른 뒤, 평소 쓰는 앱의 [코드로 추가]에 붙여 넣으세요.' }),
+        h('p', { text: '[코드 복사]를 누른 뒤, 평소 쓰는 앱의 [코드·글로 추가]에 붙여 넣으세요.' }),
         h('button', {
           type: 'button', class: 'btn btn-small btn-secondary',
-          onclick: function () { copyText(ta.value || linkText, { ok: '코드를 복사했어요. 평소 쓰는 앱의 [코드로 추가]에 붙여 넣으세요.', title: '가져오기 코드' }); }
+          onclick: function () { copyText(ta.value || linkText, { ok: '코드를 복사했어요. 평소 쓰는 앱의 [코드·글로 추가]에 붙여 넣으세요.', title: '가져오기 코드' }); }
         }, icon('copy', 'ic-sm'), '코드 복사'))
     ) : null;
 
@@ -3914,14 +4341,20 @@
     // 상태 줄은 처음부터 화면에 둔 빈 알림 영역(나중에 붙이면 VoiceOver 가 읽지 않을 수 있음). 오류는 따로 role=alert 영역에
     var status = h('div', { class: 'imp-status', role: 'status', 'aria-live': 'polite' });
     var errBox = h('div', { class: 'imp-error', role: 'alert' });
+    // 1.4.0: 네이버 매물 화면 글에서 읽었을 때(앱이 직접 읽어 숫자가 틀릴 수 있음) 미리보기 위에 늘 보이는 주의
+    var naverNote = h('div', { class: 'notice notice-ho imp-naver', hidden: true },
+      h('strong', { text: '네이버 매물 화면 글에서 읽었어요 — 숫자를 꼭 확인하세요' }),
+      h('p', { text: '가격·면적·층이 네이버 화면과 같은지 보고 담으세요. 목록에서 읽은 매물은 면적을 비워 둬요.' }));
     var hint = h('p', { class: 'small muted imp-hint', hidden: true, text: '담은 뒤 호수를 입력하면 등기부를 열람할 수 있어요.' });
     var list = h('div', { class: 'imp-list' });
     var submitBtn = h('button', { type: 'button', class: 'btn btn-block', disabled: true }, '담기');
     var actions = h('div', { class: 'imp-actions', hidden: true }, submitBtn);
-    var resultEl = h('section', { class: 'imp-result', 'aria-label': '미리보기' }, errBox, status, hint, list, actions);
+    var resultEl = h('section', { class: 'imp-result', 'aria-label': '미리보기' }, errBox, naverNote, status, hint, list, actions);
 
-    // 딥링크: 안내 → 미리보기 → 입력 칸 → (접힌) 방법 안내. 보통: 방법 안내 → 입력 칸 → 미리보기
+    // 딥링크: 안내 → 미리보기 → 입력 칸 → (접힌) 방법 안내. 처음: 방법 안내 → 입력 칸 → 미리보기.
+    // 1.4.1 다시 쓰는 사람(가져온 매물이 있음): 입력 칸 → 미리보기 → (접힌) 방법 안내
     if (linkMode) main.append(linkCard, resultEl, pasteCard, howEl);
+    else if (returning) main.append(pasteCard, resultEl, howEl);
     else main.append(howEl, pasteCard, resultEl);
 
     var current = null; // 마지막 해석 결과
@@ -3950,7 +4383,10 @@
       var k = entryKey(e);
       var on = isOn(e);
       var base = 'imp-' + e.index;
-      var size = [p.dong ? p.dong + '동' : '', p.area ? '전용 ' + p.area + '㎡' : '', p.supplyArea ? '공급 ' + p.supplyArea + '㎡' : ''].filter(Boolean).join(' · ');
+      // 1.4.1: 평에서 바꾼 면적은 근삿값이라 "약"을 붙인다(e.approx)
+      var ax = e.approx || {};
+      var size = [p.dong ? p.dong + '동' : '', p.area ? '전용 ' + (ax.area ? '약 ' : '') + p.area + '㎡' : '',
+        p.supplyArea ? '공급 ' + (ax.supplyArea ? '약 ' : '') + p.supplyArea + '㎡' : ''].filter(Boolean).join(' · ');
       var price = [p.askPrice ? '호가 ' + formatManwon(p.askPrice) : '호가 없음', p.tradeType].filter(Boolean).join(' · ');
       var spec = [floorText(p.floor), p.direction].filter(Boolean).join(' · ');
       var agent = [p.agentName, p.agentPhone].filter(Boolean).join(' ');
@@ -4003,6 +4439,8 @@
     function draw() {
       var r = current;
       list.textContent = '';
+      var naver = !!(r && r.ok && r.source === 'naver');
+      naverNote.hidden = !naver;
       if (!r || r.error === 'empty' || !r.ok) {
         setStatus([]);
         setError(r && !r.ok ? r.message : '');
@@ -4013,11 +4451,17 @@
       setError('');
       var offN = r.entries.filter(function (e) { return e.canImport && !e.checked; }).length;
       var dupN = r.entries.filter(function (e) { return e.warnings.some(function (w) { return w.code === 'exists' || w.code === 'gone' || w.code === 'repeat'; }); }).length;
+      // 네이버 상세+목록 글: 경고 없이 기본 해제한 목록 매물
+      var listOffN = r.entries.filter(function (e) { return e.fromList && e.canImport && !e.checked && !e.warnings.length; }).length;
       var lines = [
-        (r.blocks > 1 ? '코드 ' + r.blocks + '개에서 ' : '') + '매물 ' + r.entries.length + '개를 찾았어요',
-        !offN ? '숫자가 화면과 맞는지 확인하고 담으세요.'
-          : dupN === offN ? '이미 있는 매물 ' + dupN + '개는 빼 두었어요. 담을 매물만 체크하세요.'
-            : '확인이 필요한 매물 ' + offN + '개는 체크를 빼 두었어요. 경고를 읽고 담을 매물만 체크하세요.'
+        (naver ? (r.kind === 'code' ? '네이버 글로 만든 코드에서 ' : '네이버 매물 글에서 ') : (r.blocks > 1 ? '코드 ' + r.blocks + '개에서 ' : '')) +
+          '매물 ' + r.entries.length + '개를 찾았어요',
+        // 1.4.1: 상세 화면 글인데 상세 매물을 못 읽음(목록 매물만, 모두 기본 해제)
+        r.detailFailed ? '상세 화면 매물은 읽지 못했어요. 목록에서 읽은 매물만 보여요. 담을 것만 체크하세요.'
+          : !offN ? '숫자가 화면과 맞는지 확인하고 담으세요.'
+          : listOffN === offN ? '상세 화면 매물만 체크해 두었어요. 목록 매물 ' + listOffN + '개는 담을 것만 체크하세요.'
+            : dupN === offN ? '이미 있는 매물 ' + dupN + '개는 빼 두었어요. 담을 매물만 체크하세요.'
+              : '확인이 필요한 매물 ' + offN + '개는 체크를 빼 두었어요. 경고를 읽고 담을 매물만 체크하세요.'
       ];
       if (r.truncated) lines.push('한 번에 ' + IMP.LIMITS.properties + '개까지 담을 수 있어요. 앞의 ' + IMP.LIMITS.properties + '개만 보여 줘요.');
       if (r.skipped) lines.push('읽을 수 없는 항목 ' + r.skipped + '개는 뺐어요.');
@@ -4032,7 +4476,8 @@
     function parseNow() {
       clearTimeout(timer);
       timer = null;
-      current = IMP.parse(ta.value, { existing: state.properties, goneKeys: state.goneKeys });
+      // 1.4.0: 가져오기 코드를 먼저 찾고, 없거나 못 읽으면 네이버 매물 화면 글로 읽는다
+      current = (IMP.parseText || IMP.parse)(ta.value, { existing: state.properties, goneKeys: state.goneKeys });
       draw();
     }
 
@@ -4062,7 +4507,7 @@
       if (!current || current.error === 'empty') return;
       if (current.ok) {
         if (document.activeElement === ta) { try { ta.blur(); } catch (e) { /* 무시 */ } }
-        scrollToEl(status);
+        scrollToEl(naverNote.hidden ? status : naverNote); // 네이버 글이면 "숫자를 꼭 확인하세요"부터 보이게
       } else {
         scrollToEl(errBox);
       }
@@ -4099,7 +4544,7 @@
       pasteBtn.addEventListener('click', function () {
         // 사용자 동작(클릭) 안에서 바로 불러야 iOS 가 허락한다
         navigator.clipboard.readText().then(function (t) {
-          if (!t || !t.trim()) { toast('클립보드가 비어 있어요. Claude 답변을 먼저 복사해 주세요.', { duration: 5000 }); return; }
+          if (!t || !t.trim()) { toast('클립보드가 비어 있어요. Claude 답변이나 네이버 매물 글을 먼저 복사해 주세요.', { duration: 5000 }); return; }
           ta.value = t;
           picks = {};
           markEdited();
@@ -4119,6 +4564,7 @@
       done = true; // 같은 틱에 두 번 눌려도 한 번만 담는다
       submitBtn.disabled = true;
       var now = Date.now();
+      var src = current && current.source === 'naver' ? (IMP.NAVER_SOURCE_ID || 'naver-text') : IMP.SOURCE_ID; // 어디서 읽은 매물인지
       var made = picked.map(function (e, i) {
         var p = e.prop;
         var memo = p.memo;
@@ -4129,7 +4575,7 @@
           askPrice: p.askPrice, realPrice: p.realPrice, agentName: p.agentName, agentPhone: p.agentPhone,
           memo: memo, sourceUrl: p.sourceUrl, articleNo: p.articleNo, confirmedAt: p.confirmedAt,
           status: 'review', createdAt: now, updatedAt: now - i, // 코드 순서대로 목록 맨 위에
-          importedAt: now, source: IMP.SOURCE_ID,
+          importedAt: now, source: src,
           fieldsAt: {} // 새 매물(예전 기록이 아님)
         });
       });
@@ -4299,6 +4745,7 @@
     // 이전 화면 정리
     clearTimeout(refreshTimer);
     refreshTimer = null;
+    homeSel = { on: false, ids: {} }; // 화면을 옮기면(같은 화면을 새로 그려도) 홈 선택 모드를 끈다
     if (closeLightbox) closeLightbox();
     closeAllDialogs();
     revokeAllPhotoUrls();
@@ -4315,7 +4762,8 @@
   function busyEditing() {
     if (openDialogs.length || closeLightbox) return true;
     var a = document.activeElement;
-    return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && $('#main').contains(a));
+    // 홈 선택 모드의 체크박스는 입력 중이 아니다(다시 그리면서 고른 것과 초점을 그대로 되살림, renderHome)
+    return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.classList.contains('sel-check') && $('#main').contains(a));
   }
 
   /** 다른 탭의 변경을 합친 뒤 지금 화면을 다시 그린다(스크롤 위치 유지, 초점은 옮기지 않음) */
@@ -4365,7 +4813,7 @@
       if (!hadController) { hadController = true; return; } // 처음 설치: 알릴 필요 없음
       if (SW.reloading) return;
       SW.updateReady = true;
-      refreshVersionBadge(); // 헤더 버전 표시를 [업데이트]로
+      refreshVersionBadge(); // 헤더 버전 표시를 [업데이트]로(1.3.2)
       // 예전 버전으로 열어 둔 다른 탭이 저장하면 새 필드가 빠질 수 있어(합칠 때 지키지만) 다른 탭도 새로고침하게 알린다
       toast('새 버전이 준비됐어요. 열어 둔 다른 탭도 새로고침해 주세요.', { duration: 15000, action: { label: '새로고침', fn: reloadForUpdate } });
       if (view.name === 'settings' && !busyEditing()) renderSettings(); // 설정 화면에도 [새로고침] 표시
@@ -4396,16 +4844,25 @@
     window.addEventListener('pagehide', flushIfDirty);
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') { flushIfDirty(); return; }
+      expirePendingDelete(); // 내려가 있는 사이 되돌리기 시간이 지났으면 끝낸다
       syncFromOtherTabs(); // 다른 탭에서 바뀐 내용 가져오기
       checkForUpdate();
     });
-    window.addEventListener('pageshow', function (e) { if (e.persisted) syncFromOtherTabs(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) { expirePendingDelete(); syncFromOtherTabs(); } });
     // 다른 탭(창)이 저장하면 바로 합쳐서 다시 그린다
     window.addEventListener('storage', function (e) {
       if (e.key === null || e.key === STORAGE_KEY) syncFromOtherTabs();
     });
     // iOS Safari 는 touchstart 리스너가 있어야 버튼을 누를 때 :active 모양을 보여 준다
     document.addEventListener('touchstart', function () { /* :active 표시용 */ }, { passive: true });
+    // 1.4.1: 버튼이 있는 토스트([되돌리기] 등)는 초점·손가락이 있는 동안 저절로 사라지지 않는다(holdToast)
+    var toastEl = $('#toast');
+    if (toastEl) {
+      toastEl.addEventListener('focusin', function () { holdToast(true); });
+      toastEl.addEventListener('focusout', function (e) { if (!toastEl.contains(e.relatedTarget)) holdToast(false); });
+      toastEl.addEventListener('pointerenter', function () { holdToast(true); });
+      toastEl.addEventListener('pointerleave', function () { if (!toastEl.contains(document.activeElement)) holdToast(false); });
+    }
 
     if (!location.hash || location.hash === '#') {
       try { history.replaceState(null, '', '#/'); } catch (e) { /* 무시 */ }

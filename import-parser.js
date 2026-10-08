@@ -14,6 +14,16 @@
  *   - // 주석, 끝 쉼표, NaN 같은 Claude 의 흔한 실수는 고쳐서 읽는다(1.2.1).
  *   - 호수(ho)는 받지 않는다(네이버 부동산에 없음). 늘 사용자가 직접 입력한다.
  *
+ * 1.4.0: 네이버 부동산 매물 화면 글도 직접 읽는다(parseNaverText. Claude 없이).
+ *   - 사용자가 매물 상세 화면 글을 전체 선택·복사하거나, iPad 단축어로 페이지 글(맨 앞 "URL: …" 줄)을 복사해 온다.
+ *   - 앱 입력 칸과 도구는 parseText 를 쓴다: 가져오기 코드(JSON)를 먼저 찾고, 없거나 못 읽으면 네이버 글로 읽는다.
+ *   - 이름표(라벨)로 필요한 블록만 읽는다. 사용자 프로필 이름·알림 수 같은 줄은 어떤 필드·메모에도 넣지 않는다.
+ * 1.4.1(검토 반영): 제목은 제목 묶음 표시 줄(평당가·관심·공유) 위의 '거래 종류 + 가격'만 있는 줄에서 찾고(특징 글에 속지 않게),
+ *   요약 줄의 층·향과 머리 줄 이름도 맞춰 본다. 상세 표시가 있는데 상세 매물을 못 읽으면 목록 매물을 기본 해제(detailFailed).
+ *   목록 매물은 저장된 매물·지운 매물과 단지명·동·호가로 한 번 더 비교, 평에서 바꾼 면적은 "약"(근삿값),
+ *   실거래 표의 가격 칸 모양 검사, 같은 면적 표가 아니면 실거래가는 메모에만, 붙은 전화번호를 못 나누면 메모로(확인 필요).
+ *   tools/make-import-code.js 가 네이버 글로 만든 코드에는 "from":"naver-text" 를 넣는다(앱이 같은 주의를 보여 줌).
+ *
  * 보안: 붙여 넣은 글은 믿지 않는다. 아는 필드만 골라 읽고(길이·범위 검사), __proto__·constructor·prototype 키는
  *       버리고, 링크는 http/https 만 남긴다. 결과는 문자열·숫자뿐이며 화면에는 textContent 로만 넣는다.
  */
@@ -40,13 +50,15 @@
   };
   var BAD_KEYS = { '__proto__': 1, 'constructor': 1, 'prototype': 1 };
   var EXAMPLE_NAME = '단지명'; // 요청문 속 예시의 자리표시 이름
-  var SOURCE_ID = 'claude-code';
+  var SOURCE_ID = 'claude-code';       // 가져오기 코드로 만든 매물(app.js 매물 source)
+  var NAVER_SOURCE_ID = 'naver-text';  // 1.4.0: 네이버 매물 화면 글에서 읽어 만든 매물
 
   // Claude 채팅에 보낼 요청문. 앱 화면과 README 에 같은 문구가 들어간다(바꾸면 README 도 함께).
   var PROMPT = [
     '임장체크 앱에 넣을 매물 정보를 정리해 줘.',
-    '첨부한 네이버 부동산 매물 화면(스크린샷·글·링크)에서 아래 형식의 JSON만 코드 블록으로 답해 줘.',
+    '첨부한 네이버 부동산 매물 화면(스크린샷이나 복사한 글)에서 아래 형식의 JSON만 코드 블록으로 답해 줘.',
     '- 화면에 없는 값은 빼고, 추측하지 마.',
+    '- 링크만 있고 화면이나 글이 없으면 값을 만들지 말고, 화면을 보내 달라고 답해 줘.',
     '- 가격은 만원 단위 숫자 (예: 5억 2,000 → 52000).',
     '- 면적은 ㎡ 숫자 (전용면적은 area, 공급면적은 supplyArea).',
     '- 호수(ho)는 넣지 마. 동은 숫자만.',
@@ -58,13 +70,18 @@
 
   var MESSAGES = {
     empty: '',
-    'too-big': '붙여 넣은 글이 너무 길어요. Claude 답변의 코드 부분만 복사해 붙여 주세요.',
+    'too-big': '붙여 넣은 글이 너무 길어요(200KB까지). Claude 답변은 코드 부분만, 네이버 글은 매물 화면 하나만 복사해 붙여 주세요.',
     notfound: '코드를 찾지 못했어요. Claude 답변 전체를 복사해 붙여 주세요.',
     broken: '코드가 잘렸거나 깨져 있어요. Claude 답변의 코드 블록 전체를 다시 복사해 붙여 주세요.',
     'too-many': '글에 코드 같은 부분이 너무 많아 끝까지 읽지 못했어요. Claude 답변의 코드 부분만 복사해 붙여 주세요.',
     comment: '코드 안에 설명(주석)이 섞여 있어 읽지 못했어요. Claude에게 "JSON만 다시 보내 줘"라고 해 보세요.',
     example: '요청문 속 예시만 있어요. Claude가 답한 코드를 복사해 붙여 주세요.',
-    none: '코드에 매물이 없어요. 매물 화면이 잘 보이게 다시 캡처해서 Claude에게 보내 보세요.'
+    none: '코드에 매물이 없어요. 매물 화면이 잘 보이게 다시 캡처해서 Claude에게 보내 보세요.',
+    // 1.4.0 (parseText·parseNaverText)
+    nothing: '코드나 네이버 매물 글을 찾지 못했어요. Claude 답변 전체나, 네이버 매물 상세 화면의 글 전체를 복사해 붙여 주세요.',
+    naver: '네이버 글에서 매물을 찾지 못했어요. 매물 상세 화면을 연 채로 글 전체를 복사해 붙여 주세요.',
+    // 1.4.1: 상세 화면 글은 있는데 제목·가격을 읽지 못함(다시 복사해도 같으므로 다른 방법을 안내)
+    'naver-detail': '매물 상세 화면 글인데 단지명·가격을 읽지 못했어요. 네이버 화면 모양이 달라졌을 수 있어요. [매물 추가]로 직접 넣거나 Claude 방법을 써 주세요.'
   };
 
   // ---------------- 작은 도구 ----------------
@@ -236,7 +253,7 @@
    * 한 가지 글에서 찾기. 글 끝까지 보면서 코드 블록을 모두 모은다
    * (Claude 는 스크린샷이 여러 장이면 블록을 나눠 답하기도 한다. 첫 블록만 담고 나머지를 조용히 버리지 않게).
    * 코드처럼 보이는 곳({"… [{…)만 짝을 맞춰 읽고, 설명 글 속 괄호("[참고]")는 한 글자씩 건너뛴다(횟수에 세지 않음).
-   * 결과: { list, blocks(읽은 코드 수), incomplete(코드 후보가 너무 많아 끝까지 못 봄) }
+   * 결과: { list, blocks(읽은 코드 수), incomplete(코드 후보가 너무 많아 끝까지 못 봄), naver(네이버 글로 만든 코드가 있음, 1.4.1) }
    *       또는 { error: 'notfound' | 'broken' | 'comment' | 'example' | 'none' | 'too-many' }
    */
   function scan(t) {
@@ -246,6 +263,7 @@
     var sawEmpty = false;
     var lists = [];
     var incomplete = false;
+    var fromNaver = false; // 1.4.1: tools/make-import-code.js 가 네이버 글로 만든 코드("from":"naver-text")
     var na = -2; // 다음 { 위치(-1: 더 없음). 매번 처음부터 찾지 않게 기억해 둔다
     var nb = -2; // 다음 [ 위치
     while (true) {
@@ -268,14 +286,17 @@
       if (list) {
         if (!list.length) sawEmpty = true;
         else if (isExampleOnly(list)) sawExample = true; // 요청문 예시는 건너뛴다
-        else lists.push(list);
+        else {
+          lists.push(list);
+          if (isObj(r.value) && get(r.value, 'from') === NAVER_SOURCE_ID) fromNaver = true;
+        }
       }
       i = end + 1; // 이 덩어리 안쪽은 다시 보지 않는다
     }
     if (lists.length) {
       var all = [];
       lists.forEach(function (l) { for (var k = 0; k < l.length; k++) all.push(l[k]); });
-      return { list: all, blocks: lists.length, incomplete: incomplete };
+      return { list: all, blocks: lists.length, incomplete: incomplete, naver: fromNaver };
     }
     if (incomplete) return { error: 'too-many' };
     return { error: sawEmpty ? 'none' : (sawExample ? 'example' : 'notfound') };
@@ -419,12 +440,12 @@
 
   function articleNoOf(v) { return cut(oneLine(v, 60).replace(/[^0-9A-Za-z-]/g, ''), LIMITS.articleNo); }
 
-  /** 네이버 부동산 링크에서 매물번호 꺼내기 (?articleNo=…, /article/info/…, /articles/…) */
+  /** 네이버 부동산 링크에서 매물번호 꺼내기 (?articleNo=…, ?articleId=…(1.4.0), /article/info/…, /articles/…) */
   function articleNoFromUrl(href) {
     var u;
     try { u = new URL(href); } catch (e) { return ''; }
     if (!/(^|\.)naver\.com$/i.test(u.hostname)) return '';
-    var q = /[?&]articleNo=(\d{5,20})(?:&|$)/.exec(u.search);
+    var q = /[?&]article(?:No|Id)=(\d{5,20})(?:&|$)/.exec(u.search);
     if (q) return q[1];
     var m = /\/articles?\/(?:info\/)?(\d{5,20})(?:\/|$)/.exec(u.pathname);
     return m ? m[1] : '';
@@ -434,13 +455,33 @@
   var PHONE_RE = /(?:\+82[\s.-]?0?|\(0|\b0)\d{1,3}[\s.)-]{0,2}\d{3,4}[\s.-]{0,2}\d{4}(?!\d)|\b1[5-9]\d{2}[\s.-]?\d{4}(?!\d)/g;
 
   /**
+   * 사이 없이 붙은 번호를 띄운다(1.4.0). 네이버 중개사 전화 칸을 복사하면 "032-551-4700010-8973-4700"처럼 붙어 온다.
+   * 끝 네 자리 바로 뒤에 새 번호의 시작(0으로 시작하는 국번 + 구분 기호, 휴대폰 11자리, 15xx-)이 오면 그 사이를 띄운다
+   */
+  function splitGluedPhones(s) {
+    return s.replace(/([-.\s)]\d{4})(?=0\d{1,3}[-.\s)]|01[016789]\d{7,8}(?!\d)|1[5-9]\d{2}[-.\s])/g, '$1 ');
+  }
+
+  // 구분 기호로 뚜렷이 나뉜 맨 앞 번호(02-555-1234). 뒤에 숫자가 바로 붙어 있어도 이 부분은 한 번호다(끝 네 자리)
+  var PHONE_HEAD_RE = /^(?:\+82[\s.-]?0?|\(0|0)\d{1,3}[\s.)-]{1,2}\d{3,4}[\s.-]{1,2}\d{4}/;
+
+  /**
    * 중개사 연락처 → { phone, others }. 번호가 여러 개면("대표 02-555-1234 / 휴대폰 010-…") 첫 번호만 phone 에 넣는다
-   * (두 번호를 붙이면 [전화] 버튼이 엉뚱한 번호로 건다). 나머지는 others 로 돌려준다
+   * (두 번호를 붙이면 [전화] 버튼이 엉뚱한 번호로 건다). 나머지는 others 로 돌려준다.
+   * 1.4.1: 둘째 번호가 구분 기호 없이 붙어 나누지 못하면(숫자 13자리 이상) 숫자 덩어리를 통째로 넣지 않는다.
+   * 맨 앞 번호가 구분 기호로 뚜렷하면 그것만 phone 이고 남은 글은 unsure(확인 필요, unsureOther). 아니면 phone 은 비우고 원문을 unsure 로
    */
   function phoneOf(v) {
-    var s = oneLine(v, 100);
+    var s = splitGluedPhones(oneLine(v, 100));
     var found = s.match(PHONE_RE);
-    if (!found) return { phone: cut(s.replace(/[^0-9+\-() ]/g, '').replace(/\s+/g, ' ').trim(), LIMITS.agentPhone), others: [] };
+    if (!found) {
+      if (s.replace(/\D/g, '').length > 12) {
+        var head = PHONE_HEAD_RE.exec(s);
+        if (head) return { phone: cut(head[0].replace(/\s+/g, ' ').trim(), LIMITS.agentPhone), others: [], unsure: cut(s.slice(head[0].length).trim(), 40), unsureOther: true };
+        return { phone: '', others: [], unsure: cut(s, 60) };
+      }
+      return { phone: cut(s.replace(/[^0-9+\-() ]/g, '').replace(/\s+/g, ' ').trim(), LIMITS.agentPhone), others: [] };
+    }
     var list = found.map(function (x) { return cut(x.replace(/\s+/g, ' ').trim(), LIMITS.agentPhone); });
     return { phone: list[0], others: list.slice(1) };
   }
@@ -470,6 +511,10 @@
     if (phone.others.length) {
       p.memo = cut((p.memo ? p.memo + '\n' : '') + '다른 연락처: ' + phone.others.join(', '), LIMITS.memo);
       addNote(notes, '연락처: 첫 번호만 넣고 나머지는 메모에 적었어요');
+    }
+    if (phone.unsure) { // 1.4.1: 붙어 온 번호를 나누지 못함. 숫자 덩어리로 [전화]를 걸지 않게 메모로
+      p.memo = cut((p.memo ? p.memo + '\n' : '') + (phone.unsureOther ? '다른 연락처(확인 필요): ' : '연락처(확인 필요): ') + phone.unsure, LIMITS.memo);
+      addNote(notes, '연락처: 번호가 붙어 있어 나누지 못했어요. 메모를 보고 확인하세요');
     }
     var url = get(raw, 'sourceUrl');
     if (typeof url === 'string' && url.trim()) {
@@ -618,46 +663,116 @@
 
   // ---------------- 해석(메인) ----------------
   /**
-   * 붙여 넣은 글 해석.
+   * 붙여 넣은 글 해석(가져오기 코드만. 딥링크 검사도 이것을 쓴다). 앱 입력 칸은 parseText(코드 → 네이버 글 순서).
    * opts: { existing: 저장된 매물 배열, goneKeys: { 열쇠: 시각 } }
-   * 결과: { ok, error, message, entries: [ { index, prop, notes, warnings: [{code,text}], canImport, checked } ],
+   * 결과: { ok, error, message, entries: [ { index, prop, notes, warnings: [{code,text}], canImport, checked, fromList } ],
    *         total(코드 속 매물 수), truncated(30개를 넘어 뺀 수), skipped(읽을 수 없는 항목 수),
-   *         blocks(읽은 코드 블록 수), incomplete(글이 길어 끝까지 못 읽음) }
+   *         blocks(읽은 코드 블록 수), incomplete(글이 길어 끝까지 못 읽음), source('code') }
    * warning code: noname(담을 수 없음) / notsale(매매 아님) / swap(전용≥공급) / lowprice(가격이 이상하게 낮음) /
    *               exists(이미 있음) / gone(전에 지움) / repeat(코드 안에서 겹침)
    */
   function parse(input, opts) {
     opts = opts || {};
-    var res = { ok: false, error: '', message: '', entries: [], total: 0, truncated: 0, skipped: 0, blocks: 0, incomplete: false };
+    var res = { ok: false, error: '', message: '', entries: [], total: 0, truncated: 0, skipped: 0, blocks: 0, incomplete: false, source: 'code' };
     var src = typeof input === 'string' ? input : '';
     if (!src.trim()) { res.error = 'empty'; return res; }
     if (src.length > LIMITS.inputChars) { res.error = 'too-big'; res.message = MESSAGES['too-big']; return res; }
     var found = extract(src);
     if (!found.list) { res.error = found.error; res.message = MESSAGES[found.error] || MESSAGES.notfound; return res; }
 
-    var list = found.list;
-    res.total = list.length;
     res.blocks = found.blocks || 1;
     res.incomplete = !!found.incomplete;
+    // 1.4.1: 네이버 글로 만든 코드(tools/make-import-code.js 가 "from":"naver-text" 를 넣음)는 앱이 직접 읽은 글과 같게
+    // 주의를 보여 주고 출처를 'naver-text' 로 남긴다(값은 코드 그대로)
+    if (found.naver) { res.source = 'naver'; res.kind = 'code'; }
+    fillEntries(res, found.list, opts, null);
+    if (!res.entries.length) { res.error = 'none'; res.message = MESSAGES.none; return res; }
+    res.ok = true;
+    return res;
+  }
+
+  // ---- 느슨한 중복(1.4.1, 네이버 글) ----
+  // 목록 카드에는 면적·매물번호·링크가 없어 단지명 조합(n)이 상세에서 담은 매물과 맞지 않는다. 그래서 한쪽에 면적이 없으면
+  // 단지명·동·호가·거래 종류(+ 층이 양쪽에 있으면 층)로 한 번 더 본다. 맞으면 "~일 수 있어요" 경고로 기본 해제만 한다
+  /** 거래 종류: 필드가 없으면 메모 첫 줄 "거래 종류: 전세"(앱이 매매가 아닌 매물을 담을 때 넣음), 그것도 없으면 매매 */
+  function tradeOfProp(p) {
+    var t = tradeTypeOf(get(p, 'tradeType'));
+    if (t) return t;
+    var m = /^거래 종류:\s*(\S+)/.exec(typeof p.memo === 'string' ? p.memo : '');
+    return m ? tradeTypeOf(m[1]) : '매매';
+  }
+  function looseInfo(p) {
+    var d = dupInfo(p);
+    return {
+      nm: oneLine(p.name, 200).toLowerCase().replace(/\s+/g, ''),
+      dong: dongOf(p.dong),
+      ask: typeof p.askPrice === 'number' && isFinite(p.askPrice) ? String(Math.round(p.askPrice)) : '',
+      area: typeof p.area === 'number' && isFinite(p.area) ? String(Math.round(p.area * 100) / 100) : '',
+      f: d.f, a: d.a, u: d.u, trade: tradeOfProp(p)
+    };
+  }
+  function looseSame(x, y) {
+    if (!x.nm || x.nm === '이름없는매물' || x.nm !== y.nm || x.dong !== y.dong || !x.ask || x.ask !== y.ask) return false;
+    if ((x.area && y.area) || (x.a && y.a) || (x.u && y.u)) return false; // 양쪽에 있으면 엄격한 규칙(sameListing)이 이미 정했다
+    if (x.trade && y.trade && x.trade !== y.trade) return false;
+    return !(x.f && y.f && x.f !== y.f);
+  }
+  /** 저장된 매물(looseList: looseInfo 목록)과 지운 매물(gone: goneInfos 결과)에서 느슨하게 같은 것 → { kind, prop } 또는 null */
+  function looseDuplicate(p, existing, looseList, gone) {
+    var x = looseInfo(p);
+    if (!x.nm || !x.ask) return null;
+    for (var i = 0; i < looseList.length; i++) {
+      if (looseList[i] && looseSame(x, looseList[i])) return { kind: 'exists', prop: existing[i] };
+    }
+    for (var j = 0; j < gone.length; j++) {
+      if (!gone[j].n) continue;
+      var parts = gone[j].n.split('|'); // 단지명|동|전용면적|호가 (dupInfo)
+      var y = { nm: parts[0] || '', dong: parts[1] || '', area: parts[2] || '', ask: parts[3] || '', f: gone[j].f, a: gone[j].a, u: gone[j].u, trade: '' };
+      if (looseSame(x, y)) return { kind: 'gone' };
+    }
+    return null;
+  }
+
+  /**
+   * 매물 후보 목록 → res.entries(값 정리·경고·중복 판단·기본 체크). parse 와 parseNaverText 가 함께 쓴다.
+   * extras[i](네이버 글): { notes: 앞에 붙일 참고 문구, fromList: 목록 카드에서 읽음, unchecked: 경고가 없어도 기본 해제,
+   *                       loose: 느슨한 중복도 봄(1.4.1), approx: { area, supplyArea } 평에서 바꾼 근삿값(1.4.1) }
+   */
+  function fillEntries(res, list, opts, extras) {
+    res.total = list.length;
     res.truncated = Math.max(0, list.length - LIMITS.properties);
     var idx = indexProps(opts.existing);
     var gone = goneInfos(opts.goneKeys);
-    var seen = []; // 코드 안 앞쪽 매물: { info, json }
+    var existing = Array.isArray(opts.existing) ? opts.existing : [];
+    var looseList = null; // 느슨한 중복용(처음 쓸 때 만든다)
+    var seen = []; // 앞쪽 매물: { info, json }
 
     list.slice(0, LIMITS.properties).forEach(function (raw, i) {
       if (!isObj(raw)) { res.skipped++; return; }
+      var x = extras && extras[i] ? extras[i] : null;
       var c = cleanProperty(raw);
       var p = c.prop;
+      if (x && x.notes && x.notes.length) {
+        var notes = x.notes.slice();
+        c.notes.forEach(function (n) { addNote(notes, n); });
+        c.notes = notes;
+      }
       var warnings = [];
       if (!p.name) warnings.push({ code: 'noname', text: '단지명이 없어 담을 수 없어요' });
       if (p.tradeType && p.tradeType !== '매매') warnings.push({ code: 'notsale', text: '매매 매물이 아니에요 (' + p.tradeType + ')' });
       Array.prototype.push.apply(warnings, c.warnings);
       if (p.name) {
         var dup = findDuplicate(p, idx, gone);
+        var loose = false;
+        if (!dup && x && x.loose) {
+          if (!looseList) looseList = existing.map(function (e) { return isObj(e) ? looseInfo(e) : null; });
+          dup = looseDuplicate(p, existing, looseList, gone);
+          loose = !!dup;
+        }
         if (dup && dup.kind === 'exists') {
-          warnings.push({ code: 'exists', text: '이미 있는 매물이에요' + (dup.prop && dup.prop.status === 'dropped' ? ' (탈락)' : '') });
+          warnings.push({ code: 'exists', text: (loose ? '이미 있는 매물일 수 있어요(단지·동·호가가 같아요)' : '이미 있는 매물이에요') + (dup.prop && dup.prop.status === 'dropped' ? ' (탈락)' : '') });
         } else if (dup) {
-          warnings.push({ code: 'gone', text: '전에 지운 매물이에요' });
+          warnings.push({ code: 'gone', text: loose ? '전에 지운 매물일 수 있어요(단지·동·호가가 같아요)' : '전에 지운 매물이에요' });
         }
         // 코드 안 중복: 같은 매물로 판정되거나, 정리한 값이 모두 같으면(같은 블록을 두 번 붙임 등)
         var info = dupInfo(p);
@@ -674,30 +789,619 @@
         notes: c.notes,
         warnings: warnings,
         canImport: canImport,
-        checked: canImport && !warnings.length // 경고가 하나라도 있으면 기본으로 빼 둔다
+        fromList: !!(x && x.fromList),
+        approx: x && x.approx ? x.approx : null, // 1.4.1: 평에서 바꾼 면적(미리보기에 "약")
+        // 경고가 하나라도 있으면 기본으로 빼 둔다. 네이버 상세+목록 글의 목록 매물도 빼 둔다(사용자가 고름)
+        checked: canImport && !warnings.length && !(x && x.unchecked)
       });
     });
-    if (!res.entries.length) { res.error = 'none'; res.message = MESSAGES.none; return res; }
+  }
+
+  // ---------------- 네이버 부동산 매물 화면 글 (1.4.0) ----------------
+  // 사용자가 네이버페이 부동산 매물 상세 화면의 글을 전체 선택·복사하거나, iPad 단축어로 페이지 글을 복사해 붙여 넣는다.
+  // 그 글에는 왼쪽 '최근조회/관심' 목록, 사용자 프로필 이름·알림 수 같은 줄도 섞인다. 그래서
+  //  - 상세 매물: '기본 정보'(없으면 '매물번호') 줄을 기준으로, 그 앞에서 거꾸로 찾은 첫 '거래 종류 + 가격' 줄의 바로 앞 줄을
+  //    제목으로 본다(왼쪽 목록의 같은 모양 줄에 속지 않게). 값은 이름표(공급면적·전용면적·해당층/총층 …) 바로 다음 값만 읽는다.
+  //  - 목록 매물: '매물' 줄로 시작하는 카드 모양(이름 / 거래 / 가격 / 유형 / 평 / 층 / 향 / 확인매물 / 중개사)만 읽는다.
+  //  - 모양이 맞지 않는 값은 비운다(추측하지 않음). 이름표 밖의 줄은 어떤 필드·메모에도 넣지 않는다.
+  var PYEONG_M2 = 400 / 121; // 1평 = 400/121 ㎡ (약 3.3058)
+  var TRADE_WORD_RE = /^(매매|전세|월세|단기임대)$/;
+  var TRADE_PRICE_RE = /^(매매|전세|월세|단기임대)\s*(\d.*)$/;
+  var ANCHOR_RE = /^(기본 ?정보|매물 ?정보)$/;
+  // 상세 화면의 다른 묶음 제목. 이름표를 찾을 범위를 여기서 끊는다(같은 이름표 '위치'·'관리비'가 여러 묶음에 있음)
+  var BASIC_END_RE = /^(매물 ?소개|대출 ?정보|매물 ?분포|실거래가|단지 ?정보|중개사|중개 ?보수|주변 ?대중교통|학군 ?정보|시세)$/;
+  var DEAL_END_RE = /^(단지 ?정보|중개사|중개 ?보수|관리비|주변 ?대중교통|학군 ?정보|매물 ?소개|대출 ?정보|매물 ?분포)$/;
+  var COMPLEX_END_RE = /^(중개사|중개 ?보수|관리비|주변 ?대중교통|학군 ?정보|실거래가|매물 ?소개|대출 ?정보|매물 ?분포|시세)$/;
+  var AGENT_END_RE = /^(중개 ?보수|관리비|주변 ?대중교통|학군 ?정보|단지 ?정보|실거래가|매물 ?소개|대출 ?정보|매물 ?분포|시세)$/;
+  // 제목·이름으로 보면 안 되는 화면 글(버튼·탭 이름)
+  var UI_LINE_RE = /^(창닫기|닫기|공유하기|공유|매물|단지|아파트|오피스텔|최근조회|관심부동산|관심매물|공지사항|알림설정|편집|다음|이전|더보기|상세보기|지도|목록)$/;
+  // 1.4.1: 상세 제목 묶음에서 '거래 종류 + 가격' 줄 아래에 오는 표시 줄(평당가·알림/관심·공유). 제목 가격 줄은 이 줄들보다 위에만 찾는다
+  // (그 아래 중개사가 쓴 특징 글 "매매 1억 6,000 급매 …"를 제목 가격 줄로 잘못 보지 않게)
+  var TITLE_MARK_RE = /평당가|^(알림)?관심(매물)?$|^공유(하기)?$/;
+  // 1.4.1: 제목 가격 줄의 가격 뒤에 붙어도 되는 글(가격 변동 표시). 그 밖의 글이 붙으면 특징 글로 보고 제목 가격 줄로 쓰지 않는다
+  var PRICE_TAIL_OK_RE = /^(?:변동|상승|하락|내역|보기|\s)*$/;
+  // 목록 카드의 유형 줄. 아파트 매수와 상관없는 상가·사무실·토지 등은 뺀다(분양·단지 카드는 '매물' 줄로 시작하지 않아 애초에 읽지 않음)
+  var LIST_TYPE_RE = /^(아파트|오피스텔|빌라|연립|다세대|단독|다가구|주상복합|재건축|재개발|분양권|아파트분양권|오피스텔분양권|전원주택|한옥주택|도시형생활주택|상가|상가점포|상가주택|사무실|토지|공장|창고|지식산업센터|건물|빌딩|숙박)/;
+  var LIST_SKIP_TYPE_RE = /상가|사무|점포|토지|공장|창고|지식산업|건물|빌딩|숙박/;
+  // 목록 카드의 매물 정보 제공처(중개사가 아님)
+  var PROVIDER_RE = /제공$|^(매경부동산|부동산뱅크|부동산써브|한경부동산|한국경제|조인스랜드|부동산114|부동산포스|스피드공실|교차로|산업일보|선방|더피플|부동산플래닛)$/;
+  // 네이버 매물 글로 보이는 표시(둘 이상 있으면 '네이버 글인데 매물을 못 찾음'으로 안내)
+  var NAVER_MARKS = [/^매물번호/, ANCHOR_RE, /^(매매가|전세가|보증금)/, /^전용면적/, /^해당층\/총층/, /확인매물/, /^매물 보러가기$/, /^(최근조회|관심부동산)$/, /^중개 ?보수$/, /^실거래가$/];
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  /** 화면 글 → 줄 목록. 줄바꿈(\r\n)·특수 공백을 맞추고 앞뒤 공백을 지운다(표의 탭은 남김) */
+  function naverLines(text) {
+    return text.replace(/\r\n?/g, '\n')
+      .replace(/[   　]/g, ' ')
+      .replace(/[​-‍⁠﻿]/g, '')
+      .split('\n')
+      .map(function (l) { return l.replace(/ {2,}/g, ' ').replace(/^[ \t]+|[ \t]+$/g, ''); });
+  }
+  /** 비교용 한 줄(탭·연속 공백 → 공백 하나) */
+  function flat(l) { return String(l || '').replace(/\s+/g, ' ').trim(); }
+  function findLine(L, from, re) {
+    for (var i = Math.max(0, from); i < L.length; i++) if (re.test(flat(L[i]))) return i;
+    return -1;
+  }
+  /** from 부터 re 에 맞는 묶음 제목 앞까지(최대 max 줄) */
+  function blockEnd(L, from, re, max) {
+    for (var i = from; i < L.length && i < from + max; i++) if (re.test(flat(L[i]))) return i;
+    return Math.min(L.length, from + max);
+  }
+  function nextFilled(L, from, to) {
+    for (var i = Math.max(0, from); i < to && i < L.length; i++) if (flat(L[i])) return i;
+    return -1;
+  }
+  function prevFilled(L, from, min) {
+    for (var i = from; i >= min && i >= 0; i--) if (flat(L[i])) return i;
+    return -1;
+  }
+
+  /**
+   * [from, to) 안에서 이름표의 값. "이름표 ↵ 값" 또는 "이름표 값"(탭·공백·쌍점) 모양.
+   * 값은 이름표 다음의 빈 줄이 아닌 첫 줄(3줄 아래까지)만. 결과 { label, value, at } 또는 null
+   */
+  function labelAt(L, from, to, labels) {
+    for (var i = Math.max(0, from); i < to && i < L.length; i++) {
+      var f = flat(L[i]);
+      if (!f) continue;
+      for (var k = 0; k < labels.length; k++) {
+        var lb = labels[k];
+        if (f === lb) {
+          var j = nextFilled(L, i + 1, Math.min(to, i + 4));
+          return { label: lb, value: j < 0 ? '' : flat(L[j]), at: i };
+        }
+        if (f.indexOf(lb) === 0 && /^[\s:：]/.test(f.charAt(lb.length))) {
+          return { label: lb, value: f.slice(lb.length).replace(/^[\s:：]+/, ''), at: i };
+        }
+      }
+    }
+    return null;
+  }
+  function labelValue(L, from, to, labels) {
+    var r = labelAt(L, from, to, labels);
+    return r ? r.value : '';
+  }
+
+  /** 가격 글의 "만원"·"원"을 지운다: "1억 6,000만원" → "1억 6,000", "2,000만원/85만원" → "2,000/85" */
+  function bareMoney(s) { return String(s).replace(/(\d)\s*만\s*원?/g, '$1').replace(/(\d)\s*원/g, '$1'); }
+  var PRICE_PART = '\\d[\\d,]*(?:\\.\\d+)?\\s*억(?:\\s*\\d[\\d,]*)?|\\d[\\d,]*';
+  var PRICE_HEAD_RE = new RegExp('^(' + PRICE_PART + ')(?:\\s*\\/\\s*(' + PRICE_PART + '))?');
+  /**
+   * 가격으로 시작하는 글 → { deposit, monthly, rest }. "1억 9,000변동상승내역 보기" → deposit '1억 9,000', rest '변동상승내역 보기'.
+   * "2,000/85"(월세) → deposit '2,000', monthly '85'. "1억 5,000 ~ 4억"(단지 카드의 가격 범위)는 rest 가 '~'로 시작. 숫자로 시작하지 않으면 null
+   */
+  function priceHead(s) {
+    var t = bareMoney(flat(s));
+    var m = PRICE_HEAD_RE.exec(t);
+    if (!m) return null;
+    return { deposit: m[1].trim(), monthly: m[2] ? m[2].trim() : '', rest: t.slice(m[0].length).trim() };
+  }
+  /** 가격 글 → 만원 정수(또는 null) */
+  function moneyOf(s) {
+    var n = s ? parseMoneyText(s) : null;
+    return n !== null && isFinite(n) && n > 0 ? Math.round(n) : null;
+  }
+  function priceText(ph) {
+    var dep = moneyOf(ph.deposit);
+    var mon = moneyOf(ph.monthly);
+    return dep ? manwonText(dep) + (mon ? ' / 월 ' + manwonText(mon) : '') : '';
+  }
+
+  var AREA_RE = /(\d+(?:\.\d+)?)\s*(평|㎡|m²|m2|제곱미터)/g;
+  /** "15.55평면적 단위 변경㎡" → [{ m2: 51.4, py: '15.55' }], "51.4㎡" → [{ m2: 51.4, py: '' }]. 단위가 붙은 숫자만 */
+  function areaValues(s) {
+    var out = [];
+    var t = String(s || '').replace(/,/g, '');
+    var m;
+    AREA_RE.lastIndex = 0;
+    while ((m = AREA_RE.exec(t))) {
+      var n = parseFloat(m[1]);
+      out.push(m[2] === '평' ? { m2: Math.round(n * PYEONG_M2 * 100) / 100, py: m[1] } : { m2: Math.round(n * 100) / 100, py: '' });
+    }
+    return out;
+  }
+
+  /** "2026. 10. 02." / "2026.10.02" / "26.10.02." → "2026-10-02". 아니면 '' */
+  function naverDate(s) {
+    var m = /(\d{4}|\d{2})\s*[.\-\/]\s*(\d{1,2})\s*[.\-\/]\s*(\d{1,2})(?!\d)/.exec(String(s || ''));
+    if (!m) return '';
+    var mo = +m[2];
+    var d = +m[3];
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return '';
+    return (m[1].length === 2 ? '20' + m[1] : m[1]) + '-' + pad2(mo) + '-' + pad2(d);
+  }
+
+  /**
+   * 제목·카드 이름 "용종마을신대진 204동" → { name: '용종마을신대진', dong: '204' }. 동이 없으면 dong ''.
+   * 1.4.1: 이름 부분이 숫자가 아닌 글자로 끝나고 글자(한글·영문)가 있어야 한다("204동" → 이름 '2', 동 '04'가 되지 않게)
+   */
+  function nameDong(s) {
+    var t = flat(s);
+    var m = /^(.*?\D)\s*(?:제\s*)?(\d{1,4})동$/.exec(t) || /^(.+?)\s+([A-Za-z]\d{0,3}|[가-힣])동$/.exec(t);
+    if (m && !/[가-힣A-Za-z]/.test(m[1])) m = null;
+    return m ? { name: m[1].trim(), dong: m[2] } : { name: t, dong: '' };
+  }
+  /**
+   * 제목·이름으로 쓸 수 있는 줄인지(버튼 이름·거래 종류·숫자뿐인 줄·알림·프로필 줄이 아님).
+   * 1.4.1: 화면 글('면적 단위 변경㎡', '단지 보러가기', 평당가·도움말·확인매물), 요약 줄(층 + 평/㎡), 동만 있는 줄('204동')도 아님
+   */
+  function titleOk(s) {
+    var t = flat(s);
+    return t.length >= 2 && t.length <= 80 && /[가-힣A-Za-z]/.test(t) && !UI_LINE_RE.test(t) && !TRADE_WORD_RE.test(t) &&
+      !TRADE_PRICE_RE.test(t) && !/님$|알림|로그인|로그아웃|마이페이지|관심매물$/.test(t) && !/^[\d\s.,\/~억만원%㎡평()-]+$/.test(t) &&
+      !/면적 ?단위|보러가기|평당가|도움말|확인매물/.test(t) && !(/층/.test(t) && /평|㎡/.test(t)) && !/^제?\s*\d+\s*(동|호)$/.test(t);
+  }
+  /**
+   * 상세 제목 아래의 특징 글(예: "급매 조망권굿 내부수리깨끗")로 쓸 수 있는 줄인지. 화면 버튼·요약 줄·알림 줄은 아님.
+   * 1.4.1: "전세 1억 끼고 매매"처럼 거래 종류·가격으로 시작해도 뒤에 글이 있으면 특징 글(찾는 범위가 제목 가격 줄 아래라 겹치지 않음)
+   */
+  function tagOk(s) {
+    var t = flat(s);
+    var tp = TRADE_PRICE_RE.exec(t);
+    var tph = tp ? priceHead(tp[2]) : null;
+    return t.length >= 2 && t.length <= 100 && /[가-힣]/.test(t) && !UI_LINE_RE.test(t) &&
+      !/평당가|도움말|알림|관심|공유|면적 ?단위|확인매물|신고|최초게재|제공|님$|로그인|로그아웃|마이페이지|보러가기|더보기/.test(t) &&
+      !(/층/.test(t) && /평|㎡/.test(t)) && !(tp && (!tph || PRICE_TAIL_OK_RE.test(tph.rest))) && !/^[\d\s.,\/~억만원%㎡평()-]+$/.test(t);
+  }
+  /** 제목 가격 줄로 쓸 수 있는 가격인지: 범위('~')가 아니고 가격 뒤에 다른 글(특징 글)이 붙지 않음 */
+  function plainPrice(ph) { return !!ph && !/^~/.test(ph.rest) && PRICE_TAIL_OK_RE.test(ph.rest); }
+
+  var DEAL_DATE = '\\d{1,2}월\\s*\\d{1,2}일|\\d{2,4}\\s*[.\\-/]\\s*\\d{1,2}\\s*[.\\-/]\\s*\\d{1,2}\\.?';
+  var DEAL_DATE_RE = new RegExp('^(?:' + DEAL_DATE + ')');
+  // 1.4.1: 실거래 표의 가격 칸은 '억'이 있거나 천 단위 쉼표가 있는 모양만(층 숫자 "2"를 2만원으로 읽지 않게)
+  var DEAL_PRICE = '\\d{1,4}(?:\\.\\d+)?\\s*억(?:\\s*\\d{1,3}(?:,\\d{3})*)?|\\d{1,3}(?:,\\d{3})+';
+  var DEAL_PRICE_RE = new RegExp('억|\\d,\\d{3}');
+  var DEAL_ROW_MAX = 200; // 표 한 줄 글자 수 상한(이보다 길면 표 줄이 아님. 정규식이 긴 글에서 오래 걸리지 않게)
+  // 실거래 표 한 줄: 계약일 [등기일|미등록] [층("2층", "2", "B1", "지하1층", "저")] [최고|최저]가격 [군말]
+  // 1.4.1: 층 칸은 길이를 정한 모양만(예전 '\S*\d+층'은 긴 숫자 덩어리에서 아주 오래 걸렸다)
+  var DEAL_ROW_RE = new RegExp('^(' + DEAL_DATE + ')\\s+(?:(미등록|-|' + DEAL_DATE + ')\\s+)?(?:([A-Za-z가-힣]{0,4}\\d{1,3}층?|[저중고]층?)\\s+)?' +
+    '(?:최고|최저)?\\s*(' + DEAL_PRICE + ')(?:\\s*만\\s*원?)?(?:\\s+\\D.*)?$');
+  /**
+   * '실거래가' 묶음 [from, to) → 표의 첫 줄 { price(만원), memo, same(같은 면적 표) } 또는 null.
+   * 표 머리("계약일 등기일 층 가격")가 탭으로 한 줄이든 칸마다 한 줄이든 읽는다. 표의 거래 종류가 매물과 다르면 읽지 않는다.
+   * 1.4.1: 가격 칸은 '억'이나 천 단위 쉼표가 있는 모양만. 칸마다 한 줄이면 가격 칸이 나올 때까지(6칸) 이어 붙이고, 없으면 null
+   */
+  function naverDeal(L, from, to, trade) {
+    var year = '';
+    var same = false;
+    var head = -1;
+    for (var i = from; i < to; i++) {
+      var f = flat(L[i]);
+      if (/^동일\s*면적/.test(f)) same = true;
+      var y = /^(\d{4})년\s*계약/.exec(f);
+      if (y && !year) year = y[1];
+      if (/실거래가?\s*표$/.test(f)) {
+        var t = /(매매|전세|월세)/.exec(f);
+        if (t && trade && t[1] !== trade && !(trade === '단기임대' && t[1] === '월세')) return null;
+      }
+      if (/^계약일(\s|$)/.test(f)) { head = i; break; }
+    }
+    if (head < 0) return null;
+    var k = head + 1;
+    while (k < to && /^(등기일|층|가격|거래금액|계약일|)$/.test(flat(L[k]))) k++; // 칸마다 한 줄인 머리, 빈 줄
+    if (k >= to) return null;
+    var row = flat(L[k]);
+    if (!DEAL_DATE_RE.test(row) || row.length > DEAL_ROW_MAX) return null;
+    // 칸마다 한 줄이면 가격 칸이 나올 때까지(최대 6칸: 계약일·등기일·층·최고/최저·가격 + 여유) 이어 붙인다
+    if (!DEAL_PRICE_RE.test(row.replace(DEAL_DATE_RE, ''))) {
+      var parts = [row];
+      for (var j = k + 1; j < to && parts.length < 6; j++) {
+        var c = flat(L[j]);
+        if (!c) continue;
+        parts.push(c);
+        if (DEAL_PRICE_RE.test(c)) break;
+      }
+      row = parts.join(' ');
+      if (row.length > DEAL_ROW_MAX) return null;
+    }
+    var m = DEAL_ROW_RE.exec(row);
+    if (!m) return null;
+    var ph = priceHead(m[4]);
+    var price = ph ? moneyOf(ph.deposit) : null;
+    if (!price) return null;
+    var date = m[1].replace(/\s+/g, ' ');
+    if (year && /월/.test(date)) date = year + '년 ' + date;
+    var reg = m[2] || '';
+    var fl = m[3] || '';
+    if (/\d$/.test(fl)) fl += '층'; // 층 칸에 "층"이 없던 표("2")
+    var bits = [date, fl, priceText(ph), reg === '미등록' ? '미등록' : (reg && reg !== '-' ? '등기 ' + reg : '')];
+    // 같은 면적 표가 아니면(다른 평형·전체 면적 표를 보고 있을 때) 실거래가 칸에는 넣지 않고 메모에만 남긴다(naverDetail)
+    return { price: price, same: same, memo: '최근 실거래' + (same ? '(같은 면적)' : '(면적 확인 필요)') + ': ' + bits.filter(Boolean).join(' · ') };
+  }
+
+  /**
+   * 상세 매물 → { raw(cleanProperty 에 넘길 후보), notes, approx } 또는 null.
+   * 기준 줄·제목·가격을 찾지 못하거나, 제목 줄 가격과 '기본 정보'의 가격이 다르면(다른 줄을 제목으로 잘못 봄) null.
+   * 1.4.1: 요약 줄("아파트15평 (전용11)16/16층동향")의 층·향이 '해당층/총층'·'향'과 다르거나, 머리 줄(창닫기 위의 이름)이
+   * 제목과 다르면 null(다른 매물의 줄을 제목으로 잘못 봄)
+   */
+  function naverDetail(L) {
+    var anchor = findLine(L, 0, ANCHOR_RE);
+    if (anchor < 0) anchor = findLine(L, 0, /^매물번호(\s|$)/);
+    if (anchor < 0) return null;
+
+    // 제목: 기준 줄 앞에서 거꾸로 찾은 첫 '거래 종류 + 가격' 줄(또는 '거래 종류' ↵ '가격' 두 줄)의 바로 앞 줄.
+    // 1.4.1: 제목 묶음의 표시 줄(평당가·관심·공유)이 가까이(25줄 안) 있으면 그 위에서만 찾는다. 가격 뒤에 다른 글이 붙은 줄
+    // ("매매 1억 6,000 급매 …", "전세 1억 끼고 매매")은 중개사가 쓴 특징 글이라 제목 가격 줄로 보지 않는다
+    var from = anchor - 1;
+    for (var i = anchor - 1; i >= 0 && i >= anchor - 25; i--) {
+      if (TITLE_MARK_RE.test(flat(L[i]))) { from = i - 1; break; }
+    }
+    var tradeAt = -1;
+    var priceEnd = -1;
+    var trade = '';
+    var price = null;
+    for (i = from; i >= 0 && i >= anchor - 60; i--) {
+      var f = flat(L[i]);
+      var m = TRADE_PRICE_RE.exec(f);
+      var ph = m ? priceHead(m[2]) : null;
+      if (plainPrice(ph)) { tradeAt = i; priceEnd = i + 1; trade = m[1]; price = ph; break; }
+      if (TRADE_WORD_RE.test(f)) {
+        var nx = nextFilled(L, i + 1, anchor);
+        ph = nx >= 0 ? priceHead(L[nx]) : null;
+        if (plainPrice(ph)) { tradeAt = i; priceEnd = nx + 1; trade = f; price = ph; break; }
+      }
+    }
+    if (tradeAt < 0) return null;
+    var ti = prevFilled(L, tradeAt - 1, tradeAt - 3);
+    if (ti < 0) return null;
+    var nd;
+    var dongOnly = /^제?\s*(\d{1,4})\s*동$/.exec(flat(L[ti]));
+    if (dongOnly) {
+      // 1.4.1: 단지명과 동이 두 줄로 나뉜 화면("용종마을신대진 ↵ 204동")
+      var ni = prevFilled(L, ti - 1, ti - 2);
+      if (ni < 0 || !titleOk(L[ni])) return null;
+      nd = { name: flat(L[ni]), dong: dongOnly[1] };
+      ti = ni;
+    } else {
+      if (!titleOk(L[ti])) return null;
+      nd = nameDong(L[ti]);
+    }
+    // 머리 줄: 제목 위에 "이름 ↵ 창닫기"가 있으면(PC 화면) 그 이름(단지명·동)이 제목과 같아야 한다
+    var closeAt = prevFilled(L, ti - 1, ti - 3);
+    if (closeAt >= 0 && /^(창닫기|닫기)$/.test(flat(L[closeAt]))) {
+      var hi = prevFilled(L, closeAt - 1, closeAt - 3);
+      var hd = hi >= 0 && titleOk(L[hi]) ? nameDong(L[hi]) : null;
+      if (hd && (hd.name.replace(/\s+/g, '') !== nd.name.replace(/\s+/g, '') || hd.dong !== nd.dong)) return null;
+    }
+
+    // '기본 정보' 묶음의 이름표 값
+    var bEnd = blockEnd(L, anchor + 1, BASIC_END_RE, 150);
+    function basic(labels) { return labelValue(L, anchor, bEnd, labels); }
+    var pl = labelAt(L, anchor, bEnd, ['매매가', '전세가', '보증금/월세', '월세가', '보증금', '월세']);
+    if (pl && pl.value) {
+      var lp = priceHead(pl.value);
+      if (lp && moneyOf(lp.deposit) !== moneyOf(price.deposit)) return null;
+      var lt = /^매매/.test(pl.label) ? '매매' : (/^전세/.test(pl.label) ? '전세' : '월세');
+      if (trade !== lt && !(trade === '단기임대' && lt === '월세')) return null;
+      if (!price.monthly && lp && lp.monthly) price.monthly = lp.monthly;
+    }
+    var notes = [];
+    var memo = [];
+    if ((trade === '월세' || trade === '단기임대') && price.monthly) memo.push(trade + ': 보증금 ' + priceText(price));
+
+    // 면적: 평으로 보이면 ㎡로 바꾼다(1평 = 400/121㎡, 소수 둘째 자리)
+    var supply = areaValues(basic(['공급면적', '계약면적']))[0] || null;
+    var excl = areaValues(basic(['전용면적']))[0] || null;
+    if (!supply && !excl) {
+      var both = areaValues(basic(['공급/전용면적', '계약/전용면적']));
+      if (both.length === 2) { supply = both[0]; excl = both[1]; }
+    }
+    var pys = [supply && supply.py ? '공급 ' + supply.py + '평' : '', excl && excl.py ? '전용 ' + excl.py + '평' : ''].filter(Boolean);
+
+    var fm = /^([0-9]+|[저중고]|B\d+|지하\d*)\s*층?\s*\/\s*(\d+)\s*층?$/.exec(basic(['해당층/총층', '층/총층', '층수']));
+    var dm = /(남동|남서|북동|북서|동|서|남|북)향/.exec(basic(['향', '방향']));
+    var an = /\d{5,20}/.exec(basic(['매물번호']));
+    // 1.4.1: 제목 아래 요약 줄(층 + 평/㎡)의 층·향이 이름표 값과 다르면 다른 매물의 제목을 잡은 것
+    for (i = priceEnd; i < anchor; i++) {
+      var sm = flat(L[i]);
+      if (!/층/.test(sm) || !/평|㎡/.test(sm)) continue;
+      var sf = /([0-9]+|[저중고]|B\d+)\s*\/\s*(\d+)\s*층/.exec(sm);
+      var sd = /(남동|남서|북동|북서|동|서|남|북)향\s*$/.exec(sm);
+      if (sf && fm && (sf[1] + '/' + sf[2]) !== (fm[1] + '/' + fm[2])) return null;
+      if (sd && dm && sd[1] !== dm[1]) return null;
+      break;
+    }
+
+    // 확인매물 날짜와 특징 글: 가격 줄과 기준 줄 사이(제목 묶음)에서만
+    var confirmedAt = '';
+    var confAt = -1;
+    for (i = priceEnd; i < anchor; i++) {
+      var ci = L[i].indexOf('확인매물');
+      if (ci >= 0) { confirmedAt = naverDate(L[i].slice(ci + 4)); if (confirmedAt) { confAt = i; break; } }
+    }
+    if (!confirmedAt) confirmedAt = naverDate(basic(['확인매물', '집주인확인매물', '매물확인일']));
+    // 특징 글: 확인매물 줄(없으면 기준 줄) 바로 위의 한 줄만. 버튼·요약 줄이면 쓰지 않는다
+    var tagAt = prevFilled(L, (confAt >= 0 ? confAt : anchor) - 1, priceEnd);
+    if (tagAt >= 0 && tagOk(L[tagAt])) memo.push('특징: ' + flat(L[tagAt]));
+
+    var rooms = /(\d+)\s*\/\s*(\d+)/.exec(basic(['방수/욕실수', '방/욕실', '방 수/욕실 수']));
+    var moveIn = basic(['입주가능일', '입주 가능일']);
+    var fee = /(\d[\d,.]*\s*만(?:\s*\d[\d,]*)?\s*원|\d[\d,]*\s*원)/.exec(basic(['관리비', '월관리비', '월 관리비']));
+    var extra = [
+      rooms ? '방 ' + rooms[1] + ' / 욕실 ' + rooms[2] : '',
+      moveIn && moveIn.length <= 30 && !/[:：]/.test(moveIn) && /[가-힣\d]/.test(moveIn) && !BASIC_END_RE.test(moveIn) ? '입주가능일 ' + moveIn : '',
+      fee ? '관리비 ' + fee[1].replace(/\s+/g, ' ') : ''
+    ].filter(Boolean);
+    if (extra.length) memo.push(extra.join(' · '));
+
+    // 단지 정보
+    var cxAt = findLine(L, anchor, /^단지 ?정보$/);
+    if (cxAt >= 0) {
+      var cxEnd = blockEnd(L, cxAt + 1, COMPLEX_END_RE, 60);
+      var cx = [];
+      var addr = labelValue(L, cxAt + 1, cxEnd, ['위치', '주소', '소재지']);
+      if (addr && addr.length <= 60 && /(시|도|구|군|동|읍|면|리|로|길)(\s|\d|$)/.test(addr)) cx.push(addr);
+      var ok = /(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})\.?\s*(\(\d+년차\))?/.exec(labelValue(L, cxAt + 1, cxEnd, ['사용승인일', '사용승인', '준공년도']));
+      if (ok) cx.push('사용승인 ' + ok[1] + '.' + pad2(+ok[2]) + '.' + pad2(+ok[3]) + (ok[4] || ''));
+      var hh = /^(\d[\d,]*)\s*세대(?:\s*\(\s*해당\s*면적\s*(\d[\d,]*)\s*세대\s*\))?/.exec(labelValue(L, cxAt + 1, cxEnd, ['세대수', '총세대수']));
+      if (hh) cx.push(hh[1] + '세대' + (hh[2] ? '(해당 면적 ' + hh[2] + '세대)' : ''));
+      var door = /^([가-힣]{2,4}식|타워형|판상형|혼합형)/.exec(labelValue(L, cxAt + 1, cxEnd, ['현관구조']));
+      if (door) cx.push(door[1]);
+      var heat = /^([가-힣]{2,6}난방)/.exec(labelValue(L, cxAt + 1, cxEnd, ['난방', '난방방식']));
+      if (heat) cx.push(heat[1]);
+      var park = labelValue(L, cxAt + 1, cxEnd, ['주차', '주차대수']);
+      var pk = /세대당\s*([\d.]+)\s*대/.exec(park);
+      var pn = /^(\d[\d,]*)\s*대/.exec(park);
+      if (pk) cx.push('주차 세대당 ' + pk[1] + '대');
+      else if (pn) cx.push('주차 ' + pn[1] + '대');
+      if (cx.length) memo.push('단지: ' + cx.join(' · '));
+    }
+
+    // 실거래가: 표의 첫 줄(가장 최근 계약). 1.4.1: '동일면적' 표가 아니면 실거래가 칸은 비우고 메모에만
+    var dealAt = findLine(L, anchor, /^실거래가$/);
+    var deal = dealAt >= 0 ? naverDeal(L, dealAt + 1, blockEnd(L, dealAt + 1, DEAL_END_RE, 80), trade) : null;
+    if (deal) memo.push(deal.memo);
+    if (deal && !deal.same) notes.push('실거래가: 같은 면적 표인지 몰라 메모에만 적었어요');
+    if (pys.length) {
+      // 1.4.1: 네이버가 소수 둘째 자리로 반올림한 평에서 바꾼 값이라 실제 ㎡와 0.01–0.02 다를 수 있다(근삿값)
+      memo.push('면적: 화면의 평 표기(' + pys.join(', ') + ')를 ㎡로 바꿨어요(1평 = 400/121㎡). 0.02㎡까지 다를 수 있어요. ' +
+        '등기부·건축물대장 숫자로 고치거나, 네이버에서 면적 단위를 ㎡로 바꾸고 다시 복사하면 정확해요');
+      notes.push('면적: 평을 ㎡로 바꾼 근삿값이에요(0.02㎡까지 다를 수 있음)');
+    }
+
+    // 중개사: '중개사' 묶음 안에서만. 사무소 이름(…공인중개사사무소·…부동산)과 중개사 이름(한글 2–4자), 전화 칸
+    var agentName = '';
+    var agentPhone = '';
+    var agAt = findLine(L, anchor, /^(중개사|중개사 정보|중개업소|중개업소 정보)$/);
+    if (agAt >= 0) {
+      var agEnd = blockEnd(L, agAt + 1, AGENT_END_RE, 40);
+      var telAt = -1;
+      for (i = agAt + 1; i < agEnd; i++) { if (/^(전화|대표번호|전화번호|연락처|휴대폰)(\s|$)/.test(flat(L[i]))) { telAt = i; break; } }
+      var office = '';
+      var person = '';
+      for (i = agAt + 1; i < (telAt >= 0 ? telAt : agEnd); i++) {
+        f = flat(L[i]);
+        if (!f || /이미지|프로필|매물|보수|보기|등록번호|^중개소$|^중개사$/.test(f)) continue;
+        if (!office && /공인중개|중개사무소|중개법인|부동산|중개/.test(f) && f.length <= 40) { office = f; continue; }
+        if (!person && /^[가-힣]{2,4}$/.test(f) && !/^(대표|소장|실장|중개사|중개소|공인중개사)$/.test(f)) person = f;
+      }
+      agentName = [office, person].filter(Boolean).join(' ');
+      if (telAt >= 0) {
+        var tel = labelValue(L, telAt, telAt + 4, ['전화', '대표번호', '전화번호', '연락처', '휴대폰']);
+        if (/\d{2,4}[\s.)-]*\d{3,4}[\s.-]*\d{4}/.test(tel)) agentPhone = tel;
+      }
+    }
+
+    return {
+      notes: notes,
+      approx: { area: !!(excl && excl.py), supplyArea: !!(supply && supply.py) },
+      raw: {
+        name: nd.name,
+        dong: nd.dong,
+        area: excl ? excl.m2 : null,
+        supplyArea: supply ? supply.m2 : null,
+        askPrice: moneyOf(price.deposit),
+        realPrice: deal && deal.same ? deal.price : null,
+        tradeType: trade,
+        floor: fm ? fm[1] + '/' + fm[2] : '',
+        direction: dm ? dm[0] : '',
+        agentName: agentName,
+        agentPhone: agentPhone, // 번호가 붙어 있어도 cleanProperty(phoneOf)가 나눠 첫 번호만 넣고 나머지는 메모로
+        articleNo: an ? an[0] : '',
+        confirmedAt: confirmedAt,
+        memo: memo.join('\n')
+      }
+    };
+  }
+
+  /** "15평 (전용11)" → "15평(전용 11평)" */
+  function listAreaText(s) {
+    var m = /(\d+(?:\.\d+)?)\s*(평|㎡)\s*\(\s*전용\s*(\d+(?:\.\d+)?)\s*(평|㎡)?\s*\)/.exec(s);
+    return m ? m[1] + m[2] + '(전용 ' + m[3] + (m[4] || m[2]) + ')' : cut(flat(s), 40);
+  }
+
+  /**
+   * 목록 카드 하나(i: '매물' 줄) → { end(다음에 볼 줄), card } . 카드 모양이 아니거나 뺄 유형이면 card 없음.
+   * 카드: 매물 / 이름+동 / 거래 / 가격 / 유형 / N평 (전용M) / 층 / 향 / 집주인확인매물 날짜 / 중개사 / 제공처 / 매물 보러가기
+   */
+  function naverCard(L, i) {
+    var end = i + 1;
+    while (end < L.length && end < i + 20) {
+      var g = flat(L[end]);
+      if (g === '매물 보러가기') { end++; break; }
+      if (g === '매물') break;
+      end++;
+    }
+    var out = { end: end, card: null };
+    var k = nextFilled(L, i + 1, end);
+    if (k < 0 || !titleOk(L[k])) return out;
+    var t = nextFilled(L, k + 1, end);
+    if (t < 0) return out;
+    var f = flat(L[t]);
+    var trade = '';
+    var ph = null;
+    var after = -1;
+    var m = TRADE_PRICE_RE.exec(f);
+    if (m) { trade = m[1]; ph = priceHead(m[2]); after = t + 1; }
+    else if (TRADE_WORD_RE.test(f)) {
+      var pk = nextFilled(L, t + 1, end);
+      if (pk >= 0) { trade = f; ph = priceHead(L[pk]); after = pk + 1; }
+    }
+    if (!trade || !ph || /^~/.test(ph.rest)) return out; // 가격 범위(단지 카드) 등
+    var nd = nameDong(L[k]);
+    var c = { name: nd.name, dong: nd.dong, trade: trade, price: ph, area: '', floor: '', direction: '', confirmedAt: '', agent: '' };
+    var others = [];
+    for (var j = after; j < end; j++) {
+      g = flat(L[j]);
+      if (!g || g === '매물 보러가기' || /관심매물$/.test(g)) continue;
+      if (LIST_TYPE_RE.test(g)) { if (LIST_SKIP_TYPE_RE.test(g)) return out; continue; }
+      if (/^계약\s*\d/.test(g)) return out; // 상가의 계약면적
+      if (!c.area && /\d\s*(평|㎡)/.test(g) && /\(\s*전용/.test(g)) { c.area = g; continue; }
+      var fl = /^([0-9]+|[저중고]|B\d+)\s*\/\s*(\d+)\s*층$/.exec(g);
+      if (!c.floor && fl) { c.floor = fl[1] + '/' + fl[2]; continue; }
+      if (!c.direction && /^(남동|남서|북동|북서|동|서|남|북)향$/.test(g)) { c.direction = g; continue; }
+      if (/확인매물/.test(g)) { if (!c.confirmedAt) c.confirmedAt = naverDate(g.slice(g.indexOf('확인매물') + 4)); continue; }
+      others.push(g);
+    }
+    for (j = 0; j < others.length; j++) {
+      if (/공인중개|중개사|중개법인|중개|부동산/.test(others[j]) && !PROVIDER_RE.test(others[j]) && others[j].length <= 40) { c.agent = others[j]; break; }
+    }
+    var memo = ['네이버 목록에서 읽었어요(상세 화면은 안 봄)'];
+    if ((trade === '월세' || trade === '단기임대') && ph.monthly) memo.push(trade + ': 보증금 ' + priceText(ph));
+    if (c.area) memo.push('면적: 목록 표기 ' + listAreaText(c.area) + '. 반올림 값이라 비워 뒀어요(상세 화면에서 확인)');
+    var ch = /(상승|하락)/.exec(ph.rest);
+    if (ch) memo.push('목록에 가격 변동(' + ch[1] + ') 표시');
+    out.card = {
+      c: c,
+      raw: {
+        name: c.name, dong: c.dong, askPrice: moneyOf(ph.deposit), tradeType: trade,
+        floor: c.floor, direction: c.direction, agentName: c.agent, confirmedAt: c.confirmedAt,
+        memo: memo.join('\n')
+      }
+    };
+    return out;
+  }
+
+  /** 맨 앞 줄(빈 줄 건너뜀)이 "URL: https://…"(iPad 단축어가 붙임)이면 그 줄을 지우고 링크를 돌려준다(http/https 만) */
+  function takeUrlLine(L) {
+    for (var i = 0; i < L.length; i++) {
+      var f = flat(L[i]);
+      if (!f) continue;
+      var m = /^URL\s*[:：]\s*(\S+)/i.exec(f);
+      if (!m) return '';
+      L[i] = '';
+      return httpUrl(m[1]);
+    }
+    return '';
+  }
+
+  function looksNaver(L, url) {
+    var host = '';
+    try { host = url ? new URL(url).hostname : ''; } catch (e) { host = ''; }
+    if (/(^|\.)land\.naver\.com$/i.test(host)) return true;
+    var hit = 0;
+    NAVER_MARKS.forEach(function (re) { if (findLine(L, 0, re) >= 0) hit++; });
+    return hit >= 2;
+  }
+
+  /**
+   * 네이버 부동산 매물 화면 글 해석(1.4.0). opts·결과 모양은 parse 와 같고 source: 'naver', kind, detailFailed 를 더한다.
+   * kind: 'detail'(상세 매물 하나) | 'list'(관심·최근조회 목록 카드만) | 'mixed'(상세 + 목록. 목록 매물은 기본 해제)
+   * detailFailed(1.4.1): 상세 화면 표시('기본 정보'·'매물번호' 줄, 링크의 매물번호)가 있는데 상세 매물을 읽지 못함.
+   *   이때 목록 매물은 기본 해제(사용자는 상세 매물 하나를 담으려던 것이므로), 매물이 없으면 'naver-detail' 문구
+   * 오류: empty / too-big / naver(네이버 글로 보이는데 매물을 못 찾음) / notfound(네이버 글이 아님)
+   */
+  function parseNaverText(input, opts) {
+    opts = opts || {};
+    var res = { ok: false, error: '', message: '', entries: [], total: 0, truncated: 0, skipped: 0, blocks: 0, incomplete: false, source: 'naver', kind: '', detailFailed: false };
+    var src = typeof input === 'string' ? input : '';
+    if (!src.trim()) { res.error = 'empty'; return res; }
+    if (src.length > LIMITS.inputChars) { res.error = 'too-big'; res.message = MESSAGES['too-big']; return res; }
+    var L = naverLines(src);
+    var url = takeUrlLine(L);
+    var detail = naverDetail(L);
+    var detailFailed = !detail && (findLine(L, 0, ANCHOR_RE) >= 0 || findLine(L, 0, /^매물번호(\s|$)/) >= 0 || !!(url && articleNoFromUrl(url)));
+    var list = [];
+    var extras = [];
+    if (detail) {
+      // 단축어가 붙인 링크는 상세 매물의 링크로. 링크의 매물번호가 화면과 다르면(다른 매물 주소) 넣지 않는다
+      var urlNo = url ? articleNoFromUrl(url) : '';
+      if (url && urlNo && detail.raw.articleNo && urlNo !== detail.raw.articleNo) detail.notes.push('링크의 매물번호가 화면과 달라 링크는 뺐어요');
+      else if (url) detail.raw.sourceUrl = url;
+      list.push(detail.raw);
+      extras.push({ notes: detail.notes, fromList: false, unchecked: false, loose: true, approx: detail.approx });
+    }
+    for (var i = 0; i < L.length; i++) {
+      if (flat(L[i]) !== '매물') continue;
+      var r = naverCard(L, i);
+      i = r.end - 1;
+      if (!r.card) continue;
+      var d = detail && detail.raw;
+      // 상세 매물과 같은 카드(왼쪽 목록에도 떠 있음)는 한 번만
+      if (d && r.card.raw.name.replace(/\s+/g, '') === d.name.replace(/\s+/g, '') && r.card.raw.dong === d.dong &&
+        r.card.raw.askPrice === d.askPrice && r.card.raw.tradeType === d.tradeType && (!r.card.raw.floor || !d.floor || r.card.raw.floor === d.floor)) continue;
+      list.push(r.card.raw);
+      extras.push({ notes: ['목록에서 읽어 면적은 비워 뒀어요'], fromList: true, unchecked: !!detail || detailFailed, loose: true });
+    }
+    res.detailFailed = detailFailed;
+    if (!list.length) {
+      res.error = detailFailed || looksNaver(L, url) ? 'naver' : 'notfound';
+      res.message = detailFailed ? MESSAGES['naver-detail'] : (res.error === 'naver' ? MESSAGES.naver : MESSAGES.nothing);
+      return res;
+    }
+    res.kind = detail ? (list.length > 1 ? 'mixed' : 'detail') : 'list';
+    res.blocks = 1;
+    fillEntries(res, list, opts, extras);
+    if (!res.entries.length) { res.error = 'naver'; res.message = MESSAGES.naver; return res; }
     res.ok = true;
     return res;
   }
 
-  /** 정리된 매물들 → 코드 객체(빈 값은 뺌, 호수 없음). tools/make-import-code.js 가 쓴다 */
-  function toCode(props) {
+  /**
+   * 앱 입력 칸·도구용 해석(1.4.0): 가져오기 코드(JSON)를 먼저 찾고, 없거나 못 읽으면 네이버 매물 화면 글로 읽는다.
+   * 코드와 네이버 글이 함께 있으면 코드를 쓴다. 둘 다 아니면 코드 쪽 오류(코드를 못 찾았으면 'nothing' 문구로)
+   */
+  function parseText(input, opts) {
+    var r = parse(input, opts);
+    if (r.ok || r.error === 'empty' || r.error === 'too-big') return r;
+    var n = parseNaverText(input, opts);
+    if (n.ok || n.error === 'naver') return n;
+    if (r.error === 'notfound') r.message = MESSAGES.nothing;
+    return r;
+  }
+
+  /**
+   * 정리된 매물들 → 코드 객체(빈 값은 뺌, 호수 없음). tools/make-import-code.js 가 쓴다.
+   * opts.from: 'naver-text'(1.4.1) 이면 최상위에 "from" 을 넣는다. 앱(parse)이 보고 네이버 글 주의·출처를 쓴다
+   */
+  function toCode(props, opts) {
     var order = ['name', 'dong', 'area', 'supplyArea', 'askPrice', 'realPrice', 'tradeType', 'floor', 'direction',
       'agentName', 'agentPhone', 'sourceUrl', 'articleNo', 'confirmedAt', 'memo'];
-    return {
-      imjang: CODE_VERSION,
-      properties: (props || []).map(function (p) {
-        var o = {};
-        order.forEach(function (k) {
-          var v = p[k];
-          if (v === null || v === undefined || v === '') return;
-          o[k] = v;
-        });
-        return o;
-      })
-    };
+    var code = { imjang: CODE_VERSION };
+    if (opts && opts.from === NAVER_SOURCE_ID) code.from = NAVER_SOURCE_ID;
+    code.properties = (props || []).map(function (p) {
+      var o = {};
+      order.forEach(function (k) {
+        var v = p[k];
+        if (v === null || v === undefined || v === '') return;
+        o[k] = v;
+      });
+      return o;
+    });
+    return code;
   }
 
   // ---------------- 딥링크 (#/import?c=<base64url(UTF-8 JSON)>) ----------------
@@ -748,10 +1452,13 @@
   return {
     CODE_VERSION: CODE_VERSION,
     SOURCE_ID: SOURCE_ID,
+    NAVER_SOURCE_ID: NAVER_SOURCE_ID,
     LIMITS: LIMITS,
     PROMPT: PROMPT,
     MESSAGES: MESSAGES,
     parse: parse,
+    parseText: parseText,           // 1.4.0: 코드 → 네이버 글 순서(앱 입력 칸·도구)
+    parseNaverText: parseNaverText, // 1.4.0
     toCode: toCode,
     dupInfo: dupInfo,
     sameListing: sameListing,
