@@ -1274,3 +1274,42 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
 .undo-bar p { min-width: 0; }
 .undo-bar .btn { flex: none; }
 .merge-names .nl-sub { font-weight: 500; color: var(--muted); }
+
+/* ---------- 섹션 바로가기 줄: ◀ ▶ 버튼과 마우스 끌기 (1.4.4) ---------- */
+.sec-chips-wrap {
+  position: sticky;
+  top: calc(var(--topbar-h) + var(--safe-top));
+  z-index: 20;
+  margin: 4px calc(-1 * var(--gutter) - var(--safe-right)) 10px calc(-1 * var(--gutter) - var(--safe-left));
+  background: var(--bg);
+}
+.sec-chips-wrap > .sec-chips { position: relative; top: auto; z-index: 0; margin: 0; }
+.chip-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1.5px solid var(--line);
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 0 0 8px var(--bg), 0 2px 8px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+.chip-arrow[hidden] { display: none; }
+.chip-arrow .ic { width: 22px; height: 22px; }
+.chip-arrow-prev { left: calc(6px + var(--safe-left)); }
+.chip-arrow-next { right: calc(6px + var(--safe-right)); }
+.chip-arrow:focus-visible { outline: 3px solid var(--teal); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  .sec-chips { cursor: grab; }
+  .sec-chips .sec-chip { cursor: pointer; }
+  .chip-arrow:hover { border-color: var(--teal); color: var(--teal); }
+}
+.sec-chips.is-dragging, .sec-chips.is-dragging .sec-chip { cursor: grabbing; user-select: none; -webkit-user-select: none; }

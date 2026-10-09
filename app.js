@@ -23,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.4.3';
+  var APP_VERSION = '1.4.4';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -86,6 +86,7 @@
     book: '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3"/><path d="M9 7.5h6M9 11h4"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
     back: '<path d="M15 18l-6-6 6-6"/>',
+    forward: '<path d="M9 6l6 6-6 6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/>',
     help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.6"/><path d="M12 17.2h.01"/>',
@@ -2557,7 +2558,73 @@
       view.refs.chips[sec.id] = { el: chip, n: n };
       nav.append(chip);
     });
-    return nav;
+    return chipScroller(nav);
+  }
+
+  /**
+   * 1.4.4: 가로로 넘치는 칩 줄을 옮기는 도우미.
+   * - 양 끝 ◀ ▶ 버튼: 숨은 칩이 있는 쪽에만 보이고, 누르면 줄 폭의 70% 만큼 옮긴다.
+   * - 마우스로 끌기: 6px 넘게 끌면 줄이 따라오고, 끈 뒤의 클릭(칩 이동)은 무시한다. 터치는 원래대로 손가락으로 민다.
+   * 키보드는 칩에 초점을 옮기면 브라우저가 알아서 보이게 하므로 ◀ ▶ 버튼은 탭 순서에서 뺀다.
+   */
+  function chipScroller(nav) {
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function step(dir) {
+      var by = dir * Math.max(120, Math.round(nav.clientWidth * 0.7));
+      if (nav.scrollBy) nav.scrollBy({ left: by, behavior: reduce ? 'auto' : 'smooth' });
+      else nav.scrollLeft += by;
+    }
+    var prev = h('button', { type: 'button', class: 'chip-arrow chip-arrow-prev', tabindex: '-1', 'aria-label': '앞쪽 섹션 보기', hidden: true, onclick: function () { step(-1); } }, icon('back'));
+    var next = h('button', { type: 'button', class: 'chip-arrow chip-arrow-next', tabindex: '-1', 'aria-label': '뒤쪽 섹션 보기', hidden: true, onclick: function () { step(1); } }, icon('forward'));
+    function update() {
+      var max = nav.scrollWidth - nav.clientWidth;
+      prev.hidden = !(nav.scrollLeft > 2);
+      next.hidden = !(max > 2 && nav.scrollLeft < max - 2);
+    }
+    nav.addEventListener('scroll', update, { passive: true });
+    if (window.ResizeObserver) new ResizeObserver(update).observe(nav);
+    else window.addEventListener('resize', update);
+    requestAnimationFrame(update);
+
+    // 마우스 끌기
+    var drag = null;
+    var suppressClick = false;
+    nav.addEventListener('pointerdown', function (e) {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      drag = { id: e.pointerId, x: e.clientX, left: nav.scrollLeft, moved: false };
+    });
+    nav.addEventListener('pointermove', function (e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      var dx = e.clientX - drag.x;
+      if (!drag.moved) {
+        if (Math.abs(dx) < 6) return;
+        drag.moved = true;
+        nav.classList.add('is-dragging');
+        try { nav.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+      }
+      nav.scrollLeft = drag.left - dx;
+      e.preventDefault();
+    });
+    function endDrag() {
+      if (!drag) return;
+      if (drag.moved) {
+        suppressClick = true;
+        setTimeout(function () { suppressClick = false; }, 0); // 끈 직후의 클릭 한 번만 무시
+      }
+      nav.classList.remove('is-dragging');
+      drag = null;
+    }
+    nav.addEventListener('pointerup', endDrag);
+    nav.addEventListener('pointercancel', endDrag);
+    nav.addEventListener('click', function (e) {
+      if (!suppressClick) return;
+      suppressClick = false;
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    nav.addEventListener('dragstart', function (e) { e.preventDefault(); }); // 버튼 글자를 끌어 놓기로 잡지 않게
+
+    return h('div', { class: 'sec-chips-wrap' }, nav, prev, next);
   }
 
   function sectionEl(prop, sec) {
