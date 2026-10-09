@@ -23,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.4.4';
+  var APP_VERSION = '1.4.5';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -380,6 +380,7 @@
           tip: str(it.tip),
           group: str(it.group),
           severity: type === 'flag' ? (it.severity === 'stop' ? 'stop' : 'caution') : '',
+          memoHint: str(it.memoHint), // 1.4.5: 메모 칸 자리표시 문구(없으면 앱 기본 문구)
           sectionId: secId
         });
       });
@@ -409,6 +410,14 @@
 
   function gateSections() { return CL.sections.filter(function (s) { return s.gate; }); }
 
+  /** 1.4.5: data.js 바로가기(links) 중 이름(label)에 word 가 들어 있는 첫 것. 없으면 null */
+  function linkByLabel(word) {
+    for (var i = 0; i < CL.links.length; i++) {
+      if (CL.links[i].label.indexOf(word) >= 0) return CL.links[i];
+    }
+    return null;
+  }
+
   // =====================================================
   // 4. 저장소 (localStorage)
   //    - 바뀐 것이 있을 때만(dirty) 저장한다. 화면을 떠날 때도 dirty 일 때만 쓴다.
@@ -428,7 +437,7 @@
   var loadProblem = null; // 'blocked' | 'broken'
 
   function emptyState() {
-    return { version: SCHEMA_VERSION, rev: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null } };
+    return { version: SCHEMA_VERSION, rev: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null, backupWithPhotos: null } };
   }
 
   var ITEM_VALUE_KEYS = ['status', 'memo', 'answer', 'date', 'done']; // 항목 상태의 값 이름(merge.js ITEM_FIELDS 와 같음)
@@ -575,6 +584,8 @@
       s.ui.lastBackupAt = numOrNull(data.ui.lastBackupAt);
       s.ui.deviceName = cleanDeviceName(data.ui.deviceName); // 1.3.0: 사용자가 정한 기기 이름(비면 자동)
       s.ui.deviceNameAt = numOrNull(data.ui.deviceNameAt);
+      // 1.4.5: 백업 "사진도 함께 넣기"의 마지막 선택. 고른 적이 없으면 null(사진 수·크기로 기본값을 정함)
+      s.ui.backupWithPhotos = typeof data.ui.backupWithPhotos === 'boolean' ? data.ui.backupWithPhotos : null;
     }
     return s;
   }
@@ -781,7 +792,10 @@
       knownRev = candidate.rev;
       return true;
     } catch (e) {
+      // 1.4.5: 실패 표시를 남겨야 다음 성공 저장(saveNow)이 빨간 띠를 지운다(전에는 새로고침할 때까지 남았음)
+      saveFailed = true;
       showSaveError(e);
+      updateSaveState();
       return false;
     }
   }
@@ -794,10 +808,10 @@
     var quota = name === 'QuotaExceededError' || err.code === 22 || err.code === 1014;
     var blocked = loadProblem === 'blocked' || name === 'SecurityError';
     el.textContent = quota
-      ? '저장 공간이 부족해 방금 입력한 내용을 저장하지 못했어요. 설정에서 백업한 뒤 필요 없는 매물이나 사진을 지워 주세요.'
+      ? '저장 공간이 부족해 기록을 저장하지 못했어요. 설정에서 백업한 뒤 필요 없는 매물이나 사진을 지워 주세요.'
       : blocked
         ? '이 기기에서 기록을 저장할 수 없어요. iPhone 설정 → Safari → "모든 쿠키 차단"이 켜져 있으면 꺼 주세요. 지금 입력한 내용은 이 화면을 닫으면 사라져요.'
-        : '기록을 저장하지 못했어요. 다음 입력 때 다시 저장해 볼게요. 계속 이 안내가 보이면 설정에서 백업해 두세요. 이 화면을 닫으면 방금 입력한 내용이 사라질 수 있어요.';
+        : '기록을 저장하지 못했어요. 다음 입력 때 다시 저장해 볼게요. 계속 이 안내가 보이면 설정에서 백업해 두세요. 이 화면을 닫으면 저장하지 못한 기록이 사라질 수 있어요.';
     el.hidden = false;
   }
 
@@ -1144,6 +1158,8 @@
   /** 주의 개수 = 현장 평가 '주의' + 등기부 '주의' 신호 */
   function cautionCount(prop) { return rateCautions(prop).length + flagsYes(prop, 'caution').length; }
 
+  // 라벨 6개("멈춤 신호 n건" / "아직 안 봄" / "멈춤 신호 n개 미확인" / "주의 n건 · 멈춤 신호 없음" / "멈춤 신호 없음 · 확인 중 n/m" /
+  // "체크 항목 이상 없음")를 바꾸면 data.js 용어 "등기부 결과" 설명도 같이 고친다(사용자가 홈 카드의 라벨로 용어를 검색함)
   function registryResult(prop) {
     var gs = gateSections();
     if (!gs.length) return { code: 'none', label: '-' };
@@ -1158,8 +1174,12 @@
     });
     if (stops) return { code: 'stop', label: '멈춤 신호 ' + stops + '건' };
     if (prog.done === 0) return { code: 'todo', label: '아직 안 봄' };
-    if (cautions) return { code: 'caution', label: '주의 ' + cautions + '건' + (prog.done < prog.total ? ' · 확인 중' : '') };
-    if (prog.done < prog.total) return { code: 'progress', label: '확인 중 ' + prog.done + '/' + prog.total };
+    // 1.4.5: 핵심 과업(멈춤 신호 7개 답하기)의 결과를 보여 준다. 전에는 모두 "없음"이어도 "확인 중 7/17"로만 보였음
+    var gate = gateStopState(prop);
+    if (gate.unanswered > 0) return { code: 'unanswered', label: '멈춤 신호 ' + gate.unanswered + '개 미확인' };
+    // 여기부터는 멈춤 신호를 모두 "없음"으로 답한 상태
+    if (cautions) return { code: 'caution', label: '주의 ' + cautions + '건 · 멈춤 신호 없음' };
+    if (prog.done < prog.total) return { code: 'clear', label: '멈춤 신호 없음 · 확인 중 ' + prog.done + '/' + prog.total };
     return { code: 'ok', label: '체크 항목 이상 없음' };
   }
 
@@ -1174,6 +1194,8 @@
     if (prop.status === 'visited' || prop.status === 'contract') return true;
     return stops.some(function (it) { return !isGateItem(it); });
   }
+  /** 지금 이 매물의 멈춤 안내가 늦은 단계 문구인지. 상단 경고(renderAlerts)·홈 카드 칩과 같은 기준 */
+  function lateNow(prop) { return stopIsLate(prop, flagsYes(prop, 'stop')); }
 
   // =====================================================
   // 7. 공통 UI
@@ -1218,6 +1240,17 @@
 
   function statusChip(status) {
     return h('span', { class: 'chip chip-' + status, text: STATUS_LABEL[status] || status });
+  }
+
+  /**
+   * 1.4.5: data.js 바로가기를 새 창으로 여는 작은 링크. word 가 이름에 든 바로가기가 없으면 null(버튼 자체를 숨김).
+   * cls 를 주면 그 클래스(예: 버튼 모양)로, 없으면 .ext-link
+   */
+  function extLink(word, text, cls) {
+    var l = linkByLabel(word);
+    if (!l) return null;
+    return h('a', { class: cls || 'ext-link', href: l.url, target: '_blank', rel: 'noopener noreferrer' },
+      text, icon('external', 'ic-sm'), h('span', { class: 'sr-only', text: '(새 창)' }));
   }
 
   /** 진행 막대. set(pct, label) 로 갱신 */
@@ -1497,7 +1530,7 @@
   var view = { name: '', prop: null, refs: {}, photos: null };
 
   function newView(name, prop) {
-    view = { name: name, prop: prop || null, refs: { secs: {}, chips: {}, hints: [], strips: {} }, photos: null, photosReady: null };
+    view = { name: name, prop: prop || null, refs: { secs: {}, chips: {}, hints: [], stopWords: [], strips: {} }, photos: null, photosReady: null };
     return view;
   }
 
@@ -1628,10 +1661,11 @@
       ),
       makeBar(prog.pct, '진행 ' + prog.pct + '%', { ariaLabel: '체크리스트 진행률' }).el,
       h('div', { class: 'pcard-meta' },
-        // 호수가 없으면 등기부를 열람할 수 없다(가져오기 코드로 만든 매물은 늘 비어 있음)
-        !p.ho && !dropped ? h('span', { class: 'meta-chip need-ho', text: '호수 입력 필요' }) : null,
+        // 동·호수가 없으면 등기부를 열람할 수 없다(가져온 매물은 동만 있고 호수가 비어 있음 → "호수 입력 필요")
+        (!p.dong || !p.ho) && !dropped ? h('span', { class: 'meta-chip need-ho', text: p.dong ? '호수 입력 필요' : '동·호수 입력 필요' }) : null,
         h('span', { class: 'meta-chip reg-' + reg.code, text: '등기부: ' + reg.label }),
-        cautions ? h('span', { class: 'meta-chip warn', text: '주의 ' + cautions + '개' }) : h('span', { class: 'meta-chip', text: '주의 0개' }),
+        // 1.4.5: 아무것도 안 본 매물에는 "주의 0개"를 붙이지 않는다("문제 없음"처럼 읽히지 않게)
+        cautions ? h('span', { class: 'meta-chip warn', text: '주의 ' + cautions + '개' }) : (prog.done ? h('span', { class: 'meta-chip', text: '주의 0개' }) : null),
         stops && !dropped ? h('span', { class: 'meta-chip reg-stop', text: stopIsLate(p, stopList) ? '진행 멈춤' : '임장 불필요' }) : null
       ),
       dropped ? h('p', { class: 'pcard-drop', text: '탈락' + (p.dropReason ? ' · ' + p.dropReason : '') }) : null
@@ -1880,6 +1914,7 @@
     } : { status: 'review' });
     // 호수 칸 강조: 가져오기 코드로 만든 매물(호수가 늘 비어 있음)이거나 [입력하기]로 들어왔을 때
     var focusHo = !!editing && pendingFocus === 'ho';
+    var focusDong = !!editing && pendingFocus === 'dong'; // 1.4.5: 동도 비어 있으면 동 칸부터
     pendingFocus = null;
     var needHo = !!editing && !editing.ho && (!!editing.importedAt || focusHo);
 
@@ -2114,7 +2149,8 @@
     // 가져오기 직후(또는 상세의 [입력하기]): 호수 칸으로. navigateNow 로 클릭 처리 안에서 그려지므로
     // 여기서 바로 초점을 줘야 iOS 가 키보드를 띄운다(setTimeout 이나 hashchange 뒤에 주면 커서만 가거나 무시됨)
     if (focusHo) { try { f.ho.focus(); } catch (e) { /* 무시 */ } }
-    return editing && !focusHo ? null : 'focused'; // 새 매물은 단지명, 호수 입력은 호수 칸에 초점을 주므로 제목으로 옮기지 않는다
+    else if (focusDong) { try { f.dong.focus(); } catch (e) { /* 무시 */ } }
+    return editing && !focusHo && !focusDong ? null : 'focused'; // 새 매물은 단지명, 호수 입력은 호수(동) 칸에 초점을 주므로 제목으로 옮기지 않는다
   }
 
   // ---------------- 매물 지우기와 되돌리기 ----------------
@@ -2335,15 +2371,17 @@
     updateTabbar('home');
     var main = resetMain();
     appendKid(main, dataWarning());
-    // 호수가 없으면 등기부를 열람할 수 없다(가져오기 코드로 만든 매물은 호수가 비어 있음)
-    if (!prop.ho && prop.status !== 'dropped') {
+    // 동·호수가 없으면 등기부를 열람할 수 없다(가져온 매물은 동만 있고 호수가 비어 있음 → "호수를"). 1.4.5: 동도 본다
+    if ((!prop.dong || !prop.ho) && prop.status !== 'dropped') {
       main.append(h('div', { class: 'notice notice-ho', role: 'note' },
-        h('strong', { text: '호수를 입력해야 등기부를 볼 수 있어요' }),
+        h('strong', { text: (prop.dong ? '호수를' : '동·호수를') + ' 입력해야 등기부를 볼 수 있어요' }),
         h('p', { text: '등기부등본은 동·호수까지 알아야 열람할 수 있어요. 중개사에게 받아 적어 주세요.' }),
-        h('button', {
-          type: 'button', class: 'btn btn-small btn-accent',
-          onclick: function () { pendingFocus = 'ho'; navigateNow('/p/' + prop.id + '/edit'); } // 클릭 안에서 그려야 iOS 가 키보드를 띄움
-        }, '입력하기')
+        h('div', { class: 'btn-row' },
+          h('button', {
+            type: 'button', class: 'btn btn-small btn-accent',
+            onclick: function () { pendingFocus = prop.dong ? 'ho' : 'dong'; navigateNow('/p/' + prop.id + '/edit'); } // 클릭 안에서 그려야 iOS 가 키보드를 띄움
+          }, '입력하기'),
+          extLink('인터넷등기소', '인터넷등기소 열기', 'btn btn-small btn-ghost')) // 1.4.5
       ));
     }
     main.append(detailHeader(prop));
@@ -2495,6 +2533,7 @@
     if (view.refs.statusSelect) view.refs.statusSelect.value = prop.status;
     if (view.refs.sectionsWrap) view.refs.sectionsWrap.classList.toggle('prop-dropped', prop.status === 'dropped');
     renderAlerts(prop);
+    refreshStopWords(prop); // 1.4.5: 임장 완료·계약 검토로 바뀌면 항목 안 멈춤 문구도 "돈을 보내지 말고"로
   }
 
   function dropProperty(prop) {
@@ -2641,7 +2680,12 @@
       bar.el
     );
     var body = h('div', { class: 'sec-body', id: bodyId, hidden: true });
-    var wrap = h('section', { class: 'sec' + (sec.gate ? ' sec-gate' : ''), id: 'sec-' + domId(sec.id) }, head, body);
+    // 1.4.5: 머리 아래 작은 바로가기(새 창). 등기부 → 인터넷등기소, 가기 전 준비 → 실거래가·건축물대장. data.js 에 없으면 생략
+    var links = sec.gate ? [extLink('인터넷등기소', '인터넷등기소 열기')]
+      : sec.id === 'prep' ? [extLink('실거래가', '실거래가 조회'), extLink('건축물대장', '건축물대장')] : [];
+    links = links.filter(Boolean);
+    var wrap = h('section', { class: 'sec' + (sec.gate ? ' sec-gate' : ''), id: 'sec-' + domId(sec.id) },
+      head, links.length ? h('div', { class: 'sec-links' }, links) : null, body);
     head.addEventListener('click', function () { toggleSection(sec.id); });
     view.refs.secs[sec.id] = { wrap: wrap, head: head, body: body, countEl: countEl, bar: bar, rendered: false };
     return wrap;
@@ -2683,7 +2727,7 @@
       );
       // 2) 등기부 멈춤 신호가 '있음'일 때: 이 집은 보러 갈 필요가 없어요
       var stopLine = h('div', { class: 'stop-line', role: 'note' },
-        h('strong', {}, icon('alert', 'ic-sm'), '멈춤 신호가 있어 이 집은 임장할 필요가 없어요'),
+        h('strong', {}, icon('alert', 'ic-sm'), stopWordEl(prop, 'span', null, 'line', true)),
         h('div', { class: 'btn-row' },
           h('button', { type: 'button', class: 'btn btn-small btn-danger drop-btn', onclick: function () { dropProperty(prop); } }, '탈락 처리'),
           h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: function () { jumpToSection(gates[0].id); } }, '등기부 다시 보기'))
@@ -2710,6 +2754,27 @@
     });
     body.append(list);
     body.append(sectionNotes(prop, sec));
+  }
+
+  /**
+   * 1.4.5: 멈춤 신호 문구 묶음 [등기부 단계, 늦은 단계]. 항목 태그·"있음" 바로 아래 안내·다른 섹션 맨 위 줄이
+   * 상단 경고와 같은 기준(lateNow)으로 고른다. 전에는 "임장 완료"인 매물에서도 "임장할 필요가 없어요"가 보였음
+   */
+  var STOP_WORDS = {
+    tag: ['멈춤 신호 · 있으면 임장 불필요', '멈춤 신호 · 있으면 돈 보내지 않기'],
+    inline: ['멈춤 신호예요. 이 집은 임장할 필요가 없어요.', '멈춤 신호예요. 가계약금·잔금을 보내지 말고 멈추세요.'],
+    line: ['멈춤 신호가 있어 이 집은 임장할 필요가 없어요', '멈춤 신호가 있어요. 가계약금·잔금을 보내지 말고 멈추세요']
+  };
+  /** 멈춤 신호 문구 요소. gate: 등기부 섹션 것인지(계약 단계 항목은 늘 늦은 단계 문구). 상태·답이 바뀌면 refreshStopWords 가 다시 쓴다 */
+  function stopWordEl(prop, tag, cls, kind, gate) {
+    var el = h(tag, { class: cls, text: STOP_WORDS[kind][lateNow(prop) || !gate ? 1 : 0] });
+    view.refs.stopWords.push({ el: el, kind: kind, gate: gate });
+    return el;
+  }
+  function refreshStopWords(prop) {
+    if (view.prop !== prop) return;
+    var late = lateNow(prop);
+    view.refs.stopWords.forEach(function (r) { r.el.textContent = STOP_WORDS[r.kind][late || !r.gate ? 1 : 0]; });
   }
 
   /** 다른 섹션 맨 위의 '등기부부터 보세요' / '멈춤 신호가 있어요' 안내 갱신 */
@@ -2761,7 +2826,7 @@
     var before = el.getBoundingClientRect().top;
     applyItemClasses(el, it, getItemState(prop, it.id));
     refreshProgress(prop);
-    if (it.type === 'flag') renderAlerts(prop);
+    if (it.type === 'flag') { renderAlerts(prop); refreshStopWords(prop); }
     if (sec.gate) refreshHints(prop);
     var shift = el.getBoundingClientRect().top - before;
     if (Math.abs(shift) > 1) window.scrollBy(0, shift);
@@ -2863,9 +2928,9 @@
     }
 
     var tags = it.type === 'flag'
-      ? h('div', { class: 'item-tags' }, h('span', { class: 'sev sev-' + it.severity, text: it.severity === 'stop'
-        ? (sec.gate ? '멈춤 신호 · 있으면 임장 불필요' : '멈춤 신호 · 있으면 돈 보내지 않기')
-        : '주의 신호 · 있으면 조심해서 진행' }))
+      ? h('div', { class: 'item-tags' }, it.severity === 'stop'
+        ? stopWordEl(prop, 'span', 'sev sev-stop', 'tag', sec.gate)
+        : h('span', { class: 'sev sev-caution', text: '주의 신호 · 있으면 조심해서 진행' }))
       : null;
     var tip = it.tip ? h('p', { class: 'item-tip' }, h('b', { text: '팁 ' }), it.tip) : null;
 
@@ -2874,23 +2939,25 @@
     var memo = null;
     var stopInline = null;
 
+    // 1.4.5: data.js 항목에 memoHint 가 있으면 메모 칸 자리표시로 쓴다(없으면 종류별 기본 문구)
+    var hint = it.memoHint;
     if (it.type === 'rate') {
-      memo = memoField(prop, it, sec.cautionUse === 'reference' ? '어떤 점이 아쉬운지 적어 두면 가격을 판단할 때 써요' : '어떤 점이 아쉬운지 적어 두면 협상·특약 때 써요');
+      memo = memoField(prop, it, hint || (sec.cautionUse === 'reference' ? '어떤 점이 아쉬운지 적어 두면 가격을 판단할 때 써요' : '어떤 점이 아쉬운지 적어 두면 협상·특약 때 써요'));
       controls = segment([{ v: 'good', label: '양호' }, { v: 'caution', label: '주의' }], st.status, function (val) {
         setItemState(prop, it.id, { status: val });
         if (val === 'caution') memo.open();
         afterItemChange(prop, sec, it, el);
       }, textId);
     } else if (it.type === 'flag') {
-      memo = memoField(prop, it, '예: 채권최고액, 접수 날짜, 권리자');
+      memo = memoField(prop, it, hint || '예: 채권최고액, 접수 날짜, 권리자');
       controls = segment([{ v: 'yes', label: '있음' }, { v: 'no', label: '없음' }], st.status, function (val) {
         setItemState(prop, it.id, { status: val });
         afterItemChange(prop, sec, it, el);
       }, textId);
       if (it.severity === 'stop') {
-        // '있음'을 누른 바로 그 자리에서 결과와 [탈락 처리]를 보여 준다(위쪽 배너는 화면 밖일 수 있음)
+        // '있음'을 누른 바로 그 자리에서 결과와 [탈락 처리]를 보여 준다(위쪽 배너는 화면 밖일 수 있음). 문구는 상단 경고와 같은 기준
         stopInline = h('div', { class: 'stop-inline', role: 'note' },
-          h('p', { text: sec.gate ? '멈춤 신호예요. 이 집은 임장할 필요가 없어요.' : '멈춤 신호예요. 돈을 보내지 말고 멈추세요.' }),
+          stopWordEl(prop, 'p', null, 'inline', sec.gate),
           h('button', { type: 'button', class: 'btn btn-small btn-danger drop-btn', onclick: function () { dropProperty(prop); } }, '탈락 처리'));
       }
     } else if (it.type === 'ask') {
@@ -2916,14 +2983,14 @@
         afterItemChange(prop, sec, it, el);
       };
       dateInput.addEventListener('change', onDate);
-      var vmemo = h('textarea', { class: 'input', id: vmId, rows: rowsFor(st.memo), placeholder: '예: 밤 10시, 위층 발소리 거의 없음', value: st.memo || '', 'aria-describedby': textId });
+      var vmemo = h('textarea', { class: 'input', id: vmId, rows: rowsFor(st.memo), placeholder: hint || '예: 밤 10시, 위층 발소리 거의 없음', value: st.memo || '', 'aria-describedby': textId });
       vmemo.addEventListener('input', function () { setItemState(prop, it.id, { memo: vmemo.value }); });
       extra = h('div', { class: 'visit-fields' },
         h('div', {}, h('label', { class: 'inline-label', for: dId, text: '다녀온 날짜 (갈 날을 미리 적어도 돼요)' }), dateInput),
         h('div', {}, h('label', { class: 'inline-label', for: vmId, text: '메모' }), vmemo)
       );
     } else {
-      memo = memoField(prop, it, '메모');
+      memo = memoField(prop, it, hint || '메모');
     }
 
     var tools = h('div', { class: 'item-tools' }, memo ? memo.btn : null, photoAddButton(prop, { itemId: it.id }, it.text));
@@ -3369,10 +3436,17 @@
     var hiddenNote = h('p', { class: 'small muted', 'aria-live': 'polite', style: 'margin:-4px 2px 10px' });
     var tableWrap = h('div', { class: 'table-scroll', tabindex: '0', role: 'region', 'aria-label': '매물 비교 표 (옆으로 밀어서 보기)' });
 
+    // 1.4.5: 매물이 하나뿐이면 비교할 상대가 없다는 안내 + [매물 추가](0개일 때만 안내하던 것)
+    var oneNote = state.properties.length === 1 ? h('div', { class: 'notice notice-info cmp-one', role: 'note' },
+      h('p', { text: '매물을 하나 더 추가하면 호가·등기부 결과를 나란히 비교할 수 있어요.' }),
+      h('a', { class: 'btn btn-small btn-accent', href: '#/new' }, icon('plus', 'ic-sm'), '매물 추가')) : null;
     main.append(
       h('p', { class: 'page-sub', text: '표를 옆으로 밀면 더 볼 수 있어요. 매물 이름을 누르면 상세 화면으로 가요.' }),
       h('div', { class: 'compare-tools' }, sortSel, h('label', { class: 'toggle' }, dropToggle, '탈락 매물도 보기')),
-      hiddenNote,
+      hiddenNote
+    );
+    appendKid(main, oneNote); // null 이면 넣지 않는다(main.append(null) 은 글자 "null"을 넣음)
+    main.append(
       tableWrap,
       h('div', { class: 'card', style: 'margin-top:14px' },
         h('p', { class: 'small muted', text: '실거래 대비: 호가가 최근 실거래가보다 몇 % 높은지(+) 낮은지(−). 실거래가는 한 건의 거래라 층·향·수리 상태에 따라 차이가 날 수 있어요.' }),
@@ -3469,21 +3543,49 @@
 
   function renderGlossary() {
     newView('glossary');
-    setTopbar({ title: '용어와 바로가기' });
+    setTopbar({ title: '용어·링크' }); // 1.4.5: 탭 이름과 같게(1.4.4까지 "용어와 바로가기")
     updateTabbar('glossary');
     var main = resetMain();
     appendKid(main, dataWarning());
 
     var q = sessionGet('imjang.gloss.q') || '';
-    var search = h('input', { class: 'input', type: 'search', placeholder: '용어 찾기 (예: 신탁, 근저당)', 'aria-label': '용어 검색', value: q, autocomplete: 'off', enterkeyhint: 'search' });
+    var search = h('input', { class: 'input', type: 'search', placeholder: '용어·바로가기 찾기 (예: 신탁, 등기소)', 'aria-label': '용어·바로가기 검색', value: q, autocomplete: 'off', enterkeyhint: 'search' });
     var countEl = h('p', { class: 'small muted', 'aria-live': 'polite', style: 'margin:0 2px 8px' });
     var list = h('ul', { class: 'gloss', role: 'list' });
+
+    // 1.4.5: 바로가기 묶음을 검색창 바로 아래로(용어 51개 뒤에 있어 찾기 어려웠음). 검색어가 있으면 이름·설명·주소가 맞는 것만 보인다
+    var linkRows = CL.links.map(function (l) {
+      var host = '';
+      try { host = new URL(l.url).host; } catch (e) { host = l.url; }
+      var li = h('li', {},
+        h('a', { class: 'link-card', href: l.url, target: '_blank', rel: 'noopener noreferrer' },
+          h('span', { class: 'lc-main' },
+            h('span', { class: 'lc-label', text: l.label }),
+            l.desc ? h('span', { class: 'lc-desc', style: 'display:block', text: l.desc }) : null,
+            h('span', { class: 'lc-host', style: 'display:block', text: host })),
+          icon('external'),
+          h('span', { class: 'sr-only', text: '(새 창)' })
+        ));
+      return { el: li, key: (l.label + ' ' + l.desc + ' ' + host).toLowerCase() };
+    });
+    var linksBlock = linkRows.length ? h('section', { class: 'links-block', 'aria-labelledby': 'gloss-links' },
+      h('h2', { class: 'h2', id: 'gloss-links' }, '바로가기', h('span', { class: 'count', text: '새 창으로 열려요' })),
+      h('ul', { class: 'links', role: 'list' }, linkRows.map(function (r) { return r.el; }))) : null;
 
     function draw() {
       var term = search.value.trim();
       sessionSet('imjang.gloss.q', term);
       list.textContent = '';
       var tl = term.toLowerCase();
+      if (linksBlock) {
+        var shown = 0;
+        linkRows.forEach(function (r) {
+          var ok = !tl || r.key.indexOf(tl) >= 0;
+          r.el.hidden = !ok;
+          if (ok) shown++;
+        });
+        linksBlock.hidden = !shown;
+      }
       var rows = CL.glossary.filter(function (g) {
         return !tl || g.term.toLowerCase().indexOf(tl) >= 0 || g.desc.toLowerCase().indexOf(tl) >= 0;
       });
@@ -3502,31 +3604,17 @@
 
     main.append(
       h('div', { class: 'search-wrap' }, icon('search'), search),
+      linksBlock,
+      h('h2', { class: 'h2', id: 'gloss-terms' }, '용어'),
       countEl,
       list
     );
     draw();
-
-    if (CL.links.length) {
-      main.append(h('h2', { class: 'h2' }, '바로가기', h('span', { class: 'count', text: '새 창으로 열려요' })));
-      main.append(h('ul', { class: 'links', role: 'list' }, CL.links.map(function (l) {
-        var host = '';
-        try { host = new URL(l.url).host; } catch (e) { host = l.url; }
-        return h('li', {},
-          h('a', { class: 'link-card', href: l.url, target: '_blank', rel: 'noopener noreferrer' },
-            h('span', { class: 'lc-main' },
-              h('span', { class: 'lc-label', text: l.label }),
-              l.desc ? h('span', { class: 'lc-desc', style: 'display:block', text: l.desc }) : null,
-              h('span', { class: 'lc-host', style: 'display:block', text: host })),
-            icon('external'),
-            h('span', { class: 'sr-only', text: '(새 창)' })
-          ));
-      })));
-    }
     if (CL.version) main.append(h('p', { class: 'about', text: '체크리스트 기준: ' + CL.version }));
   }
 
   // ---------------- 설정 ----------------
+  var photoBytesCache = null; // 1.4.5: { count, bytes } 설정을 열 때 센 사진 크기 합(이 세션 안에서만, 사진 수가 같으면 다시 읽지 않음)
   function renderSettings() {
     newView('settings');
     setTopbar({ title: '설정' });
@@ -3542,6 +3630,37 @@
 
     // 1) 백업 내보내기
     var withPhotos = h('input', { type: 'checkbox', id: 'bk-photos' });
+    var withPhotosLabel = h('span', { text: '사진도 함께 넣기 (파일이 커져요)' });
+    // 1.4.5: 마지막 선택을 기억한다(전에는 매번 꺼져 시작해 iPad 사진이 Mac 으로 안 넘어갔음).
+    // 아직 고른 적이 없으면 사진이 1장 이상이고 예상 크기가 80MB(BIG_BACKUP_BYTES) 미만일 때 켜 둔다
+    if (typeof state.ui.backupWithPhotos === 'boolean') withPhotos.checked = state.ui.backupWithPhotos;
+    withPhotos.addEventListener('change', function () {
+      state.ui.backupWithPhotos = withPhotos.checked;
+      scheduleSave();
+    });
+    var baseLabel = withPhotosLabel.textContent;
+    Photos.count().then(function (n) {
+      if (!n) {
+        // 사진이 0장이면 기억값이 켜짐이어도 꺼진 채 보인다(변경 이벤트는 내지 않아 기억값은 그대로). 전에는 켜진 채 "사진 0장 포함"으로 만들어졌음
+        withPhotos.checked = false;
+        return null;
+      }
+      baseLabel = '사진 ' + n + '장도 함께 넣기 (파일이 커져요)';
+      withPhotosLabel.textContent = baseLabel;
+      if (typeof state.ui.backupWithPhotos === 'boolean') return null;
+      function applyDefault(bytes) {
+        if (typeof state.ui.backupWithPhotos !== 'boolean' && withPhotos.isConnected) withPhotos.checked = bytes * 1.37 < BIG_BACKUP_BYTES;
+      }
+      // 사진 크기 합은 이 세션 안에서 사진 수가 같으면 다시 읽지 않는다(사진이 많으면 Photos.all 이 느림, SPEC 16.1 #57)
+      if (photoBytesCache && photoBytesCache.count === n) { applyDefault(photoBytesCache.bytes); return null; }
+      withPhotosLabel.textContent = '사진 ' + n + '장도 함께 넣기 (사진 크기 확인 중…)';
+      return Photos.all().then(function (all) {
+        var bytes = all.reduce(function (sum, r) { return sum + (r.blob ? r.blob.size : 0); }, 0);
+        photoBytesCache = { count: n, bytes: bytes };
+        withPhotosLabel.textContent = baseLabel;
+        applyDefault(bytes);
+      });
+    }).catch(function () { withPhotosLabel.textContent = baseLabel; /* 사진 저장소를 못 쓰는 환경: 꺼진 채로 둔다 */ });
     // 기기 이름: 백업 파일 이름과 불러오기 확인 창("iPad에서 만든 백업")에 쓴다. 비우면 자동(iPad / iPhone / Mac / 기타)
     var nameInput = h('input', {
       class: 'input', id: 'set-device', type: 'text', value: state.ui.deviceName || '', placeholder: defaultDeviceName(),
@@ -3562,7 +3681,7 @@
         h('label', { for: 'set-device', text: '이 기기 이름' }),
         nameInput,
         h('p', { class: 'field-hint', id: 'set-device-hint', text: '백업 파일 이름과, 다른 기기에서 불러올 때 보여요. 비워 두면 "' + defaultDeviceName() + '"' })),
-      h('label', { class: 'toggle' }, withPhotos, '사진도 함께 넣기 (파일이 커져요)'),
+      h('label', { class: 'toggle' }, withPhotos, withPhotosLabel),
       h('button', { type: 'button', class: 'btn btn-block', onclick: function () { createBackup(withPhotos.checked); } }, '백업 파일 만들기'),
       h('p', { class: 'small muted', text: state.ui.lastBackupAt ? '마지막 백업: ' + formatDateTime(state.ui.lastBackupAt) : '아직 백업한 적이 없어요.' })
     ));
@@ -3739,6 +3858,7 @@
     var headJson = JSON.stringify(header); // 사진이 없는 부분이라 작다
     var TYPE = { type: 'application/json' };
     var photoCount = 0;
+    var skipped = 0; // 1.4.5: 사진을 넣지 않아 빠지는 사진 수(대화상자에서 알린다. 전에는 "크기 7KB"만 보였음)
 
     function buildWithPhotos(records) {
       var acc = new Blob([headJson.slice(0, -1), ',"photos":['], TYPE);
@@ -3762,6 +3882,7 @@
     if (includePhotos) {
       toast('사진을 넣어 백업 파일을 만드는 중…', { duration: 0 });
       step = Photos.all().then(function (all) {
+        if (!all.length) return null; // 1.4.5: 사진이 0장이면(기억값이 켜짐이어도) 사진 없이 만든다 → 대화상자 "사진 없이 만들었어요"
         var estimate = all.reduce(function (sum, r) { return sum + (r.blob ? r.blob.size : 0); }, 0) * 1.37;
         if (estimate < BIG_BACKUP_BYTES) return buildWithPhotos(all);
         hideToast();
@@ -3771,7 +3892,7 @@
           confirmText: '그래도 사진 넣어 만들기',
           cancelText: '사진 없이 만들기'
         }).then(function (ok) {
-          if (!ok) return null;
+          if (!ok) { skipped = all.length; return null; }
           toast('사진을 넣어 백업 파일을 만드는 중…', { duration: 0 });
           return buildWithPhotos(all);
         });
@@ -3782,7 +3903,8 @@
         return null;
       });
     } else {
-      step = Promise.resolve(null);
+      // 사진을 안 넣을 때도 몇 장이 빠지는지 세어 알린다(사진 저장소를 못 쓰면 0)
+      step = Photos.count().then(function (n) { skipped = n || 0; return null; }, function () { return null; });
     }
 
     step.then(function (photoBlob) {
@@ -3823,6 +3945,7 @@
         title: '백업 파일이 준비됐어요',
         message: fname + '\n크기: ' + bytesText(blob.size) +
           (photoBlob ? ' · 사진 ' + photoCount + '장 포함' : (includePhotos ? ' · 사진 없이 만들었어요' : '')) +
+          (!photoBlob && skipped ? '\n사진 ' + skipped + '장은 들어가지 않아요. 사진도 옮기려면 "사진도 함께 넣기"를 켜고 다시 만드세요.' : '') +
           '\n\niPhone 에서는 "공유하기 → 파일에 저장"이 가장 확실해요.' +
           (isStandalone() && !shareFile ? '\n홈 화면 앱에서는 내려받기가 안 될 수 있어요. 안 되면 iOS 를 최신으로 업데이트해 주세요.' : ''),
         buttons: buttons
@@ -4198,6 +4321,7 @@
         state.ui.dismissedInstallTip = ui.dismissedInstallTip;
         state.ui.deviceName = ui.deviceName; // 기기 이름은 이 기기 설정이라 남긴다
         state.ui.deviceNameAt = ui.deviceNameAt;
+        state.ui.backupWithPhotos = ui.backupWithPhotos; // 1.4.5: 백업 사진 포함 선택도 이 기기 설정
         dirty = true;
         saveNow();
         localRemove(DRAFT_KEY);
@@ -4683,7 +4807,7 @@
   var TABS = [
     { id: 'home', href: '#/', label: '매물', icon: 'home' },
     { id: 'compare', href: '#/compare', label: '비교', icon: 'compare' },
-    { id: 'glossary', href: '#/glossary', label: '용어', icon: 'book' },
+    { id: 'glossary', href: '#/glossary', label: '용어·링크', icon: 'book' }, // 1.4.5: 바로가기가 있다는 것이 이름에 보이게
     { id: 'settings', href: '#/settings', label: '설정', icon: 'gear' }
   ];
 

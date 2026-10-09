@@ -316,6 +316,9 @@ ul, ol { margin: 0; padding: 0; }
 .meta-chip.reg-caution, .meta-chip.warn { background: var(--yellow-soft); color: var(--yellow-ink); }
 .meta-chip.reg-ok { background: var(--green-soft); color: var(--green-ink); }
 .meta-chip.reg-todo { background: var(--orange-soft); color: var(--orange-ink); }
+/* 1.4.5: 등기부 결과 "멈춤 신호 없음 · 확인 중"(초록) / "멈춤 신호 N개 미확인"(주황) */
+.meta-chip.reg-clear { background: var(--green-soft); color: var(--green-ink); }
+.meta-chip.reg-unanswered { background: var(--orange-soft); color: var(--orange-ink); }
 
 .badge {
   display: inline-block;
@@ -579,6 +582,18 @@ details.flow-details > summary::-webkit-details-marker { display: none; }
 .sec.is-open .sec-head-side .ic { transform: rotate(180deg); }
 .sec-head .bar { grid-column: 1 / -1; }
 .sec-count.is-complete { color: var(--green-ink); }
+/* 1.4.5: 섹션 머리 아래 작은 바로가기(등기부 → 인터넷등기소, 가기 전 준비 → 실거래가·건축물대장). 새 창 */
+.sec-links { display: flex; flex-wrap: wrap; gap: 0 12px; padding: 0 10px 6px; }
+.ext-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  min-height: 44px; padding: 0 6px; border-radius: 8px;
+  font-size: 0.8824rem; font-weight: 800; color: var(--teal-ink);
+  text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1.5px;
+}
+.ext-link .ic-sm { width: 16px; height: 16px; }
+.sec-gate .ext-link { color: var(--orange-ink); }
+.links-block .h2 { margin-top: 6px; }
+.cmp-one { margin-bottom: 12px; }
 .sec-body { padding: 0 16px 16px; border-top: 1px solid var(--line); }
 .sec-desc { color: var(--muted); font-size: 0.8824rem; padding-top: 14px; }
 
@@ -782,7 +797,7 @@ details.flow-details > summary::-webkit-details-marker { display: none; }
 }
 textarea.input { resize: vertical; min-height: 76px; }
 .input:focus, .select:focus { border-color: var(--teal-ink); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal-ink) 22%, transparent); }
-.input::placeholder { color: var(--muted); opacity: 0.75; }
+.input::placeholder { color: var(--muted); } /* 1.4.5: opacity 를 빼 대비 4.5:1 이상 */
 .select {
   padding-right: 40px;
   background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
@@ -871,7 +886,9 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 
 /* ---------- 비교 표 ---------- */
 .table-scroll {
-  overflow-x: auto;
+  overflow: auto; /* 1.4.5: 세로도 이 상자 안에서 스크롤해 열 제목(thead sticky)이 매물이 많아도 남아 있게 */
+  /* 하한 240px: 화면 높이가 작을 때(iPhone 가로 모드 390px) 상자가 100px 로 줄어 열 제목 + 한 줄만 보이던 것을 막는다 */
+  max-height: max(calc(100dvh - var(--topbar-h) - var(--tabbar-h) - 180px), 240px);
   -webkit-overflow-scrolling: touch;
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -1236,8 +1253,8 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
 /* 토스트: 글 길이만큼 넓게(left:50% 때문에 화면 반 폭에서 줄이 바뀌던 것), [되돌리기] 같은 버튼 글은 한 줄로 */
 .toast { width: max-content; }
 .toast-btn { flex: none; white-space: nowrap; }
-/* 선택 모드에서는 [N개 삭제] 바를 가리지 않게 토스트를 그 위로 올린다 */
-.app:has(.sel-bar) ~ .toast { bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 96px); }
+/* 선택 모드의 [N개 삭제] 바, 가져오기의 [N개 담기] 바(1.4.5)를 가리지 않게 토스트를 그 위로 올린다 */
+.app:has(.sel-bar, .imp-actions:not([hidden])) ~ .toast { bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 96px); }
 
 /* =========================================================
    1.4.0: 네이버 매물 화면 글 붙여넣기(가져오기 화면의 방법 2, iPad 단축어 안내, 네이버 글 주의)
@@ -1257,11 +1274,13 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
 .tb-center { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.15; }
 .tb-center .tb-title { max-width: 100%; }
 .tb-ver { font-size: 11px; font-weight: 500; letter-spacing: 0.02em; opacity: 0.72; margin-top: 1px; white-space: nowrap; }
+/* 1.4.5: 흰 글자 바탕은 --orange-btn(대비 5.0:1), 글자 12px, 보이는 높이 28px, 누르는 영역은 ::before 로 44px */
 .tb-ver-update {
-  opacity: 1; margin-top: 2px; padding: 2px 10px; min-height: 22px;
-  border: 0; border-radius: 999px; background: #E36414; color: #fff;
-  font: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+  position: relative; opacity: 1; margin-top: 2px; padding: 2px 12px; min-height: 28px;
+  border: 0; border-radius: 999px; background: var(--orange-btn); color: #fff;
+  font: inherit; font-size: 12px; font-weight: 700; line-height: 1.2; cursor: pointer;
 }
+.tb-ver-update::before { content: ""; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px; }
 .tb-ver-update:focus-visible { outline: 2px solid #FFC59E; outline-offset: 2px; }
 
 /* ---------- 1.4.1: 되돌리기 줄(홈 맨 위), 지우기 확인의 매물 정보 ---------- */
