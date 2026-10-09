@@ -976,8 +976,9 @@
   var DEAL_ROW_MAX = 200; // 표 한 줄 글자 수 상한(이보다 길면 표 줄이 아님. 정규식이 긴 글에서 오래 걸리지 않게)
   // 실거래 표 한 줄: 계약일 [등기일|미등록] [층("2층", "2", "B1", "지하1층", "저")] [최고|최저]가격 [군말]
   // 1.4.1: 층 칸은 길이를 정한 모양만(예전 '\S*\d+층'은 긴 숫자 덩어리에서 아주 오래 걸렸다)
+  // 1.4.2: 가격 앞 표시 '직거래'·'중개거래'(중개 없이/중개로 거래)·'해제'(취소된 거래)도 읽는다. 예: "직거래1억 6,000"
   var DEAL_ROW_RE = new RegExp('^(' + DEAL_DATE + ')\\s+(?:(미등록|-|' + DEAL_DATE + ')\\s+)?(?:([A-Za-z가-힣]{0,4}\\d{1,3}층?|[저중고]층?)\\s+)?' +
-    '(?:최고|최저)?\\s*(' + DEAL_PRICE + ')(?:\\s*만\\s*원?)?(?:\\s+\\D.*)?$');
+    '(?:(?:최고|최저)\\s*)?((?:(?:직거래|중개거래|해제|취소)\\s*)?)(?:(?:최고|최저)\\s*)?(' + DEAL_PRICE + ')(?:\\s*만\\s*원?)?(?:\\s+\\D.*)?$');
   /**
    * '실거래가' 묶음 [from, to) → 표의 첫 줄 { price(만원), memo, same(같은 면적 표) } 또는 null.
    * 표 머리("계약일 등기일 층 가격")가 탭으로 한 줄이든 칸마다 한 줄이든 읽는다. 표의 거래 종류가 매물과 다르면 읽지 않는다.
@@ -1018,7 +1019,9 @@
     }
     var m = DEAL_ROW_RE.exec(row);
     if (!m) return null;
-    var ph = priceHead(m[4]);
+    var label = (m[4] || '').replace(/\s+/g, '');
+    if (/해제|취소/.test(label)) return null; // 취소된 거래는 실거래가로 쓰지 않는다
+    var ph = priceHead(m[5]);
     var price = ph ? moneyOf(ph.deposit) : null;
     if (!price) return null;
     var date = m[1].replace(/\s+/g, ' ');
@@ -1026,7 +1029,7 @@
     var reg = m[2] || '';
     var fl = m[3] || '';
     if (/\d$/.test(fl)) fl += '층'; // 층 칸에 "층"이 없던 표("2")
-    var bits = [date, fl, priceText(ph), reg === '미등록' ? '미등록' : (reg && reg !== '-' ? '등기 ' + reg : '')];
+    var bits = [date, fl, priceText(ph), label, reg === '미등록' ? '미등록' : (reg && reg !== '-' ? '등기 ' + reg : '')];
     // 같은 면적 표가 아니면(다른 평형·전체 면적 표를 보고 있을 때) 실거래가 칸에는 넣지 않고 메모에만 남긴다(naverDetail)
     return { price: price, same: same, memo: '최근 실거래' + (same ? '(같은 면적)' : '(면적 확인 필요)') + ': ' + bits.filter(Boolean).join(' · ') };
   }
