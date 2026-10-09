@@ -8,7 +8,7 @@
 'use strict';
 
 var CACHE_PREFIX = 'imjang-static-';
-var CACHE_VERSION = CACHE_PREFIX + 'v1.4.2';
+var CACHE_VERSION = CACHE_PREFIX + 'v1.4.3';
 
 // 사전 캐시 목록 — 실제 파일과 반드시 일치해야 한다(하나라도 없으면 설치 실패)
 var PRECACHE = [

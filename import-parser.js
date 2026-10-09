@@ -1149,6 +1149,11 @@
       fee ? '관리비 ' + fee[1].replace(/\s+/g, ' ') : ''
     ].filter(Boolean);
     if (extra.length) memo.push(extra.join(' · '));
+    // 1.4.3: 매물에 적힌 융자금(대출). 중개사·매도인이 적은 값이라 등기부 을구(근저당)로 꼭 확인하게 안내
+    var loan = flat(basic(['융자금', '융자']));
+    if (loan && loan.length <= 30 && /없음|있음|\d|미만|이상|이하|시세|대비/.test(loan) && !BASIC_END_RE.test(loan)) {
+      memo.push('융자금(매물 표시): ' + loan + ' → 등기부 을구(근저당)에서 꼭 확인');
+    }
 
     // 단지 정보
     var cxAt = findLine(L, anchor, /^단지 ?정보$/);
