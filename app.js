@@ -23,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.5.0';
+  var APP_VERSION = '1.5.1';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -951,6 +951,8 @@
    */
   function touch(prop, now) {
     prop.updatedAt = stampAfter(now || Date.now(), prop.updatedAt);
+    // 1.5.1 검토 반영: 이 탭에서 고친 매물은 돌아간 홈에서 필터 조건 밖이어도 한 번 보인다(renderHome → applyHomeFilter 의 revealed)
+    if (homeReveal && view.name !== 'home') homeReveal[prop.id] = true;
     scheduleSave();
   }
 
@@ -1131,6 +1133,21 @@
       },
       count: function () {
         return run('readonly', function (st, set) { onResult(st.count(), set); });
+      },
+      /**
+       * 1.5.1: 매물별 사진 수 { 매물id: n }. 홈 목록 필터 "사진 있음" 칩용.
+       * propertyId 색인의 키 커서만 돌려 Blob 은 읽지 않는다(Photos.all 은 사진이 많으면 느림, 16.1 #57)
+       */
+      countByProperty: function () {
+        return run('readonly', function (st, set) {
+          var out = {};
+          var req = st.index('propertyId').openKeyCursor();
+          req.onsuccess = function () {
+            var c = req.result;
+            if (c) { out[c.key] = (out[c.key] || 0) + 1; c.continue(); }
+          };
+          set(out); // 트랜잭션이 끝난 뒤 돌려주므로 그때는 다 세어져 있다
+        });
       },
       remove: function (id) {
         return run('readwrite', function (st) { st.delete(id); });
@@ -1626,6 +1643,7 @@
         .then(function (ok) {
           if (!ok) return;
           return Photos.remove(rec.id).then(function () {
+            notePhotoChange(rec.propertyId, -1);
             close();
             revokePhotoUrl(rec.id);
             if (onDeleted) onDeleted(rec);
@@ -1648,6 +1666,7 @@
   var view = { name: '', prop: null, refs: {}, photos: null };
 
   function newView(name, prop) {
+    if (homeSearchFlush) { var flush = homeSearchFlush; homeSearchFlush = null; flush(); } // 1.5.1 검토 반영: 홈 검색 디바운스 중이면 친 검색어부터 기억
     view = { name: name, prop: prop || null, refs: { secs: {}, chips: {}, hints: [], stopWords: [], strips: {} }, photos: null, photosReady: null };
     return view;
   }
@@ -1896,12 +1915,401 @@
     return { el: card, set: set };
   }
 
+  // ---------------- 홈: 목록 필터·검색·정렬 (1.5.1, 보고서 L14) ----------------
+  // 상태는 sessionStorage 에 둔다(상세에 다녀와도 유지, 탭을 닫으면 초기화. 백업·합치기에 섞이지 않게 localStorage 는 쓰지 않음)
+  var HOME_FILTER_KEY = 'imjang.home.filter';
+  var HOME_SEARCH_DEBOUNCE_MS = 150;
+  var homePhotoCounts = null; // 매물별 사진 수(Photos.countByProperty). 홈을 그릴 때마다 다시 읽고, 읽기 전에는 null. 이 탭에서 사진을 넣고 지우면 notePhotoChange 가 맞춘다
+  // 1.5.1 검토 반영: 이 탭에서 방금 추가·가져오기·고친 매물 id(touch·새 매물 저장·가져오기가 적음). 다음 홈 그리기가 가져가서,
+  // 필터 조건 밖이어도 그 홈 화면에서 한 번 따로 보인다("방금 추가·고친 매물"). 필터를 바꾸거나 다른 화면에 다녀오면 숨는다
+  var homeReveal = {};
+  var homeSearchFlush = null; // 검색 디바운스가 남아 있으면 그 검색어를 바로 기억하는 함수(newView 가 부름: 화면이 바뀌어도 친 검색어가 어긋나지 않게)
+  // 1.5.1 검토 반영: 사진은 저장본(imjang.v1)에 없어서 다른 탭이 사진을 넣고 지운 것을 몰랐다 → 이 작은 키를 바꿔 storage 이벤트로 알린다
+  var PHOTO_REV_KEY = 'imjang.photos.rev';
+  /**
+   * 이 탭에서 사진을 넣거나(+1) 지웠을 때(-1): 홈의 사진 수 기억(homePhotoCounts)도 맞추고(홈 첫 그리기가 지난 수로 그려졌다
+   * 바뀌며 지운 매물이 잠깐 보이던 것) 다른 탭에 알린다
+   */
+  function notePhotoChange(pid, delta) {
+    if (homePhotoCounts && pid) {
+      var n = (homePhotoCounts[pid] || 0) + delta;
+      if (n > 0) homePhotoCounts[pid] = n; else delete homePhotoCounts[pid];
+    }
+    localSet(PHOTO_REV_KEY, Date.now() + '-' + Math.random().toString(36).slice(2, 6));
+  }
+  // 칩 묶음. 상태·등기부는 값이 하나뿐인 결과라 묶음 안 OR, "더 좁히기"(all: true)는 서로 다른 조건이라 묶음 안도 AND(켤수록 좁아짐). 묶음끼리는 AND.
+  // test(f) 의 f 는 homeFacts(매물) — 매물마다 한 번만 계산해 개수 세기와 거르기에 같이 쓴다
+  var HOME_CHIP_GROUPS = [
+    { id: 'status', label: '상태', chips: STATUSES.map(function (s) {
+      return { id: s.id, label: s.label, test: function (f) { return f.status === s.id; } };
+    }) },
+    { id: 'reg', label: '등기부', chips: [ // registryResult 의 code 를 다시 쓴다(6.1). 매물마다 셋 중 정확히 하나(none 제외)
+      { id: 'reg-stop', label: '멈춤 신호 있음', test: function (f) { return f.reg === 'stop'; } },
+      // 1.5.1 검토 반영: 멈춤 신호를 모두 "없음"으로 답한 상태 전부(카드 "주의 1건 · 멈춤 신호 없음"도 여기에 듦)
+      { id: 'reg-clear', label: '멈춤 신호 없음', test: function (f) { return f.reg === 'clear' || f.reg === 'ok' || f.reg === 'caution'; } },
+      { id: 'reg-todo', label: '아직 안 봄·미확인', test: function (f) { return f.reg === 'todo' || f.reg === 'unanswered'; } }
+    ] },
+    { id: 'more', label: '더 좁히기', all: true, chips: [
+      // 1.5.1 검토 반영: 등기부 주의 신호를 "있음"으로 답한 매물(멈춤 신호·미답과 관계없이). 전에는 registryResult code 'caution' 만
+      { id: 'reg-caution', label: '등기부 주의 있음', test: function (f) { return f.regCautions > 0; } },
+      { id: 'has-caution', label: '주의 1개 이상', test: function (f) { return f.cautions > 0; } }, // 카드 "주의 N개"와 같은 셈(cautionCount)
+      { id: 'need-ho', label: '호수 입력 필요', test: function (f) { return f.needHo; } },
+      { id: 'has-photo', label: '사진 있음', test: function (f) { return f.photos > 0; } }
+    ] }
+  ];
+  var HOME_CHIP_KNOWN = {};
+  HOME_CHIP_GROUPS.forEach(function (g) { g.chips.forEach(function (c) { HOME_CHIP_KNOWN[c.id] = true; }); });
+
+  /** 검색 비교용 글자: 소문자 + 공백 제거(대소문자·공백 무시 부분 일치) */
+  function searchKey(s) { return str(s).toLowerCase().replace(/\s+/g, ''); }
+  /** 검색 대상: 단지명·동·호(unitText 모양 "204동 1604호" 포함)·중개사 이름·메모. 가져오기 참고(importNotes)는 뺀다 */
+  function homeSearchText(p) { return searchKey([p.name, unitText(p), p.dong, p.ho, p.agentName, p.memo].join(' ')); }
+  /** 등기부(게이트) 섹션의 주의 신호(멈춤이 아닌 flag)를 "있음"으로 답한 수. registryResult 와 같은 셈이지만 멈춤 신호·미답과 관계없이 센다 */
+  function regCautionCount(p) {
+    var n = 0;
+    gateSections().forEach(function (s) {
+      s.items.forEach(function (it) { if (it.type === 'flag' && it.severity !== 'stop' && getItemState(p, it.id).status === 'yes') n++; });
+    });
+    return n;
+  }
+  /** 칩 판정·검색에 쓰는 매물 요약. photos 는 { 매물id: 사진 수 } 또는 null(아직 못 읽음) */
+  function homeFacts(p, photos) {
+    return {
+      status: p.status,
+      reg: registryResult(p).code,
+      regCautions: regCautionCount(p),
+      cautions: cautionCount(p),
+      needHo: !p.dong || !p.ho,
+      photos: photos ? (photos[p.id] || 0) : 0,
+      text: homeSearchText(p)
+    };
+  }
+
+  // 1.5.1 검토 반영: 한글을 치는 중간(자음만 "ㄹ", 다음 글자의 첫소리가 받침으로 붙은 "램", 받침 전 "래미아")에는 정확히 맞는 매물이 없어
+  // 칠 때마다 빈 상태가 깜빡였다. 정확히 맞는 매물이 하나도 없을 때만 마지막 글자를 "치는 중"으로 보고 넓게 맞춘다(homeQueryMatcher)
+  var HANGUL_CHO = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ'; // 첫소리 19개(유니코드 음절 순서). 자음 낱자 → 첫소리 번호
+  // 받침 번호(1~27) → [남는 받침 번호, 다음 글자 첫소리 번호]. "램"(ㅁ) → "래" + ㅁ…, "닭"(ㄺ) → "달" + ㄱ…
+  var HANGUL_JONG_SPLIT = [null, [0, 0], [0, 1], [1, 9], [0, 2], [4, 12], [4, 18], [0, 3], [0, 5], [8, 0], [8, 6], [8, 7], [8, 9], [8, 16], [8, 17], [8, 18],
+    [0, 6], [0, 7], [17, 9], [0, 9], [0, 10], [0, 11], [0, 12], [0, 14], [0, 15], [0, 16], [0, 17], [0, 18]];
+  /** 한글 음절이면 { cho, base(받침 뺀 음절), jong } (아니면 null) */
+  function hangulParts(ch) {
+    var c = ch.charCodeAt(0) - 0xAC00;
+    if (c < 0 || c > 11171) return null;
+    var jong = c % 28;
+    return { cho: Math.floor(c / 588), base: c - jong, jong: jong };
+  }
+  /** 마지막 글자를 치는 중으로 볼 때, text 의 j 번째 글자부터가 그 글자로 이어질 수 있는지 판단하는 함수(넓게 맞출 수 없는 글자면 null) */
+  function hangulTailTest(last) {
+    var cho = HANGUL_CHO.indexOf(last);
+    if (cho >= 0) { // 자음 낱자: 그 첫소리로 시작하는 음절
+      return function (text, j) { var x = j < text.length ? hangulParts(text.charAt(j)) : null; return !!x && x.cho === cho; };
+    }
+    var l = hangulParts(last);
+    if (!l) return null;
+    if (!l.jong) { // 받침 전("아"): 같은 첫소리·가운뎃소리에 받침이 붙은 음절("안")까지
+      return function (text, j) { var x = j < text.length ? hangulParts(text.charAt(j)) : null; return !!x && x.base === l.base; };
+    }
+    var sp = HANGUL_JONG_SPLIT[l.jong]; // 받침이 다음 글자의 첫소리일 수 있음("램" → "래미")
+    return function (text, j) {
+      if (j + 1 >= text.length || text.charCodeAt(j) - 0xAC00 !== l.base + sp[0]) return false;
+      var y = hangulParts(text.charAt(j + 1));
+      return !!y && y.cho === sp[1];
+    };
+  }
+  /**
+   * 검색어 q(searchKey 한 값) → 맞는지 보는 함수 text → bool (q 가 비면 null). 매물 하나라도 q 를 그대로 품으면 그대로 부분 일치,
+   * 아무것도 없으면 마지막 글자만 치는 중으로 보고 넓게(hangulTailTest). 넓게 봐도 없으면 0개(빈 상태)
+   */
+  function homeQueryMatcher(q, texts) {
+    if (!q) return null;
+    function exact(t) { return t.indexOf(q) >= 0; }
+    if (texts.some(exact)) return exact;
+    var tail = hangulTailTest(q.charAt(q.length - 1));
+    if (!tail) return exact;
+    var head = q.slice(0, -1);
+    return function (t) {
+      for (var i = t.indexOf(head); i >= 0 && i + head.length < t.length; i = t.indexOf(head, i + 1)) { // 뒤에 한 글자 이상 남아야 함(head 가 '' 여도 끝남)
+        if (tail(t, i + head.length)) return true;
+      }
+      return false;
+    };
+  }
+
+  /** sessionStorage 의 필터 상태 → { q, chips: { 칩id: true }, sort }. 모르는 칩·정렬 id 는 버린다 */
+  function readHomeFilter() {
+    var out = { q: '', chips: {}, sort: 'updated' };
+    var o = null;
+    try { o = JSON.parse(sessionGet(HOME_FILTER_KEY) || 'null'); } catch (e) { o = null; }
+    if (!o || typeof o !== 'object') return out;
+    out.q = str(o.q).trim().slice(0, 100);
+    if (Array.isArray(o.chips)) o.chips.forEach(function (id) { if (HOME_CHIP_KNOWN[id]) out.chips[id] = true; });
+    if (HOME_SORTS.some(function (s) { return s.id === o.sort; })) out.sort = o.sort;
+    return out;
+  }
+  function writeHomeFilter(f) {
+    var on = Object.keys(f.chips);
+    if (!f.q && !on.length && f.sort === 'updated') { sessionRemove(HOME_FILTER_KEY); return; } // 기본값이면 키를 두지 않는다
+    sessionSet(HOME_FILTER_KEY, JSON.stringify({ q: f.q, chips: on, sort: f.sort }));
+  }
+  /** 검색어나 켜진 칩이 하나라도 있는지(정렬은 매물을 숨기지 않으므로 세지 않음) */
+  function homeFilterActive(f) { return !!(f.q || Object.keys(f.chips).length); }
+  /** 켜진 칩 이름(묶음·칩 순서) */
+  function homeChipNames(f) {
+    var names = [];
+    HOME_CHIP_GROUPS.forEach(function (g) { g.chips.forEach(function (c) { if (f.chips[c.id]) names.push(c.label); }); });
+    return names;
+  }
+  /** 켜진 조건 한 줄: 검색 “래미안” · 임장 예정, 멈춤 신호 있음 (아무것도 없으면 '') */
+  function homeFilterSummary(f) {
+    var parts = [];
+    if (f.q) parts.push('검색 “' + f.q + '”');
+    var names = homeChipNames(f);
+    if (names.length) parts.push(names.join(', '));
+    return parts.join(' · ');
+  }
+
+  /**
+   * 필터·검색·정렬을 적용한 목록. props 는 '최근에 고친 순'으로 정렬돼 있어야 한다(같은 값끼리는 그 순서가 남음).
+   * 결과 { list, dropped, revealed }:
+   *  - list: 위 "내 매물" 목록. 상태 칩이 켜져 있으면 그중 하나인 매물, 없으면 탈락 제외(검색어가 있으면 탈락도 포함).
+   *    상태·등기부 묶음은 켜진 칩 중 하나라도(OR), "더 좁히기"는 켜진 칩 모두(AND), 묶음끼리는 모두(AND) 맞아야 한다
+   *  - dropped: 아래 "탈락한 매물" 묶음. 검색어도 상태 칩도 없을 때만. 1.5.1 검토 반영: 등기부·더 좁히기 칩이 켜져 있으면 같은 조건에 맞는
+   *    탈락 매물만(전에는 필터와 관계없이 모두 보여 결과 줄·칩 개수·[전체 선택]과 어긋났음), 정렬도 위 목록과 같게
+   *  - revealed: 필터가 켜져 있을 때 reveal(방금 추가·고친 매물)인데 위 둘에 안 든 매물 — 이번 홈에서만 따로 보인다
+   */
+  function applyHomeFilter(props, f, facts, reveal) {
+    var on = f.chips;
+    var match = homeQueryMatcher(searchKey(f.q), props.map(function (p) { return facts[p.id].text; }));
+    var statusOn = STATUSES.filter(function (s) { return on[s.id]; }).map(function (s) { return s.id; });
+    var groups = HOME_CHIP_GROUPS.filter(function (g) { return g.id !== 'status'; }).map(function (g) {
+      return { all: !!g.all, chips: g.chips.filter(function (c) { return on[c.id]; }) };
+    }).filter(function (g) { return g.chips.length; });
+    function fits(fc) {
+      return groups.every(function (g) {
+        function ok(c) { return c.test(fc); }
+        return g.all ? g.chips.every(ok) : g.chips.some(ok);
+      });
+    }
+    var cmp = sortCompare(f.sort);
+    var list = props.filter(function (p) {
+      var fc = facts[p.id];
+      if (match && !match(fc.text)) return false;
+      if (statusOn.length) { if (statusOn.indexOf(p.status) < 0) return false; }
+      else if (p.status === 'dropped' && !match) return false;
+      return fits(fc);
+    });
+    list.sort(cmp);
+    var dropped = !match && !statusOn.length ? props.filter(function (p) { return p.status === 'dropped' && fits(facts[p.id]); }).sort(cmp) : [];
+    var revealed = [];
+    if (reveal && homeFilterActive(f)) {
+      var seen = {};
+      list.concat(dropped).forEach(function (p) { seen[p.id] = true; });
+      revealed = props.filter(function (p) { return reveal[p.id] && !seen[p.id]; }).sort(cmp);
+    }
+    return { list: list, dropped: dropped, revealed: revealed };
+  }
+
+  /**
+   * 홈 목록 도구: 검색 칸(디바운스 150ms, [지우기]) + 필터 칩 묶음 3개(가로 스크롤 한 줄, button + aria-pressed, 숨은 쪽 끝 흐림) + 정렬 select +
+   * [모두 해제] + 결과 줄(role=status, 켜진 칩 이름까지). hf(readHomeFilter 결과)를 제자리에서 고쳐 sessionStorage 에 적고 opts.onChange(kind) 를
+   * 부른다(kind 'filter' = 검색·칩, 'sort' = 정렬. 목록만 다시 그리고 도구는 그대로라 검색 칸·칩의 초점이 남는다).
+   * 결과 { el, update(facts, shown, total, revealed), reset(), clearSearch(), placeChips(left), showChip(el) }
+   */
+  function homeFilterBar(hf, opts) {
+    var timer = null;
+    var chipEls = {};
+    var countEls = {};
+    function changed(kind) { writeHomeFilter(hf); syncTools(); opts.onChange(kind || 'filter'); }
+
+    var input = h('input', {
+      class: 'input hf-q', id: 'hf-q', type: 'search', placeholder: '단지명·동·호·메모 검색', enterkeyhint: 'search',
+      autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off', spellcheck: 'false', maxlength: 100, value: hf.q, 'data-focus-key': 'hf-q'
+    });
+    var clearBtn = h('button', {
+      type: 'button', class: 'icon-btn hf-clear', 'aria-label': '검색어 지우기', hidden: !hf.q, 'data-focus-key': 'hf-clear',
+      onclick: function () { input.value = ''; applySearch(); input.focus(); }
+    }, icon('close'));
+    function applySearch() {
+      clearTimeout(timer);
+      timer = null;
+      if (homeSearchFlush === flushSearch) homeSearchFlush = null;
+      var q = input.value.trim();
+      clearBtn.hidden = !q;
+      if (q === hf.q) return;
+      hf.q = q;
+      changed();
+    }
+    /**
+     * 1.5.1 검토 반영: 디바운스 중에 화면이 바뀌면(newView 가 부름) 친 검색어를 그리지 않고 기억만 한다. 전에는 남은 타이머가 지난 홈을
+     * 다시 그리며 지금 화면 제목을 "매물 선택"으로 덮거나, 새로 그린 검색 칸(빈 값)과 기억한 검색어가 어긋났음
+     */
+    function flushSearch() {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+      var q = input.value.trim();
+      if (q !== hf.q) { hf.q = q; writeHomeFilter(hf); }
+    }
+    input.addEventListener('input', function () {
+      clearBtn.hidden = !input.value.trim();
+      clearTimeout(timer);
+      timer = setTimeout(applySearch, HOME_SEARCH_DEBOUNCE_MS); // 입력 즉시(디바운스) 적용
+      homeSearchFlush = flushSearch;
+    });
+    input.addEventListener('keydown', function (e) { // 자판의 [검색](enterkeyhint): 바로 적용하고 키보드를 내린다
+      if (e.key === 'Enter') { e.preventDefault(); applySearch(); input.blur(); }
+    });
+    input.addEventListener('search', applySearch); // type=search 의 지우기·검색 이벤트(브라우저가 보내면)
+    // 1.5.1 검토 반영: 검색 칸을 누르면 상단 바 바로 아래로 올린다(자판이 올라오면 375·320 에서 결과 카드가 거의 보이지 않았음)
+    input.addEventListener('focus', function () {
+      var tb = document.getElementById('topbar');
+      var dy = searchBox.getBoundingClientRect().top - (tb ? tb.getBoundingClientRect().bottom : 0) - 8;
+      if (dy > 4) window.scrollBy(0, dy);
+    });
+
+    var groups = HOME_CHIP_GROUPS.map(function (g) {
+      return h('div', { class: 'hf-group', role: 'group', 'aria-label': g.label },
+        h('span', { class: 'hf-gl', 'aria-hidden': 'true', text: g.label }),
+        g.chips.map(function (c) {
+          var n = h('span', { class: 'hf-n' });
+          countEls[c.id] = n;
+          // 버튼 자체가 44px(누르는 영역), 보이는 알약(.hf-pill)은 36px
+          var b = h('button', {
+            type: 'button', class: 'hf-chip', 'aria-pressed': hf.chips[c.id] ? 'true' : 'false', 'data-focus-key': 'hf:' + c.id,
+            onclick: function () {
+              if (hf.chips[c.id]) delete hf.chips[c.id]; else hf.chips[c.id] = true;
+              b.setAttribute('aria-pressed', hf.chips[c.id] ? 'true' : 'false');
+              changed();
+            }
+          }, h('span', { class: 'hf-pill' }, c.label, ' ', n));
+          chipEls[c.id] = b;
+          return b;
+        }));
+    });
+
+    // 1.5.1 검토 반영: 칩 줄이 넘치면 숨은 쪽 끝을 흐리게(.has-prev / .has-next → CSS mask). 전에는 "등기부"·"더 좁히기" 묶음이 있다는 표시가 없었음
+    var chipRow = h('div', { class: 'hf-chips' }, groups);
+    function syncFade() {
+      var max = chipRow.scrollWidth - chipRow.clientWidth;
+      chipRow.classList.toggle('has-prev', chipRow.scrollLeft > 2);
+      chipRow.classList.toggle('has-next', max > 2 && chipRow.scrollLeft < max - 2);
+    }
+    chipRow.addEventListener('scroll', syncFade, { passive: true });
+    if (window.ResizeObserver) new ResizeObserver(syncFade).observe(chipRow);
+    /** 칩 하나가 칩 줄 안(흐린 끝 밖)에 보이게 가로로만 옮긴다 */
+    function showChip(b) {
+      var r = b.getBoundingClientRect();
+      var cr = chipRow.getBoundingClientRect();
+      if (r.left < cr.left + 16) chipRow.scrollLeft += r.left - cr.left - 16;
+      else if (r.right > cr.right - 32) chipRow.scrollLeft += r.right - cr.right + 32;
+      syncFade();
+    }
+    /**
+     * 칩 줄 가로 위치. left 가 숫자면 그대로(같은 홈을 다시 그릴 때 이어 가기), 아니면 켜진 첫 칩의 묶음이 줄 앞에 오게
+     * (상세에 다녀오면 0 으로 돌아가 켜진 칩이 화면 밖이던 것). 켜진 칩이 없으면 맨 앞
+     */
+    function placeChips(left) {
+      if (typeof left === 'number') chipRow.scrollLeft = left;
+      else {
+        var first = null;
+        HOME_CHIP_GROUPS.some(function (g) {
+          return g.chips.some(function (c) { if (hf.chips[c.id]) first = chipEls[c.id]; return !!first; });
+        });
+        chipRow.scrollLeft = 0;
+        if (first) {
+          chipRow.scrollLeft = first.parentNode.getBoundingClientRect().left - chipRow.getBoundingClientRect().left - 12;
+          showChip(first);
+        }
+      }
+      syncFade();
+    }
+
+    var sortSel = h('select', { class: 'select hf-sort', id: 'hf-sort', 'data-focus-key': 'hf-sort' },
+      HOME_SORTS.map(function (s) { return h('option', { value: s.id, text: s.label }); }));
+    sortSel.value = hf.sort;
+    sortSel.addEventListener('change', function () { hf.sort = sortSel.value; changed('sort'); });
+    // 1.5.1 검토 반영: "필터 N" 배지는 뺐다(켜진 칩 이름은 결과 줄에). [모두 해제]만 정렬 옆에 두어 320px 에서도 한 줄
+    var resetBtn = h('button', { type: 'button', class: 'btn btn-small btn-ghost hf-reset', 'data-focus-key': 'hf-reset', onclick: function () { reset(); } }, '모두 해제');
+    var result = h('p', { class: 'hf-result', role: 'status', 'aria-live': 'polite' });
+
+    /** 검색어와 칩을 모두 끈다(정렬은 그대로). 누른 버튼이 사라지면(빈 상태 카드·[모두 해제]) 첫 칩으로 초점 */
+    function reset() {
+      clearTimeout(timer);
+      timer = null;
+      hf.q = '';
+      hf.chips = {};
+      input.value = '';
+      clearBtn.hidden = true;
+      Object.keys(chipEls).forEach(function (id) { chipEls[id].setAttribute('aria-pressed', 'false'); });
+      changed();
+      var a = document.activeElement;
+      if (!a || a === document.body || !a.isConnected || a.hidden) {
+        var first = chipEls[HOME_CHIP_GROUPS[0].chips[0].id];
+        try { first.focus({ preventScroll: true }); } catch (e) { /* 무시 */ }
+      }
+    }
+    /** 검색어만 지운다(검색어만 있을 때 빈 상태 카드의 [검색어 지우기]). 초점은 검색 칸으로 */
+    function clearSearch() {
+      input.value = '';
+      applySearch();
+      try { input.focus({ preventScroll: true }); } catch (e) { /* 무시 */ }
+    }
+    function syncTools() {
+      resetBtn.hidden = !homeFilterActive(hf);
+    }
+    syncTools();
+
+    var searchBox = h('div', { class: 'hf-search' }, h('label', { class: 'sr-only', for: 'hf-q', text: '매물 검색' }), input, clearBtn);
+    var el = h('div', { class: 'home-filter' },
+      searchBox,
+      chipRow,
+      h('div', { class: 'hf-tools' },
+        h('label', { class: 'sr-only', for: 'hf-sort', text: '정렬' }), sortSel, resetBtn),
+      result);
+    return {
+      el: el,
+      reset: reset,
+      clearSearch: clearSearch,
+      placeChips: placeChips,
+      showChip: showChip,
+      /**
+       * 칩마다 개수(모든 매물 기준 — 그 칩 하나만 켰을 때 보일 수와 같음)와 결과 줄(필터·검색이 걸려 있을 때만):
+       * "N개 중 M개 보임"(N = 모든 매물, M = 지금 보이는 카드 전부) + "(방금 추가·고친 k개 포함)" + " · 켜진 칩 이름". 사진 수를 아직 못 읽었으면 그 칩은 개수 없이
+       */
+      update: function (facts, shown, total, revealed) {
+        var ids = Object.keys(facts);
+        HOME_CHIP_GROUPS.forEach(function (g) {
+          g.chips.forEach(function (c) {
+            if (c.id === 'has-photo' && !homePhotoCounts) { countEls[c.id].textContent = ''; return; }
+            var k = 0;
+            ids.forEach(function (id) { if (c.test(facts[id])) k++; });
+            countEls[c.id].textContent = '(' + k + ')';
+          });
+        });
+        var text = '';
+        if (homeFilterActive(hf)) {
+          var names = homeChipNames(hf);
+          text = total + '개 중 ' + shown + '개 보임' + (revealed ? '(방금 추가·고친 ' + revealed + '개 포함)' : '') + (names.length ? ' · ' + names.join(', ') : '');
+        }
+        if (result.textContent !== text) result.textContent = text; // 같은 글이면 다시 읽히지 않게 그대로 둔다
+      }
+    };
+  }
+
   function renderHome() {
-    // 다른 탭 동기화로 다시 그릴 때 초점을 같은 자리(체크박스·선택 버튼)로 되돌리려고 기억해 둔다
+    // 다른 탭 동기화로 다시 그릴 때 초점을 같은 자리(체크박스·선택 버튼·검색 칸·필터 칩)로 되돌리려고 기억해 둔다
     var ae = document.activeElement;
     var keepFocus = ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
-    newView('home');
-    var props = state.properties.slice().sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+    // 1.5.1 검토 반영: 같은 홈을 다시 그릴 때(다른 탭 동기화·선택 모드 켜고 끄기)는 칩 줄 가로 위치와 "방금 추가·고친 매물"을 이어 간다.
+    // 다른 화면에서 왔으면 그사이 이 탭에서 추가·고친 매물(homeReveal)만
+    var sameHome = view.name === 'home';
+    var oldChips = sameHome ? document.querySelector('#main .hf-chips') : null;
+    var chipLeft = oldChips ? oldChips.scrollLeft : null;
+    var reveal = Object.assign({}, sameHome && view.refs.reveal || {}, homeReveal);
+    homeReveal = {};
+    var v = newView('home');
+    v.refs.reveal = reveal;
+    var props = state.properties.slice().sort(sortCompare('updated')); // 바탕 순서: 최근에 고친 순(필터 정렬의 같은 값끼리도 이 순서)
     if (!props.length) homeSel.on = false;
     var sel = homeSel.on;
     if (sel) { // 그사이(다른 탭에서) 지워진 매물은 선택에서 뺀다
@@ -1955,17 +2363,20 @@
     }
 
     var active = props.filter(function (p) { return p.status !== 'dropped'; });
-    var dropped = props.filter(function (p) { return p.status === 'dropped'; });
+    // 1.5.1(L14): 매물이 2개 이상이면 "내 매물" 아래에 검색·필터 칩·정렬 도구(homeFilterBar). 0~1개면 도구도, 기억해 둔 필터도 쓰지 않는다
+    var hf = props.length >= 2 ? readHomeFilter() : null;
 
-    // 선택 모드: 고른 수는 상단 제목과 화면 읽기용 알림 영역(처음부터 둔 빈 영역)에, [N개 삭제]는 화면 아래 고정 바에
+    // 선택 모드: 고른 수는 상단 제목과 화면 읽기용 알림 영역(처음부터 둔 빈 영역)에, [N개 삭제]는 화면 아래 고정 바에.
+    // cards = 지금 보이는 카드(필터 결과). [전체 선택]·"선택 해제" 판단은 이 수로(선택 대상 = 보이는 매물)
     var cards = [];
     var live = sel ? h('p', { class: 'sr-only', role: 'status', 'aria-live': 'polite' }) : null;
     var delBtn = null;
     function refreshSel(announce) {
+      if (view !== v) return; // 1.5.1 검토 반영: 지난 홈의 늦은 호출이 지금 화면 제목을 "매물 선택"으로 덮지 않게
       var n = Object.keys(homeSel.ids).length;
       var title = document.getElementById('tb-title');
       if (title) title.textContent = n ? n + '개 선택됨' : '매물 선택';
-      allBtn.textContent = n === props.length ? '선택 해제' : '전체 선택';
+      allBtn.textContent = n && n === cards.length ? '선택 해제' : '전체 선택';
       delBtn.disabled = !n;
       delBtn.textContent = '';
       appendKid(delBtn, n ? [icon('trash', 'ic-sm'), n + '개 삭제'] : '지울 매물을 골라 주세요');
@@ -1979,16 +2390,26 @@
     }
 
     appendKid(main, live);
+    // 1.5.1 검토 반영: 필터가 켜져 있으면 머리 줄 수도 결과 줄과 같은 기준("12개 중 4개" = 모든 매물 중 보이는 카드). 꺼져 있으면 1.5.0 처럼 탈락 뺀 수
+    var headCount = h('span', { class: 'count', text: active.length + '개' });
     main.append(h('div', { class: 'list-head' },
-      h('h2', { class: 'h2' }, '내 매물', h('span', { class: 'count', text: active.length + '개' })),
+      h('h2', { class: 'h2' }, '내 매물', headCount),
       // 여러 매물을 골라 한 번에 지우기(탈락한 매물 포함)
       sel ? null : h('button', { type: 'button', class: 'btn btn-small btn-ghost', 'data-focus-key': 'sel-start', onclick: function () { setHomeSelect(true); } }, '선택')
     ));
-    if (active.length) {
-      main.append(h('div', { class: 'plist' }, active.map(cardFor)));
-    } else {
-      main.append(h('p', { class: 'muted', text: '검토 중인 매물이 없어요.' }));
-    }
+    var bar = hf ? homeFilterBar(hf, {
+      onChange: function (kind) {
+        if (kind !== 'sort') { reveal = {}; v.refs.reveal = reveal; } // 검색·칩을 바꾸면 "방금 추가·고친 매물"도 조건대로
+        drawList();
+      }
+    }) : null;
+    appendKid(main, bar ? bar.el : null);
+    // 목록(위 "내 매물")과 "탈락한 매물" 묶음은 필터가 바뀔 때마다 이 자리들만 다시 그린다(도구·버튼은 그대로)
+    var listWrap = h('div', { class: 'home-list' });
+    main.append(listWrap);
+    // 1.5.1 검토 반영: 목록 맨 아래(매물 추가 위)에도 "필터 켜짐 · 조건 [모두 해제]" — 상세에서 돌아와 스크롤이 복원되면 위 도구가 화면 밖이라
+    var foot = hf ? h('div', { class: 'hf-foot', hidden: true }) : null;
+    appendKid(main, foot);
     if (!sel) {
       main.append(h('div', { class: 'btn-row add-row' },
         h('a', { class: 'btn btn-accent', href: '#/new' }, icon('plus'), '매물 추가'),
@@ -1996,10 +2417,82 @@
         h('a', { class: 'btn btn-secondary', href: '#/import', title: IMPORT_HINT, 'aria-label': '글·코드로 추가: ' + IMPORT_HINT }, icon('paste'), '글·코드로 추가')
       ));
     }
+    var droppedWrap = h('div', { class: 'home-dropped' });
+    main.append(droppedWrap);
 
-    if (dropped.length) {
-      main.append(h('h2', { class: 'h2' }, '탈락한 매물', h('span', { class: 'count', text: dropped.length + '개' })));
-      main.append(h('div', { class: 'plist' }, dropped.map(cardFor)));
+    /**
+     * 1.5.1 검토 반영: 결과 0개 빈 상태 카드는 무엇 때문인지에 맞게 — 검색어만: "검색어 “…”에 맞는 매물이 없어요 [검색어 지우기]",
+     * 칩만: "조건에 맞는 매물이 없어요" + 켜진 칩 이름 [필터 모두 해제], 둘 다: [검색·필터 모두 해제]
+     */
+    function emptyCard() {
+      var names = homeChipNames(hf);
+      var msg = !names.length ? h('p', { text: '검색어 “' + hf.q + '”에 맞는 매물이 없어요' })
+        : h('p', {}, '조건에 맞는 매물이 없어요',
+          h('span', { class: 'hf-empty-sub', text: (hf.q ? '검색어 “' + hf.q + '” · ' : '') + '켜진 필터: ' + names.join(', ') }));
+      var label = !names.length ? '검색어 지우기' : hf.q ? '검색·필터 모두 해제' : '필터 모두 해제';
+      return h('div', { class: 'card hf-empty', role: 'note' }, msg,
+        h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { if (names.length) bar.reset(); else bar.clearSearch(); } }, label));
+    }
+
+    function drawList() {
+      if (view !== v) return; // 1.5.1 검토 반영: 지난 홈 화면의 늦은 호출(사진 수 등)이 지금 화면을 건드리지 않게
+      // 목록 안(선택 모드 체크박스)에 초점이 있으면 다시 그린 뒤 같은 카드로 되돌린다(사진 수가 늦게 와서 다시 그릴 때)
+      var fa = document.activeElement;
+      var fk = fa && (listWrap.contains(fa) || droppedWrap.contains(fa) || (foot && foot.contains(fa))) && fa.getAttribute ? fa.getAttribute('data-focus-key') : null;
+      cards.length = 0;
+      var facts = null;
+      var shown;
+      var filtering = !!hf && homeFilterActive(hf);
+      if (hf) {
+        facts = {};
+        props.forEach(function (p) { facts[p.id] = homeFacts(p, homePhotoCounts); });
+        shown = applyHomeFilter(props, hf, facts, reveal);
+      } else {
+        shown = { list: active, dropped: props.filter(function (p) { return p.status === 'dropped'; }), revealed: [] };
+      }
+      var nShown = shown.revealed.length + shown.list.length + shown.dropped.length; // 지금 보이는 카드 전부(결과 줄·머리 줄·[전체 선택]이 같은 수)
+      if (sel) { // 선택 대상은 보이는 매물뿐: 필터로 숨은 매물은 선택에서 뺀다
+        var vis = {};
+        shown.revealed.concat(shown.list, shown.dropped).forEach(function (p) { vis[p.id] = true; });
+        Object.keys(homeSel.ids).forEach(function (id) { if (!vis[id]) delete homeSel.ids[id]; });
+      }
+      listWrap.textContent = '';
+      droppedWrap.textContent = '';
+      if (shown.revealed.length) { // 방금 추가·고친 매물(조건 밖): 목록 위에 따로, 이번 홈에서만
+        listWrap.append(h('section', { class: 'hf-reveal', 'aria-labelledby': 'hf-reveal-t' },
+          h('h3', { class: 'hf-reveal-t', id: 'hf-reveal-t', text: '방금 추가·고친 매물 ' + shown.revealed.length + '개' }),
+          h('p', { class: 'hf-reveal-sub', text: '지금 필터 조건에는 맞지 않아요. 필터를 바꾸거나 다른 화면에 다녀오면 숨겨져요.' }),
+          h('div', { class: 'plist' }, shown.revealed.map(cardFor))));
+      }
+      if (shown.list.length) {
+        listWrap.append(h('div', { class: 'plist' }, shown.list.map(cardFor)));
+      } else if (filtering && shown.dropped.length) {
+        listWrap.append(h('p', { class: 'muted hf-none', text: '조건에 맞는 매물은 아래 탈락한 매물에만 있어요.' }));
+      } else if (filtering) {
+        listWrap.append(emptyCard());
+      } else {
+        listWrap.append(h('p', { class: 'muted', text: '검토 중인 매물이 없어요.' }));
+      }
+      if (shown.dropped.length) {
+        droppedWrap.append(
+          h('h2', { class: 'h2' }, '탈락한 매물', h('span', { class: 'count', text: shown.dropped.length + '개' })),
+          h('div', { class: 'plist' }, shown.dropped.map(cardFor)));
+      }
+      headCount.textContent = filtering ? props.length + '개 중 ' + nShown + '개' : active.length + '개';
+      if (foot) {
+        foot.textContent = '';
+        foot.hidden = !filtering;
+        if (filtering) {
+          foot.append(h('p', { class: 'hf-foot-text', text: '필터 켜짐 · ' + homeFilterSummary(hf) }),
+            h('button', { type: 'button', class: 'btn btn-small btn-ghost', 'data-focus-key': 'hf-foot-reset', onclick: function () { bar.reset(); } }, '모두 해제'));
+        }
+      }
+      if (bar) bar.update(facts, nShown, props.length, shown.revealed.length);
+      if (sel) refreshSel(false);
+      if (fk) {
+        var back = main.querySelector('[data-focus-key="' + fk.replace(/["\\]/g, '\\$&') + '"]');
+        if (back) { try { back.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+      }
     }
 
     if (sel) {
@@ -2017,21 +2510,35 @@
       });
       main.append(h('div', { class: 'sel-bar' }, delBtn));
       allBtn.addEventListener('click', function () {
-        var all = Object.keys(homeSel.ids).length === props.length; // 모두 골랐으면 [선택 해제], 아니면 [전체 선택]
+        var all = cards.length > 0 && Object.keys(homeSel.ids).length === cards.length; // 보이는 것을 모두 골랐으면 [선택 해제], 아니면 [전체 선택]
         cards.forEach(function (c) { c.set(!all); });
         refreshSel(true);
       });
-      refreshSel(false);
     } else {
       main.append(h('details', { class: 'flow-details card' },
         h('summary', {}, '올바른 순서 다시 보기'),
         flowList()
       ));
     }
+    drawList();
+    if (bar) bar.placeChips(chipLeft);
+    if (hf) { // 사진 수는 비동기(IndexedDB): 받으면 "사진 있음" 칩 개수를 채우고, 바뀐 것이 있으면 목록을 다시 거른다
+      Photos.countByProperty().then(function (m) {
+        if (view !== v) return;
+        var next = m || {};
+        var same = homePhotoCounts && JSON.stringify(next) === JSON.stringify(homePhotoCounts);
+        homePhotoCounts = next;
+        if (!same) drawList();
+      }, function (err) {
+        console.warn('사진 수 읽기 실패(사진 있음 칩은 0으로)', err);
+        if (view === v && !homePhotoCounts) { homePhotoCounts = {}; drawList(); }
+      });
+    }
 
     if (keepFocus) {
       var again = document.querySelector('[data-focus-key="' + keepFocus.replace(/["\\]/g, '\\$&') + '"]');
       if (again) { try { again.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+      if (again && bar && again.classList.contains('hf-chip')) bar.showChip(again); // 1.5.1 검토 반영: 초점 칩이 칩 줄 밖에 남지 않게
     }
   }
   // ---------------- 매물 추가·수정 폼 ----------------
@@ -2281,6 +2788,7 @@
       // fieldsAt: {} → 새 매물(예전 기록이 아님). 칸 시각은 만든 시각으로 채워진다
       var p = normalizeProperty(Object.assign({ id: uid(), createdAt: Date.now(), updatedAt: Date.now(), fieldsAt: {} }, readForm()));
       state.properties.unshift(p);
+      homeReveal[p.id] = true; // 1.5.1 검토 반영: 홈 필터가 켜져 있어도 돌아간 홈에서 한 번 보이게
       dirty = true;
       saveNow();
       localRemove(DRAFT_KEY);
@@ -3634,6 +4142,7 @@
           var rec = { id: uid(), propertyId: prop.id, itemId: target.itemId || null, sectionId: target.sectionId || null, blob: blob, createdAt: Date.now() };
           return Photos.put(rec).then(function () {
             ok++;
+            notePhotoChange(prop.id, 1);
             if (view === v && v.photos) {
               if (!v.photos[key]) v.photos[key] = [];
               v.photos[key].push(rec);
@@ -4011,15 +4520,56 @@
     });
   }
 
-  // ---------------- 비교 ----------------
+  // ---------------- 정렬 규칙 (비교·홈 공용, 1.5.1) ----------------
+  /** 값이 없는(null) 매물은 맨 뒤. dir 1 이면 오름차순, -1 이면 내림차순 */
+  function nullsLast(a, b, f, dir) {
+    var x = f(a), y = f(b);
+    if (x === null && y === null) return 0;
+    if (x === null) return 1;
+    if (y === null) return -1;
+    return dir * (x - y);
+  }
+  function askOf(p) { return p.askPrice || null; }
+  // 비교 화면(renderCompare)과 홈 목록 필터(renderHome)가 같은 비교 함수를 쓴다. 1.5.0 비교의 5가지는 규칙 그대로(순서가 같으면 원래 순서 유지)
+  var SORT_CMP = {
+    updated: function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); },
+    created: function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); },
+    name: function (a, b) { return str(a.name).localeCompare(str(b.name), 'ko'); },
+    ask: function (a, b) { return nullsLast(a, b, askOf, 1); },
+    askDesc: function (a, b) { return nullsLast(a, b, askOf, -1); },
+    diff: function (a, b) { return nullsLast(a, b, function (p) { return diffPercent(p.askPrice, p.realPrice); }, 1); },
+    progress: function (a, b) { return overallProgress(b).pct - overallProgress(a).pct; },
+    // 1.5.1 검토 반영: 주의 표시 수가 같으면 멈춤 신호가 있는 매물을 뒤로, 그다음 아직 하나도 안 본 매물(진행 0)을 뒤로.
+    // 전에는 멈춤 신호가 있거나 안 본 매물이 "주의 0"으로 맨 앞에 와 '안전한 순'처럼 읽혔음(비교 화면도 같은 규칙)
+    caution: function (a, b) {
+      return cautionCount(a) - cautionCount(b) ||
+        (flagsYes(a, 'stop').length ? 1 : 0) - (flagsYes(b, 'stop').length ? 1 : 0) ||
+        (overallProgress(a).done ? 0 : 1) - (overallProgress(b).done ? 0 : 1);
+    }
+  };
+  /** 정렬 id → 비교 함수. 모르는 id 는 '최근에 고친 순' */
+  function sortCompare(key) { return SORT_CMP[key] || SORT_CMP.updated; }
+  /** 비교 화면의 정렬 select(1.5.0 과 같은 5가지, 같은 순서) */
   var SORTS = [
     { id: 'updated', label: '최근에 고친 순' },
     { id: 'ask', label: '호가 낮은 순' },
     { id: 'diff', label: '실거래 대비 낮은 순' },
     { id: 'progress', label: '진행률 높은 순' },
-    { id: 'caution', label: '주의 적은 순' }
+    { id: 'caution', label: '주의 표시 적은 순' } // 1.5.1 검토 반영: "주의 적은 순"은 '안전한 순'으로 읽혀 이름을 바꿈(멈춤 신호는 주의 표시가 아님)
+  ];
+  /** 홈 목록의 정렬 select(1.5.1): 비교의 5가지 + 최근 추가한 순·단지명 가나다·호가 높은 순 */
+  var HOME_SORTS = [
+    { id: 'updated', label: '최근에 고친 순' },
+    { id: 'created', label: '최근 추가한 순' }, // 1.5.1 검토 반영: createdAt 내림차순인데 "추가한 순"은 먼저 추가한 것부터로 읽혔음
+    { id: 'name', label: '단지명 가나다' },
+    { id: 'ask', label: '호가 낮은 순' },
+    { id: 'askDesc', label: '호가 높은 순' },
+    { id: 'diff', label: '실거래 대비 낮은 순' },
+    { id: 'progress', label: '진행률 높은 순' },
+    { id: 'caution', label: '주의 표시 적은 순' }
   ];
 
+  // ---------------- 비교 ----------------
   function renderCompare() {
     var v = newView('compare');
     setTopbar({ title: '매물 비교' });
@@ -4061,14 +4611,6 @@
         h('p', { class: 'small muted', text: '주의: 현장 평가에서 "주의"로 표시한 항목 + 등기부에서 "주의" 신호가 있다고 표시한 항목 수.' })
       )
     );
-
-    function nullsLast(a, b, f, dir) {
-      var x = f(a), y = f(b);
-      if (x === null && y === null) return 0;
-      if (x === null) return 1;
-      if (y === null) return -1;
-      return dir * (x - y);
-    }
 
     /** 1.5.0(M5): 고정 열 부제 "204동 1604호 · 16/16층 동향" — 같은 단지·같은 동 매물을 층·방향으로 구분(전에는 동·호만) */
     function subText(p) {
@@ -4146,14 +4688,7 @@
     function draw() {
       var list = state.properties.filter(function (p) { return includeDropped || p.status !== 'dropped'; });
       var droppedCount = state.properties.filter(function (p) { return p.status === 'dropped'; }).length; // 빠른 동작으로 바뀌므로 그릴 때마다 센다
-      var k = sortSel.value;
-      list.sort(function (a, b) {
-        if (k === 'ask') return nullsLast(a, b, function (p) { return p.askPrice || null; }, 1);
-        if (k === 'diff') return nullsLast(a, b, function (p) { return diffPercent(p.askPrice, p.realPrice); }, 1);
-        if (k === 'progress') return overallProgress(b).pct - overallProgress(a).pct;
-        if (k === 'caution') return cautionCount(a) - cautionCount(b);
-        return (b.updatedAt || 0) - (a.updatedAt || 0);
-      });
+      list.sort(sortCompare(sortSel.value)); // 1.5.1: 홈 목록과 같은 비교 함수(SORT_CMP). 규칙은 1.5.0 그대로
       tableWrap.textContent = '';
       hiddenNote.textContent = !includeDropped && droppedCount ? '탈락 ' + droppedCount + '개 숨김' : '';
       hiddenNote.hidden = !hiddenNote.textContent;
@@ -5489,6 +6024,7 @@
         });
       });
       Array.prototype.unshift.apply(state.properties, made);
+      made.forEach(function (p) { homeReveal[p.id] = true; }); // 1.5.1 검토 반영: 홈 필터·검색이 남아 있어도 담은 매물이 홈에서 보이게
       dirty = true;
       saveNow();
       sessionRemove(IMPORT_TEXT_KEY);
@@ -5761,6 +6297,7 @@
     // 다른 탭(창)이 저장하면 바로 합쳐서 다시 그린다
     window.addEventListener('storage', function (e) {
       if (e.key === null || e.key === STORAGE_KEY) syncFromOtherTabs();
+      else if (e.key === PHOTO_REV_KEY && view.name === 'home') refreshViewSoon(); // 1.5.1 검토 반영: 다른 탭이 사진을 넣고 지움 → "사진 있음" 다시 셈
     });
     // iOS Safari 는 touchstart 리스너가 있어야 버튼을 누를 때 :active 모양을 보여 준다
     document.addEventListener('touchstart', function () { /* :active 표시용 */ }, { passive: true });

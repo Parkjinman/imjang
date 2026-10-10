@@ -1511,3 +1511,75 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 .ctable th:nth-child(2), .ctable td:nth-child(2) { padding-right: 6px; }
 /* 홈 맨 위 "체크리스트가 바뀌었어요" 안내(dataNoticeBar) */
 .data-notice .btn { margin-top: 8px; }
+
+/* ---------- 1.5.1 home-filter ---------- */
+/* 홈 "내 매물" 줄 아래 검색·필터 칩·정렬(renderHome → homeFilterBar, SPEC 6.13). 매물이 2개 이상일 때만 그린다 */
+.home-filter { margin: -2px 0 12px; }
+.home-filter > * + * { margin-top: 8px; }
+/* 검색 칸: 오른쪽 끝 [지우기](icon-btn 44px). 브라우저의 기본 × 는 숨긴다 */
+.hf-search { position: relative; }
+.hf-search .hf-q { padding-right: 50px; }
+.hf-q::-webkit-search-cancel-button, .hf-q::-webkit-search-decoration { -webkit-appearance: none; appearance: none; }
+.hf-search .hf-clear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); color: var(--muted); }
+.hf-search .hf-clear[hidden] { display: none; }
+/* 칩 줄: 가로 스크롤 한 줄(페이지는 넘치지 않음). 묶음(role=group)마다 작은 이름 + 칩, 묶음 사이 세로 구분선 */
+.hf-chips {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 -2px; padding: 0 2px;
+  overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.hf-chips::-webkit-scrollbar { display: none; }
+/* 1.5.1 검토 반영: 넘치면 숨은 쪽 끝을 흐리게(homeFilterBar syncFade → .has-prev / .has-next). 누르는 영역은 그대로 */
+.hf-chips.has-next { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 36px), transparent); }
+.hf-chips.has-prev { -webkit-mask-image: linear-gradient(90deg, transparent, #000 18px); mask-image: linear-gradient(90deg, transparent, #000 18px); }
+.hf-chips.has-prev.has-next {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 18px, #000 calc(100% - 36px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 18px, #000 calc(100% - 36px), transparent);
+}
+.hf-group { display: flex; align-items: center; gap: 6px; flex: none; }
+.hf-group + .hf-group { margin-left: 4px; padding-left: 10px; border-left: 1px solid var(--line); }
+.hf-gl { flex: none; font-size: 0.7647rem; font-weight: 700; color: var(--muted); }
+/* 칩: 버튼 자체가 44px(누르는 영역, 투명), 보이는 알약(.hf-pill)은 36px. 켜지면 teal 채움 */
+.hf-chip { flex: none; display: inline-flex; align-items: center; min-height: 44px; padding: 4px 0; margin: 0; border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.hf-pill {
+  display: inline-flex; align-items: center; gap: 2px;
+  min-height: 36px; padding: 6px 12px;
+  border: 1.5px solid var(--line); border-radius: 999px;
+  background: var(--card); color: var(--text);
+  font-size: 0.8824rem; font-weight: 700; line-height: 1.2; white-space: nowrap;
+}
+.hf-chip .hf-n { font-weight: 600; color: var(--muted); }
+.hf-chip .hf-n:empty { display: none; }
+.hf-chip:active .hf-pill { filter: brightness(0.94); }
+.hf-chip[aria-pressed="true"] .hf-pill { background: var(--teal); border-color: var(--teal); color: #fff; }
+/* 1.5.1 검토 반영: 켜진 칩의 개수도 흰 글자 100%(다크 teal 위 85% 는 4.07:1 → 4.98:1). 이름과는 굵기로 구분 */
+.hf-chip[aria-pressed="true"] .hf-n { color: #fff; font-weight: 500; }
+/* 정렬 select + [모두 해제]. 1.5.1 검토 반영: "필터 N" 배지를 빼서 320px 에서도 한 줄(전에는 둘째 줄로 감겨 도구가 96px) */
+.hf-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.hf-tools .hf-sort { flex: 1 1 170px; width: auto; min-width: 0; min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+.hf-reset[hidden] { display: none; }
+.hf-tools .hf-reset { flex: none; }
+/* 결과 줄 "N개 중 M개 보임 · 켜진 칩 이름"(role=status). 비어 있으면 자리도 없앤다 */
+.hf-result { font-size: 0.8824rem; font-weight: 600; color: var(--muted); margin: 8px 2px 0; }
+.hf-result:empty { display: none; }
+/* 결과 0개 빈 상태 카드 + [검색어 지우기]/[필터 모두 해제]/[검색·필터 모두 해제] */
+.card.hf-empty { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.card.hf-empty > * + * { margin-top: 0; }
+.card.hf-empty p { flex: 1 1 160px; font-weight: 600; overflow-wrap: anywhere; }
+.hf-empty-sub { display: block; margin-top: 2px; font-size: 0.8235rem; font-weight: 600; color: var(--muted); }
+.hf-none { margin: 2px 2px 0; }
+/* 1.5.1 검토 반영: 방금 추가·고친 매물(필터 조건 밖, 이번 홈에서만) — 목록 위 점선 상자 */
+.hf-reveal { margin: 0 0 14px; padding: 10px; border: 1.5px dashed var(--line); border-radius: var(--radius-sm); background: var(--card-2); }
+.hf-reveal-t { font-size: 0.9412rem; font-weight: 800; margin: 0 2px; }
+.hf-reveal-sub { font-size: 0.8235rem; color: var(--muted); margin: 2px 2px 10px; }
+/* 1.5.1 검토 반영: 목록 맨 아래 "필터 켜짐 · 조건 [모두 해제]"(스크롤이 복원돼 위 도구가 화면 밖일 때도 보이게) */
+.hf-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap;
+  margin: 12px 0 0; padding: 6px 8px 6px 12px;
+  border-radius: var(--radius-sm); background: var(--teal-soft); color: var(--teal-ink);
+  font-size: 0.8824rem; font-weight: 700;
+}
+.hf-foot[hidden] { display: none; }
+.hf-foot-text { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.hf-foot .btn { flex: none; }
