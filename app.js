@@ -23,7 +23,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.4.5';
+  var APP_VERSION = '1.5.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   var SCHEMA_VERSION = 1;
@@ -38,7 +38,8 @@
   // 가져오기 코드·네이버 매물 글 해석기(import-parser.js). 파일이 없으면 null 이고, 그때는 '코드·글로 매물 추가' 화면만 안내로 바뀐다
   var IMP = window.ImjangImport || null;
   var IMPORT_TEXT_KEY = 'imjang.import.text'; // 붙여 넣은 글(sessionStorage). Claude 앱·네이버에 다녀와도 남게
-  var IMPORT_TITLE = '코드·글로 매물 추가'; // 1.4.0: 가져오기 화면 제목(Claude 코드나 네이버 매물 화면 글을 붙여 넣음)
+  // 1.4.0: 가져오기 화면 제목(Claude 코드나 네이버 매물 화면 글을 붙여 넣음). 1.5.0 검토 반영: 홈 버튼 이름과 같은 어근("네이버 글")으로
+  var IMPORT_TITLE = '네이버 글·코드로 추가';
   // 1.4.1: 홈 [코드·글로 추가] 버튼의 보충 설명(VoiceOver 이름·마우스 풍선). 보이는 글은 320px 한 줄에 맞게 짧게 둔다
   var IMPORT_HINT = '네이버 매물 화면 글이나 Claude 코드를 붙여 넣어 매물 추가';
   var GONE_KEYS_MAX = 600; // 지운 매물 열쇠(goneKeys) 최대 개수
@@ -68,7 +69,8 @@
 
   // 빈 화면에 보여 줄 올바른 순서 (등기부가 임장보다 먼저)
   var FLOW_STEPS = [
-    { title: '단지 고르기', desc: '실거래가(실제로 거래된 가격)를 보고 예산에 맞는 단지를 고릅니다. 아직 집을 보러 가지 않아요.' },
+    // 1.5.0(C6): 규제지역·허가구역·대출 한도는 단지 단계에서 정해지므로 여기서 함께 보게 한다
+    { title: '단지 고르기', desc: '실거래가(실제로 거래된 가격)를 보고 예산에 맞는 단지를 고릅니다. 규제지역·토지거래허가구역인지, 대출 한도 안에 드는지도 이때 봅니다(토지이음·은행). 아직 집을 보러 가지 않아요.' },
     { title: '동·호수 받기', desc: '중개사에게 실제로 나온 매물의 정확한 동·호수를 받습니다. 그래야 그 집의 등기부를 볼 수 있어요.' },
     { title: '등기부 먼저', desc: '등기부등본(집 주인과 빚 기록이 적힌 공식 서류)을 인터넷등기소에서 열람해요. 신탁·가압류 같은 문제가 있으면 그 집은 보러 갈 필요가 없어요.', key: true },
     { title: '임장', desc: '임장(현장에 직접 가서 보는 것)으로 동네·단지·집 안을 확인하고, 시간대를 바꿔 한 번 더 가 봐요.' },
@@ -359,6 +361,7 @@
       var sec = {
         id: secId,
         title: str(s.title) || '이름 없는 섹션',
+        shortTitle: str(s.shortTitle), // 1.5.0: 좁은 화면 섹션 칩용 2~3자 제목(없으면 title)
         when: str(s.when),
         desc: str(s.desc),
         gate: s.gate === true,
@@ -381,6 +384,10 @@
           group: str(it.group),
           severity: type === 'flag' ? (it.severity === 'stop' ? 'stop' : 'caution') : '',
           memoHint: str(it.memoHint), // 1.4.5: 메모 칸 자리표시 문구(없으면 앱 기본 문구)
+          // 1.5.0: 항목 하나만 섹션과 다르게 모을 때('contract' | 'reference', 없으면 '' = 섹션 값을 따름)
+          cautionUse: it.cautionUse === 'reference' || it.cautionUse === 'contract' ? it.cautionUse : '',
+          linkTo: str(it.linkTo), // 1.5.0: flag "있음"일 때 그 자리에 열어 줄 섹션 id(예: 'registry')
+          shortTitle: str(it.shortTitle), // 1.5.0 검토 반영: 답한 항목의 접힌 한 줄에 문장 대신 보여 줄 짧은 이름(없으면 문장)
           sectionId: secId
         });
       });
@@ -437,12 +444,25 @@
   var loadProblem = null; // 'blocked' | 'broken'
 
   function emptyState() {
-    return { version: SCHEMA_VERSION, rev: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null, backupWithPhotos: null } };
+    return { version: SCHEMA_VERSION, rev: '', dataVersion: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null, backupWithPhotos: null, dataNotice: null } };
   }
 
   var ITEM_VALUE_KEYS = ['status', 'memo', 'answer', 'date', 'done']; // 항목 상태의 값 이름(merge.js ITEM_FIELDS 와 같음)
 
-  function normalizeItems(items) {
+  // 1.5.0 검토 반영: 저장본에 적는 데이터(data.js) 버전. 이보다 오래된 저장본(1.4.x 이하는 dataVersion 이 없음)을 읽을 때
+  // 2026-10c 에서 바뀐 항목(가처분 분리, rate → check)을 한 번 옮긴다. normalizeState 가 migrationStats 에 옮긴 수를 센다
+  var DATA_MIGRATION_VERSION = '2026-10c';
+  var migrationStats = null; // { legacy, inj, unitMoved, unitLost } — normalizeState 마다 새로 만듦
+  var migratedOnLoad = false; // loadState 가 옛 저장본을 읽었으면 true → init 이 한 번 다시 저장(dataVersion 을 적어 다음부터 안 옮김)
+
+  /**
+   * 항목 상태 정리. legacy(1.5.0 검토 반영): 데이터 2026-10c 보다 오래된 저장본이면 type 이 rate → check 로 바뀐 항목
+   * (unit-measure·unit-balcony)의 "양호"를 체크(done)로 옮긴다("주의"는 메모만 남음).
+   * 저장본이 어느 버전이든 항목 type 에 맞지 않는 status(rate 가 아닌 항목의 good/caution, flag 가 아닌 항목의 yes/no)는 버린다
+   * — 앱은 어차피 type 에 맞는 값만 읽지만(isItemDone), 버리지 않으면 저장본·백업·합치기에 영원히 남아 나중에 type 을 되돌리면
+   * 옛 답이 말없이 되살아난다. 읽을 때 모든 기기가 같은 규칙으로 버리므로 합치기에 안전하다(ft 시각은 남겨 "지운 값"으로 합쳐짐)
+   */
+  function normalizeItems(items, legacy) {
     var out = {};
     if (!items || typeof items !== 'object') return out;
     Object.keys(items).forEach(function (k) {
@@ -464,6 +484,15 @@
         ITEM_VALUE_KEYS.forEach(function (f) { var x = numOrNull(v.ft[f]); if (x > 0) ft[f] = x; });
         if (Object.keys(ft).length) o.ft = ft;
       }
+      var def = CL.itemById[k];
+      if (def && def.type !== 'rate' && (o.status === 'good' || o.status === 'caution')) {
+        if (legacy && def.type === 'check' && o.status === 'good') {
+          if (!o.done) { o.done = true; if (o.ft && o.ft.status && !o.ft.done) o.ft.done = o.ft.status; }
+          if (migrationStats) migrationStats.unitMoved++;
+        } else if (legacy && migrationStats && o.status === 'caution') migrationStats.unitLost++;
+        delete o.status;
+      }
+      if (def && def.type !== 'flag' && (o.status === 'yes' || o.status === 'no')) delete o.status;
       if (Object.keys(o).length) out[k] = o;
     });
     return out;
@@ -516,7 +545,49 @@
     return out;
   }
 
-  function normalizeProperty(p) {
+  // 1.5.0: 가져오기 참고(importNotes). 가져오기가 메모에 넣던 앱 안내 문장(면적 환산 안내 등)을 메모와 따로 둔다
+  var IMPORT_NOTES_MAX = 10;   // 문장 수
+  var IMPORT_NOTE_LEN = 300;   // 문장 길이
+  // 1.4.x 가 메모 본문에 넣던 안내 문장의 머리말. 1.5.0 부터는 importNotes 로 옮긴다("다른 연락처: …"는 정보라 메모에 남김)
+  var IMPORT_NOTE_LINE_RE = /^(면적: 화면의 평 표기|면적: 목록 표기|네이버 목록에서 읽었어요)/;
+  // 1.5.0 검토 반영: 담는 순간에만 뜻이 있는 안내(호수는 담은 뒤 직접 적으므로)는 가져오기 참고에 남기지 않는다
+  var IMPORT_NOTE_ONCE_RE = /^호수는 직접 입력/;
+
+  /** 가져오기 참고 목록 정리: 문자열 배열, 빈 것·중복 제외, 개수·길이 제한 */
+  function noteList(v) {
+    var out = [];
+    (Array.isArray(v) ? v : []).forEach(function (n) {
+      n = str(n).trim().slice(0, IMPORT_NOTE_LEN);
+      if (n && out.indexOf(n) < 0 && out.length < IMPORT_NOTES_MAX) out.push(n);
+    });
+    return out;
+  }
+
+  /**
+   * 메모에 섞인 앱 안내 문장을 떼어 가져오기 참고로 옮긴다 → { memo, notes }.
+   * notes(가져오기 결과의 참고 문구)는 뒤에 붙이되, 같은 머리말("면적:")의 더 자세한 문장이 메모에서 왔으면 겹치니 뺀다.
+   * 안내 문장이 없으면 메모는 그대로(사용자가 쓴 줄바꿈을 건드리지 않음)
+   */
+  function splitImportMemo(memo, notes) {
+    var keep = [];
+    var moved = [];
+    str(memo).split(/\r?\n/).forEach(function (line) {
+      if (IMPORT_NOTE_LINE_RE.test(line.trim())) moved.push(line.trim()); else keep.push(line);
+    });
+    var out = moved.slice();
+    (Array.isArray(notes) ? notes : []).forEach(function (n) {
+      n = str(n).trim();
+      if (IMPORT_NOTE_ONCE_RE.test(n)) return; // 1.5.0 검토 반영: "호수는 직접 입력해요"는 호수를 적고 나면 틀린 안내가 됨
+      var at = n.indexOf(':');
+      var label = at > 0 ? n.slice(0, at + 1) : '';
+      if (label && moved.some(function (m) { return m.indexOf(label) === 0; })) return;
+      out.push(n);
+    });
+    return { memo: moved.length ? keep.join('\n').replace(/\n{3,}/g, '\n\n').trim() : str(memo), notes: noteList(out) };
+  }
+
+  /** legacy(1.5.0 검토 반영): 데이터 2026-10c 보다 오래된 저장본에서 온 매물이면 바뀐 항목을 한 번 옮긴다(normalizeItems·migrateInjunction) */
+  function normalizeProperty(p, legacy) {
     var now = Date.now();
     var np = {
       id: str(p.id) || uid(),
@@ -541,7 +612,8 @@
       updatedAt: numOrNull(p.updatedAt) || now,
       importedAt: numOrNull(p.importedAt), // 가져오기 코드로 만든 시각(직접 입력이면 null)
       source: str(p.source),               // 'claude-code': 가져오기 코드로 만든 매물
-      items: normalizeItems(p.items),
+      importNotes: noteList(p.importNotes), // 1.5.0: 가져오기 참고(앱 안내 문장). 상세에서 접힌 목록, 공유 글에는 안 넣음
+      items: normalizeItems(p.items, legacy),
       sectionMemos: normalizeMemos(p.sectionMemos),
       // 1.3.0 변경 시각(두 기기 합치기용). 검사와 빈 곳 채우기(예전 기록은 legacyAt)는 merge.js fillTimes
       fieldsAt: p.fieldsAt,          // { 필드: ms } 기본 정보가 바뀐 시각
@@ -549,6 +621,14 @@
       sectionMemoAt: p.sectionMemoAt, // { 섹션id: ms } 섹션 메모가 바뀐 시각(지워도 남김)
       legacyAt: p.legacyAt           // 1.3.1. ms 시각 없는 예전 기록(1.2.x)을 처음 읽은 때. 그때의 값은 모두 알고 있었다는 뜻
     };
+    // 1.5.0: 1.4.x 가져오기가 메모 본문에 넣은 안내 문장은 가져오기 참고로 옮긴다(가져온 매물만. 한 번 옮기면 다음부터는 그대로)
+    if (np.importedAt) {
+      var sp = splitImportMemo(np.memo, np.importNotes);
+      np.memo = sp.memo;
+      np.importNotes = sp.notes;
+    }
+    if (!np.importNotes.length) delete np.importNotes; // 비면 키를 두지 않는다(합치기에서 "다른 정보"로 세지 않게)
+    if (legacy && migrateInjunction(np.items) && migrationStats) migrationStats.inj++; // 1.5.0 검토 반영
     if (MG) return MG.fillTimes(np);
     // merge.js 를 못 불러왔을 때: 저장된 시각은 검사만 하고 그대로 둔다(버리면 다음 합치기에서 예전 값이 새 값을 이길 수 있음).
     // 비어 있는 시각은 채우지 않는다(다음에 merge.js 가 뜨면 fillTimes 가 legacyAt 으로 채움)
@@ -561,11 +641,39 @@
     return np;
   }
 
+  /**
+   * 1.5.0 검토 반영: 1.4.x 저장본의 reg-seizure 문장은 "압류·가압류·가처분"이었으므로 그 "없음"은 가처분까지 부정한 답이다.
+   * reg-injunction(2026-10c 에서 분리)이 아예 없으면 { status: 'no', t, ft } 로 복사한다("있음"은 셋 중 무엇인지 몰라 미확인으로 둔다).
+   * 같은 입력에서 같은 결과(멱등)라 다른 기기와 합쳐도 되살아남 문제가 없다. 데이터 2026-10c 로 저장한 기록(dataVersion 있음)에는
+   * 하지 않는다 — 1.5.0 에서 압류·가압류만 답하고 가처분은 아직 안 답한 매물이 다시 열 때 저절로 "없음"이 되면 안 되므로
+   */
+  function migrateInjunction(items) {
+    var sz = items['reg-seizure'];
+    if (items['reg-injunction'] || !sz || sz.status !== 'no' || !CL.itemById['reg-injunction']) return false;
+    var o = { status: 'no' };
+    if (sz.t) o.t = sz.t;
+    if (sz.ft && sz.ft.status) o.ft = { status: sz.ft.status };
+    items['reg-injunction'] = o;
+    return true;
+  }
+
+  /** 홈의 "체크리스트가 바뀌었어요" 안내에 쓸 수 { inj, unitMoved, unitLost }. 모두 0 이면 null */
+  function noticeStats(v) {
+    if (!v || typeof v !== 'object') return null;
+    var o = { inj: numOrNull(v.inj) || 0, unitMoved: numOrNull(v.unitMoved) || 0, unitLost: numOrNull(v.unitLost) || 0 };
+    return o.inj || o.unitMoved || o.unitLost ? o : null;
+  }
+
   /** 저장된 데이터를 현재 스키마로 맞춘다. (나중에 version 이 바뀌면 여기서 변환) */
   function normalizeState(data) {
     var s = emptyState();
+    migrationStats = { legacy: false, inj: 0, unitMoved: 0, unitLost: 0 };
     if (!data || typeof data !== 'object') return s;
     s.rev = str(data.rev);
+    // 1.5.0 검토 반영: 저장본을 쓴 데이터 버전. 없거나(1.4.x 이하) 2026-10c 보다 오래되면 바뀐 항목을 한 번 옮긴다
+    s.dataVersion = str(data.dataVersion);
+    var legacy = !s.dataVersion || s.dataVersion < DATA_MIGRATION_VERSION;
+    migrationStats.legacy = legacy;
     s.deleted = normalizeDeleted(data.deleted);
     s.localDeleted = normalizeDeleted(data.localDeleted); // 1.3.1: 이 기기 초기화(전체 삭제·덮어쓰기)로 지운 매물
     s.goneKeys = normalizeDeleted(data.goneKeys); // 모양이 같다({ 열쇠: 시각 }, 180일 보관)
@@ -573,7 +681,7 @@
     var seen = {};
     list.forEach(function (p) {
       if (!p || typeof p !== 'object') return;
-      var np = normalizeProperty(p);
+      var np = normalizeProperty(p, legacy);
       if (seen[np.id]) np.id = uid();
       seen[np.id] = true;
       if (s.deleted[np.id] && s.deleted[np.id] >= np.updatedAt) return; // 지운 뒤 남은 사본
@@ -586,6 +694,7 @@
       s.ui.deviceNameAt = numOrNull(data.ui.deviceNameAt);
       // 1.4.5: 백업 "사진도 함께 넣기"의 마지막 선택. 고른 적이 없으면 null(사진 수·크기로 기본값을 정함)
       s.ui.backupWithPhotos = typeof data.ui.backupWithPhotos === 'boolean' ? data.ui.backupWithPhotos : null;
+      s.ui.dataNotice = noticeStats(data.ui.dataNotice); // 1.5.0 검토 반영: 홈의 "체크리스트가 바뀌었어요" 안내(✕ 로 닫으면 null)
     }
     return s;
   }
@@ -617,6 +726,13 @@
     }
     var s = normalizeState(obj);
     knownRev = s.rev;
+    // 1.5.0 검토 반영: 옛 저장본(1.4.x)을 처음 읽었으면 옮긴 수를 홈 안내(ui.dataNotice)에 남기고, init 이 dataVersion 을 적어 다시 저장한다
+    var m = migrationStats;
+    if (m && m.legacy) {
+      if (m.inj || m.unitMoved || m.unitLost) s.ui.dataNotice = { inj: m.inj, unitMoved: m.unitMoved, unitLost: m.unitLost };
+      migratedOnLoad = true;
+    }
+    if (CL.version) s.dataVersion = CL.version; // 메모리의 state 는 지금 데이터 기준(사본을 다시 정리해도(computeMerge) 또 옮기지 않게)
     return s;
   }
 
@@ -763,6 +879,7 @@
       pulled = pullFromStorage(); // 다른 탭이 먼저 쓴 내용을 덮어쓰지 않도록 합친 뒤 쓴다
       needResave = false;         // 지금 통째로 쓰므로 되살린 필드도 함께 저장된다
       state.version = SCHEMA_VERSION;
+      if (CL.version) state.dataVersion = CL.version; // 1.5.0 검토 반영: 어느 데이터 기준으로 쓴 저장본인지(읽을 때 옛 항목 옮기기 판단)
       state.rev = uid();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       knownRev = state.rev;
@@ -787,6 +904,7 @@
   function tryWriteState(candidate) {
     try {
       candidate.version = SCHEMA_VERSION;
+      if (CL.version) candidate.dataVersion = CL.version;
       candidate.rev = uid();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(candidate));
       knownRev = candidate.rev;
@@ -1174,7 +1292,7 @@
     });
     if (stops) return { code: 'stop', label: '멈춤 신호 ' + stops + '건' };
     if (prog.done === 0) return { code: 'todo', label: '아직 안 봄' };
-    // 1.4.5: 핵심 과업(멈춤 신호 7개 답하기)의 결과를 보여 준다. 전에는 모두 "없음"이어도 "확인 중 7/17"로만 보였음
+    // 1.4.5: 핵심 과업(등기부 멈춤 신호에 모두 답하기)의 결과를 보여 준다. 전에는 모두 "없음"이어도 "확인 중 7/17"로만 보였음(1.5.0 데이터는 8/18)
     var gate = gateStopState(prop);
     if (gate.unanswered > 0) return { code: 'unanswered', label: '멈춤 신호 ' + gate.unanswered + '개 미확인' };
     // 여기부터는 멈춤 신호를 모두 "없음"으로 답한 상태
@@ -1592,7 +1710,9 @@
           h('span', { class: 'sr-only', text: (i + 1) + '단계, ' }),
           s.title,
           s.key ? h('span', { class: 'flow-key-note', text: '문제 있으면 여기서 탈락' }) : null),
-        h('p', { class: 'flow-step-desc', text: s.desc })
+        h('p', { class: 'flow-step-desc', text: s.desc }),
+        // 1.5.0(L1): 등기부 단계에 인터넷등기소 바로가기(data.js links 에 없으면 생략)
+        s.key ? extLink('등기소', '인터넷등기소 열기', 'ext-link flow-link') : null
       );
     }));
   }
@@ -1607,32 +1727,91 @@
     );
   }
 
+  /**
+   * 홈 화면 추가 안내. 1.5.0(L6): 한 줄 배너("홈 화면에 추가하면 더 안전해요 [방법] ✕")로 줄였다(1.4.x 까지는 3단계 카드가
+   * 첫 화면의 1/3을 차지해 매물 목록을 밀었음). 자세한 글(기록이 있으면 "먼저 백업" 안내 포함)은 [방법] 대화상자(showInstallHow).
+   * ✕ 로 닫으면 ui.dismissedInstallTip 에 기억하고 설정의 [안내 다시 보기]로 되돌린다
+   */
   function installTip() {
     if (!isIOS() || isStandalone() || inAppBrowser() || state.ui.dismissedInstallTip) return null;
-    var hasData = state.properties.length > 0;
-    var card = h('div', { class: 'tip-card', role: 'note' },
-      h('div', { class: 'tip-body' },
-        h('strong', { text: '홈 화면에 추가해서 쓰세요' }),
-        h('p', { text: INSTALL_TIP }),
-        hasData ? h('p', { class: 'tip-move', text: INSTALL_TIP_MOVE }) : null,
-        hasData ? h('a', { class: 'btn btn-small btn-secondary', href: '#/settings', style: 'margin-top:8px' }, '지금 백업하기') : null
-      ),
+    var bar = h('div', { class: 'install-bar', role: 'note' },
+      h('p', { class: 'install-bar-text', text: '홈 화면에 추가하면 더 안전해요' }),
+      h('button', { type: 'button', class: 'btn btn-small btn-secondary install-bar-how', 'aria-label': '방법: 홈 화면에 추가하는 법 보기', onclick: showInstallHow }, '방법'),
       h('button', {
         type: 'button', class: 'icon-btn', 'aria-label': '홈 화면 추가 안내 닫기',
         onclick: function () {
           state.ui.dismissedInstallTip = true;
           saveNow();
-          card.remove();
+          bar.remove();
         }
       }, icon('close'))
     );
-    return card;
+    return bar;
+  }
+
+  /**
+   * 1.5.0 검토 반영: 데이터 2026-10c 로 옮긴 내용을 홈 맨 위에서 한 번 알린다(loadState 가 옛 저장본을 읽으며 ui.dataNotice 에 남김).
+   * 1.4.x 매물의 "압류·가압류·가처분 없음"을 가처분 "없음"으로, 집 안 두 항목의 "양호"를 체크로 옮겼고 "주의"는 메모만 남는다는 것.
+   * [확인]으로 닫으면 ui.dataNotice 를 지우고 저장한다(전에는 README 에만 적혀 있어 앱 안에서는 "멈춤 신호 1개 미확인"으로 되돌아간 듯 보였음)
+   */
+  function dataNoticeBar() {
+    var n = state.ui.dataNotice;
+    if (!n) return null;
+    var lines = [];
+    if (n.inj) lines.push('등기부에 "가처분" 항목이 새로 생겼어요. 전에 "압류·가압류·가처분"을 "없음"으로 답한 매물 ' + n.inj + '개는 가처분도 "없음"으로 옮겨 두었어요.');
+    if (n.unitMoved || n.unitLost) {
+      lines.push('집 안의 "가구 자리 줄자 측정"·"베란다 확장"은 양호/주의에서 체크로 바뀌었어요.' +
+        (n.unitMoved ? ' "양호" ' + n.unitMoved + '개는 체크해 두었어요.' : '') +
+        (n.unitLost ? ' "주의" ' + n.unitLost + '개는 메모만 남았으니 다시 봐 주세요.' : ''));
+    }
+    var bar = h('div', { class: 'notice notice-info data-notice', role: 'note' },
+      h('strong', { text: '체크리스트가 바뀌었어요 (1.5.0)' }),
+      lines.map(function (t) { return h('p', { text: t }); }),
+      h('button', {
+        type: 'button', class: 'btn btn-small btn-secondary',
+        onclick: function () { state.ui.dataNotice = null; saveNow(); bar.remove(); }
+      }, '확인'));
+    return bar;
+  }
+
+  /** [방법] 대화상자: 홈 화면에 추가하는 법 + 기록이 있을 때 "추가하기 전에 먼저 백업"(저장 공간이 따로라서) + [지금 백업하기] */
+  function showInstallHow() {
+    var hasData = state.properties.length > 0;
+    var buttons = [];
+    if (hasData) buttons.push({ label: '지금 백업하기', value: 'backup', kind: 'accent' });
+    buttons.push({ label: '닫기', value: null, kind: hasData ? 'secondary' : undefined });
+    openDialog({
+      title: '홈 화면에 추가해서 쓰세요',
+      content: h('div', { class: 'install-how' },
+        h('p', { text: INSTALL_TIP }),
+        hasData ? h('p', { class: 'tip-move', text: INSTALL_TIP_MOVE }) : null),
+      buttons: buttons
+    }).then(function (r) { if (r.value === 'backup') navigate('/settings'); });
   }
 
   // ---------------- 홈: 매물 목록 ----------------
   function propertyCardClass(p) {
     var dropped = p.status === 'dropped';
     return 'pcard' + (dropped ? ' is-dropped' : '') + (!dropped && flagsYes(p, 'stop').length ? ' has-stop' : '');
+  }
+
+  /**
+   * 1.5.0: 홈 카드의 "호수 입력 필요" 칩. 누르면 수정 폼의 호수(동이 비었으면 동) 칸으로 바로 간다(M8).
+   * 카드 전체가 링크라 칩은 그 안의 작은 링크(클릭은 카드로 번지지 않게). 선택 모드(plain)에서는 글자만
+   */
+  function needHoChip(p, plain) {
+    var label = p.dong ? '호수 입력 필요' : '동·호수 입력 필요';
+    if (plain) return h('span', { class: 'meta-chip need-ho', text: label });
+    return h('a', {
+      class: 'meta-chip need-ho need-ho-link', href: '#/p/' + encodeURIComponent(p.id) + '/edit',
+      'aria-label': label + ' · 입력하러 가기',
+      onclick: function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        pendingFocus = p.dong ? 'ho' : 'dong';
+        navigateNow('/p/' + p.id + '/edit'); // 클릭 안에서 그려야 iOS 가 키보드를 띄움
+      }
+    }, label, h('span', { class: 'need-ho-arrow', 'aria-hidden': 'true', text: '›' }));
   }
 
   /** 매물 카드 내용(이름·상태·가격·진행·칩). idBase 가 있으면 이름·단위·상태에 id 를 붙인다(선택 모드 체크박스의 이름) */
@@ -1662,7 +1841,7 @@
       makeBar(prog.pct, '진행 ' + prog.pct + '%', { ariaLabel: '체크리스트 진행률' }).el,
       h('div', { class: 'pcard-meta' },
         // 동·호수가 없으면 등기부를 열람할 수 없다(가져온 매물은 동만 있고 호수가 비어 있음 → "호수 입력 필요")
-        (!p.dong || !p.ho) && !dropped ? h('span', { class: 'meta-chip need-ho', text: p.dong ? '호수 입력 필요' : '동·호수 입력 필요' }) : null,
+        (!p.dong || !p.ho) && !dropped ? needHoChip(p, !!idBase) : null,
         h('span', { class: 'meta-chip reg-' + reg.code, text: '등기부: ' + reg.label }),
         // 1.4.5: 아무것도 안 본 매물에는 "주의 0개"를 붙이지 않는다("문제 없음"처럼 읽히지 않게)
         cautions ? h('span', { class: 'meta-chip warn', text: '주의 ' + cautions + '개' }) : (prog.done ? h('span', { class: 'meta-chip', text: '주의 0개' }) : null),
@@ -1746,6 +1925,7 @@
     if (!sel) {
       appendKid(main, undoBar()); // 1.4.1: 방금 지운 매물 되돌리기(토스트보다 찾기 쉬운 자리. VoiceOver 는 제목 다음)
       appendKid(main, installTip());
+      appendKid(main, dataNoticeBar()); // 1.5.0 검토 반영: 데이터 2026-10c 로 옮긴 내용 한 번 안내
       appendKid(main, draftCard());
     }
 
@@ -1759,14 +1939,17 @@
             h('a', { class: 'btn btn-small btn-secondary', href: '#/settings', style: 'margin-top:8px' }, '백업 불러오기')
           )));
       }
+      // 1.5.0(L1·L11): [첫 매물 추가하기]·[네이버 매물 글 붙여넣기]를 제목 바로 아래로(iPhone 390 에서는 5단계 목록 때문에 첫 화면 밖이었음),
+      // 5단계 목록은 접힌 <details> "순서 자세히 보기". 빈 상태는 세로 여유가 있어 가져오기 버튼 이름을 풀어 쓴다(목록 상태는 "글·코드로 추가". 검토 반영: 화면 제목 "네이버 글·코드로 추가"와 같은 어근)
       main.append(h('section', { class: 'card flow-card', 'aria-labelledby': 'flow-title' },
         h('h2', { class: 'flow-title', id: 'flow-title', text: '처음이라면 이 순서대로' }),
         h('p', { class: 'flow-sub', text: '집을 보러 가기 전에 등기부등본부터 봐요. 문제가 있는 집은 보러 갈 필요가 없어요.' }),
-        flowList(),
         h('a', { class: 'btn btn-accent btn-block flow-cta', href: '#/new' }, icon('plus'), '첫 매물 추가하기'),
-        h('a', { class: 'btn btn-secondary btn-block', href: '#/import', title: IMPORT_HINT, 'aria-label': '코드·글로 추가: ' + IMPORT_HINT }, icon('paste'), '코드·글로 추가'),
-        h('p', { class: 'muted small', style: 'text-align:center', text: '중개사에게 동·호수를 받았다면 매물을 추가하고 등기부 체크부터 시작하세요.' }),
-        h('p', { class: 'muted small', style: 'text-align:center', text: '네이버 부동산 매물은 상세 화면 글을 복사해 붙여 넣거나, Claude가 준 코드로 한 번에 추가할 수 있어요.' })
+        h('a', { class: 'btn btn-secondary btn-block', href: '#/import', title: IMPORT_HINT, 'aria-label': '네이버 매물 글 붙여넣기: ' + IMPORT_HINT }, icon('paste'), '네이버 매물 글 붙여넣기'),
+        h('p', { class: 'muted small flow-intro-hint', text: '중개사에게 동·호수를 받았다면 매물을 추가하고 등기부 체크부터 시작하세요. 네이버 매물 글이나 Claude가 준 코드를 붙여 넣어도 돼요.' }),
+        h('details', { class: 'flow-details flow-details-first' },
+          h('summary', {}, '순서 자세히 보기'),
+          flowList())
       ));
       return;
     }
@@ -1809,7 +1992,8 @@
     if (!sel) {
       main.append(h('div', { class: 'btn-row add-row' },
         h('a', { class: 'btn btn-accent', href: '#/new' }, icon('plus'), '매물 추가'),
-        h('a', { class: 'btn btn-secondary', href: '#/import', title: IMPORT_HINT, 'aria-label': '코드·글로 추가: ' + IMPORT_HINT }, icon('paste'), '코드·글로 추가')
+        // 1.5.0 검토 반영: 화면 제목(IMPORT_TITLE "네이버 글·코드로 추가")의 끝과 같은 이름. 앞에 "네이버"까지 붙이면 375·390px 에서 두 줄
+        h('a', { class: 'btn btn-secondary', href: '#/import', title: IMPORT_HINT, 'aria-label': '글·코드로 추가: ' + IMPORT_HINT }, icon('paste'), '글·코드로 추가')
       ));
     }
 
@@ -1855,6 +2039,8 @@
   // 전화 걸기·실거래가 찾기로 다른 앱에 다녀오는 사이 iOS 가 앱을 내려도 입력이 남는다.
   var DRAFT_FIELDS = ['name', 'dong', 'ho', 'area', 'floor', 'direction', 'ask', 'real', 'agentName', 'agentPhone', 'sourceUrl', 'memo', 'dropReason'];
   var pendingFocus = null; // 다음에 그릴 수정 폼에서 초점을 줄 칸('ho'). 가져오기 직후·상세의 [입력하기]
+  // 1.5.0: 다음에 그릴 상세 화면에서 열고 스크롤할 섹션 id. 수정 폼의 [저장하고 등기부 보기], 요약의 [등기부 보기]
+  var pendingSection = null;
 
   /** 폼의 링크 칸: 앞에 http(s):// 가 없으면 붙여 보고, http/https 주소만 받는다 */
   function formUrl(text) {
@@ -1902,7 +2088,11 @@
     var editing = id ? findProp(id) : null;
     if (id && !editing) return renderNotFound();
     newView('form', editing);
-    setTopbar({ title: editing ? '매물 정보 수정' : '매물 추가', back: editing ? '/p/' + id : '/' });
+    setTopbar({
+      title: editing ? '매물 정보 수정' : '매물 추가', back: editing ? '/p/' + id : '/',
+      // 1.5.0(M8): 수정 폼은 상단 바 오른쪽에도 [완료](맨 아래 버튼까지 안 내려가도 됨). submitDone 은 아래 function 선언(끌어올려짐)
+      actions: editing ? [h('button', { type: 'button', class: 'tb-btn tb-text', onclick: function () { submitDone(); } }, '완료')] : null
+    });
     updateTabbar('home');
     var main = resetMain();
     var draft = editing ? null : readDraft();
@@ -1916,7 +2106,10 @@
     var focusHo = !!editing && pendingFocus === 'ho';
     var focusDong = !!editing && pendingFocus === 'dong'; // 1.4.5: 동도 비어 있으면 동 칸부터
     pendingFocus = null;
-    var needHo = !!editing && !editing.ho && (!!editing.importedAt || focusHo);
+    // 1.5.0 통합: 홈의 "동·호수 입력 필요" 칩·상세의 [입력하기]로 동 칸부터 채우러 온 폼(focusDong)에도 같은 안내와 [저장하고 등기부 보기]
+    var needHo = !!editing && !editing.ho && (!!editing.importedAt || focusHo || focusDong);
+    // 1.5.0(M8): 호수(동·호수)만 채우러 온 폼에서는 호 칸의 Return 이 "완료"(저장하고 상세로)
+    var hoDone = needHo || focusDong;
 
     function field(labelText, inputEl, opts) {
       opts = opts || {};
@@ -1933,7 +2126,7 @@
     var f = {};
     f.name = h('input', { class: 'input', id: 'f-name', type: 'text', value: val(src.name), placeholder: '예: 행복마을 1단지', autocomplete: 'off', enterkeyhint: 'next', required: true, 'aria-required': 'true', 'aria-describedby': 'f-name-err', maxlength: 80 });
     f.dong = h('input', { class: 'input', id: 'f-dong', type: 'text', value: val(src.dong), placeholder: '예: 101', autocomplete: 'off', enterkeyhint: 'next', maxlength: 20 });
-    f.ho = h('input', { class: 'input', id: 'f-ho', type: 'text', value: val(src.ho), placeholder: '예: 1203', autocomplete: 'off', enterkeyhint: 'next', maxlength: 20, 'aria-describedby': needHo ? 'f-ho-need' : null });
+    f.ho = h('input', { class: 'input', id: 'f-ho', type: 'text', value: val(src.ho), placeholder: '예: 1203', autocomplete: 'off', enterkeyhint: hoDone ? 'done' : 'next', maxlength: 20, 'aria-describedby': needHo ? 'f-ho-need' : null });
     f.area = h('input', { class: 'input', id: 'f-area', type: 'text', inputmode: 'decimal', enterkeyhint: 'next', value: val(src.area), placeholder: '예: 84.97', autocomplete: 'off', 'aria-describedby': 'f-area-hint' });
     f.floor = h('input', { class: 'input', id: 'f-floor', type: 'text', value: val(src.floor), placeholder: '예: 12/25', autocomplete: 'off', enterkeyhint: 'next', maxlength: 20, 'aria-describedby': 'f-floor-hint' });
     f.direction = h('input', { class: 'input', id: 'f-dir', type: 'text', value: val(src.direction), placeholder: '예: 남향', autocomplete: 'off', enterkeyhint: 'next', maxlength: 20 });
@@ -1949,9 +2142,20 @@
 
     var nameErr = h('p', { class: 'field-error', id: 'f-name-err', hidden: true, text: '단지명을 입력해 주세요.' });
     var urlErr = h('p', { class: 'field-error', id: 'f-url-err', hidden: true, text: 'http:// 또는 https:// 로 시작하는 주소만 저장돼요.' });
+    var hoTitleText = editing && !editing.dong ? '동·호수만 입력하면 돼요' : '호수만 입력하면 돼요'; // 1.4.5(L4): 동도 비었으면
+    var hoTitle = h('strong', { text: hoTitleText });
+    var hoDesc = h('p', { id: 'f-ho-need', text: editing && editing.importedAt
+      ? '등기부 열람에 꼭 필요해요. 네이버 부동산에는 호수가 없으니 중개사에게 받아 적어 주세요.'
+      : '등기부 열람에 꼭 필요해요. 중개사에게 받아 적어 주세요.' });
     var hoBanner = needHo ? h('div', { class: 'notice notice-ho', role: 'note' },
-      h('strong', { text: '호수만 입력하면 돼요' }),
-      h('p', { id: 'f-ho-need', text: '등기부 열람에 꼭 필요해요. 네이버 부동산에는 호수가 없으니 중개사에게 받아 적어 주세요.' })) : null;
+      hoTitle,
+      hoDesc,
+      // 1.5.0(M8): 호수를 적고 바로 등기부로(저장 → 상세 → 등기부 섹션 열고 스크롤). 등기부 섹션이 없는 데이터면 생략.
+      // 통합: 호수를 적어도 배너를 닫지 않는다(1.4.x 는 닫았음 — 그러면 이 버튼도 사라져 못 누름). 대신 제목을 바꾸고 설명 줄만 숨긴다(refreshLive)
+      gateSections().length ? h('button', {
+        type: 'button', class: 'btn btn-small btn-accent',
+        onclick: function () { submitTo(gateSections()[0].id); }
+      }, '저장하고 등기부 보기') : null) : null;
     var hoField = field('호', f.ho, { unit: '호' });
     var askLive = h('p', { class: 'field-live', id: 'f-ask-live', 'aria-live': 'polite' });
     var realLive = h('p', { class: 'field-live', id: 'f-real-live', 'aria-live': 'polite' });
@@ -1993,7 +2197,12 @@
       urlErr.hidden = !f.sourceUrl.value.trim() || !!formUrl(f.sourceUrl.value);
       f.sourceUrl.setAttribute('aria-invalid', urlErr.hidden ? 'false' : 'true');
       if (hoField) hoField.classList.toggle('need-ho', needHo && !f.ho.value.trim());
-      if (hoBanner) hoBanner.hidden = !!f.ho.value.trim(); // 호수를 입력하면 '호수만 입력하면 돼요' 안내를 닫는다
+      if (hoBanner) { // 1.5.0: 호수를 입력하면 안내를 닫는 대신(닫으면 [저장하고 등기부 보기]도 사라짐) 제목을 바꾸고 설명 줄만 숨긴다
+        var hasHo = !!f.ho.value.trim();
+        hoBanner.classList.toggle('is-filled', hasHo);
+        hoTitle.textContent = hasHo ? '호수를 적었어요. 이제 등기부를 볼 수 있어요' : hoTitleText;
+        hoDesc.hidden = hasHo;
+      }
       var st = currentStatus();
       dropField.hidden = st !== 'dropped';
       // 등기부 멈춤 신호를 다 확인하기 전에 임장 예정·완료·계약 검토로 바꾸면 알려 준다
@@ -2078,10 +2287,25 @@
       toast('매물을 추가했어요. 등기부부터 확인하세요.');
       navigate('/p/' + p.id, true);
     }
+    /** 1.5.0(M8): 저장(완료)한 뒤 상세에서 secId 섹션을 열고 그리로 스크롤. 단지명이 비어 저장이 안 되면 섹션도 열지 않는다 */
+    function submitTo(secId) {
+      if (!validateName(true)) { f.name.focus(); return; } // 폼에 그대로 남는다(submit 과 같은 검사)
+      pendingSection = secId;
+      submit();
+    }
+    /**
+     * 1.5.0 검토 반영: 호수만 채우러 온 폼(hoDone)에서는 호 칸의 Return·상단 [완료]·아래 [완료]도 호수를 적었으면
+     * [저장하고 등기부 보기]와 같은 곳(상세의 등기부 섹션을 열고 스크롤)에 닿는다. 전에는 저장만 하고 상세 맨 위로 가서
+     * 배너("이제 등기부를 볼 수 있어요")의 작은 버튼만이 등기부로 가는 길이었음. 호수가 비어 있으면 예전처럼 저장만
+     */
+    function submitDone() {
+      var g = gateSections()[0];
+      if (hoDone && g && f.ho.value.trim()) submitTo(g.id); else submit();
+    }
 
     // 폼 안에 submit 버튼을 두지 않는다(type=button). 그래서 iPhone 키보드의 Return(다음) 키로
     // 폼이 제출되지 않고, 아래 keydown 처리로 다음 칸으로 넘어간다.
-    var submitBtn = h('button', { type: 'button', class: 'btn btn-block', onclick: submit }, editing ? '완료' : '저장하고 체크 시작');
+    var submitBtn = h('button', { type: 'button', class: 'btn btn-block', onclick: submitDone }, editing ? '완료' : '저장하고 체크 시작');
     var form = h('form', { class: 'form', novalidate: true, autocomplete: 'off' },
       restored ? h('div', { class: 'notice notice-info', role: 'status' },
         h('strong', { text: '작성 중이던 내용을 불러왔어요' }),
@@ -2090,6 +2314,8 @@
           type: 'button', class: 'btn btn-small btn-ghost', style: 'margin-top:8px',
           onclick: function () { localRemove(DRAFT_KEY); renderForm(null); }
         }, '비우고 새로 쓰기')) : null,
+      // 1.5.0(L5): 다 채워야 저장되는 줄 알고 멈추지 않게(호가·실거래가·중개사는 첫날엔 모르는 값)
+      editing ? null : h('p', { class: 'form-intro', text: '단지명만 넣고 저장해도 돼요. 동·호수는 중개사에게 받으면, 가격은 나중에 채워도 돼요.' }),
       hoBanner,
       field('단지명', f.name, { required: true, error: nameErr }),
       h('div', { class: 'field-row' }, field('동', f.dong, { unit: '동' }), hoField),
@@ -2117,6 +2343,7 @@
       if (!t || t.tagName === 'TEXTAREA' || t.tagName === 'BUTTON' || t.tagName === 'A') return;
       if (e.isComposing || e.keyCode === 229) return; // 한글 조합 중에는 조합만 끝낸다
       e.preventDefault();
+      if (t === f.ho && hoDone) { submitDone(); return; } // 1.5.0(M8): 호수만 채우러 온 폼은 Return = 완료(검토 반영: 등기부 섹션까지)
       var i = order.indexOf(t);
       if (i >= 0 && i < order.length - 1) {
         try { order[i + 1].focus(); } catch (_) { /* 무시 */ }
@@ -2384,13 +2611,18 @@
           extLink('인터넷등기소', '인터넷등기소 열기', 'btn btn-small btn-ghost')) // 1.4.5
       ));
     }
+    // 1.5.0(L2): 등기부 멈춤 신호(2026-10c 데이터는 8개)가 모두 "없음"이면 "멈춤 신호 없음 — [임장 예정으로 바꾸기]" 제안 줄(경고 상자와 따로. refreshFlowHint).
+    // 검토 반영: 헤더 카드 위(상단 바 바로 아래)에 둔다 — 카드 아래에 두면 메모·중개사·가져오기 참고가 있는 매물에서 첫 화면 밖이고 버튼이 탭바 뒤였음
+    v.refs.flowHint = h('div', { class: 'flow-hint-wrap', id: 'd-flow', role: 'status' });
+    main.append(v.refs.flowHint);
+
     main.append(detailHeader(prop));
 
     v.refs.alerts = h('div', { class: 'alerts', id: 'd-alerts' });
     // 화면을 처음 그릴 때는 경고를 다시 읽어 주지 않는다(새로 '있음'을 누를 때만 role=alert)
     v.refs.prevStopCount = prop.status === 'dropped' ? 0 : flagsYes(prop, 'stop').length;
     main.append(v.refs.alerts);
-    renderAlerts(prop);
+    renderAlerts(prop); // 제안 줄(refreshFlowHint)도 이 안에서 같이 그린다
 
     // 사진 저장소를 쓸 수 없는 환경(파일로 열기 등)이면 사진 버튼 대신 이 안내가 보인다(CSS .no-photos)
     main.append(h('p', { class: 'notice photo-off-note', role: 'note', text: '이 환경에서는 사진을 저장할 수 없어요. HTTPS 주소(또는 홈 화면 앱)로 열면 사진을 붙일 수 있어요. 메모는 그대로 저장돼요.' }));
@@ -2414,6 +2646,14 @@
       open = first ? [first.id] : [];
     }
     open.forEach(function (sid) { if (v.refs.secs[sid]) toggleSection(sid, true); });
+
+    // 1.5.0(M8): [저장하고 등기부 보기]·요약의 [등기부 보기]로 왔으면 그 섹션을 열고 스크롤.
+    // onRoute 가 그린 직후 맨 위로 스크롤하므로 그 뒤(setTimeout)에 옮긴다
+    if (pendingSection) {
+      var ps = pendingSection;
+      pendingSection = null;
+      if (v.refs.secs[ps]) setTimeout(function () { if (view === v) jumpToSection(ps); }, 0);
+    }
 
     loadPhotosInto(v, prop.id);
   }
@@ -2448,34 +2688,100 @@
       tel ? h('a', { class: 'btn btn-small btn-secondary', href: tel, 'aria-label': '중개사에게 전화 걸기' }, icon('phone', 'ic-sm'), '전화') : null
     ) : null;
 
-    var sel = h('select', { class: 'select', id: 'd-status' }, STATUSES.map(function (s) { return h('option', { value: s.id, text: s.label }); }));
+    // 1.5.0(L2): 상태 select 를 이름 줄 옆으로 올리고(메모 아래까지 안 내려가도 됨), 아래 한 줄로 상태의 뜻을 적는다
+    var sel = h('select', { class: 'select', id: 'd-status', 'aria-describedby': 'd-status-help' }, STATUSES.map(function (s) { return h('option', { value: s.id, text: s.label }); }));
     sel.value = prop.status;
     sel.addEventListener('change', function () { changeStatus(prop, sel.value); });
     v.refs.statusSelect = sel;
+    var statusBox = h('div', { class: 'dh-status' }, h('label', { for: 'd-status', text: '진행 상태' }), sel);
+    var statusHelp = h('p', { class: 'status-help', id: 'd-status-help', text: STATUS_HELP });
 
     var o = overallProgress(prop);
     v.refs.overallBar = makeBar(o.pct, o.pct + '% (' + o.done + '/' + o.total + ')', { ariaLabel: '전체 진행률' });
 
     var saveState = h('p', { class: 'save-state', id: 'save-state' });
+    var memoWrap = memoBlock(prop.memo);
     var card = h('section', { class: 'card dh', 'aria-label': '매물 요약' },
       h('div', { class: 'dh-top' },
-        h('div', {},
+        h('div', { class: 'dh-head' },
           h('h2', { class: 'dh-name', text: prop.name }),
           line ? h('p', { class: 'dh-unit', text: line }) : null,
           extra ? h('p', { class: 'dh-extra', text: extra }) : null
-        )
+        ),
+        statusBox
       ),
+      statusHelp,
       dl,
       sourceLink(prop),
       agent,
-      prop.memo ? h('p', { class: 'dh-memo', text: prop.memo }) : null,
-      h('div', { class: 'status-row' }, h('label', { for: 'd-status', text: '진행 상태' }), sel),
+      memoWrap ? memoWrap.el : null,
+      importNotesBlock(prop),
       h('div', {},
         h('div', { class: 'dh-progress-head' }, h('p', { class: 'small muted', style: 'font-weight:700', text: '전체 진행' }), saveState),
         v.refs.overallBar.el)
     );
-    setTimeout(updateSaveState, 0); // 화면에 붙은 뒤 '자동 저장됨' 표시 채우기
+    setTimeout(function () {
+      updateSaveState(); // 화면에 붙은 뒤 '자동 저장됨' 표시 채우기
+      if (memoWrap) memoWrap.measure(); // 메모가 3줄을 넘을 때만 [더 보기]
+    }, 0);
     return card;
+  }
+
+  // 1.5.0(L2): 진행 상태 5개의 뜻(상태 select 아래 한 줄). 상태 이름을 바꾸면 data.js 용어도 같이
+  var STATUS_HELP = '검토 중 = 등기부 확인 단계 · 임장 예정 = 등기부 통과, 방문 전 · 임장 완료 = 다녀옴 · 계약 검토 = 가계약 전 재확인';
+  var MEMO_CLAMP_LINES = 3; // 헤더 카드 메모를 접었을 때 보이는 줄 수(CSS -webkit-line-clamp 와 같음)
+
+  /**
+   * 1.5.0(M7): 헤더 카드 메모. 3줄로 접고 넘치면 [더 보기]/[접기]. 결과 { el, measure } (measure 는 화면에 붙인 뒤).
+   * 줄 수를 세어 두고(긴 메모는 바로 버튼), 붙인 뒤 실제 높이로 한 번 더 본다(짧은 줄이 여러 번 꺾일 때)
+   */
+  function memoBlock(memo) {
+    memo = str(memo);
+    if (!memo.trim()) return null;
+    var p = h('p', { class: 'dh-memo is-clamped', id: 'd-memo', text: memo });
+    var btn = h('button', { type: 'button', class: 'dh-memo-more', 'aria-expanded': 'false', 'aria-controls': 'd-memo', hidden: true }, '더 보기');
+    var el = h('div', { class: 'dh-memo-wrap' }, p, btn);
+    var open = false;
+    btn.addEventListener('click', function () {
+      open = !open;
+      p.classList.toggle('is-clamped', !open);
+      btn.textContent = open ? '접기' : '더 보기';
+      btn.setAttribute('aria-expanded', String(open));
+      if (!open) { try { btn.scrollIntoView({ block: 'nearest' }); } catch (e) { /* 무시 */ } }
+    });
+    function measure() {
+      if (open) return;
+      var lines = (memo.match(/\n/g) || []).length + 1;
+      btn.hidden = !(lines > MEMO_CLAMP_LINES || p.scrollHeight > p.clientHeight + 2);
+    }
+    return { el: el, measure: measure };
+  }
+
+  /** 1.5.0(M7): 가져오기 참고(importNotes) — 접힌 목록. 없으면 null. 공유 글(buildShareText)에는 넣지 않는다 */
+  function importNotesBlock(prop) {
+    var notes = Array.isArray(prop.importNotes) ? prop.importNotes : [];
+    if (!notes.length) return null;
+    return h('details', { class: 'dh-import-notes' },
+      h('summary', {}, '가져오기 참고 ' + notes.length + '개', h('span', { class: 'sr-only', text: ' (앱이 가져오면서 알려 주는 말)' })),
+      h('ul', { class: 'dh-import-list' }, notes.map(function (n) { return h('li', { text: n }); }))
+    );
+  }
+
+  /**
+   * 1.5.0(L2 + M3 후속): 등기부 멈춤 신호를 모두 "없음"으로 답했고 아직 "검토 중"이면
+   * "멈춤 신호 없음 — [임장 예정으로 바꾸기]" 한 줄을 헤더 카드 아래에 보여 준다. renderAlerts(항목·상태가 바뀔 때마다 불림)가 부른다
+   */
+  function refreshFlowHint(prop) {
+    var box = view.refs.flowHint;
+    if (!box || view.prop !== prop) return;
+    var gs = gateStopState(prop);
+    var show = prop.status === 'review' && gs.total > 0 && gs.yes === 0 && gs.unanswered === 0;
+    if (!show) { box.textContent = ''; return; }
+    if (box.firstChild) return; // 이미 보여 주고 있음(다시 그리면 VoiceOver 가 또 읽음)
+    box.append(h('div', { class: 'flow-hint' },
+      h('p', {}, h('strong', { text: '멈춤 신호 없음' }), ' — 등기부 멈춤 신호 ' + gs.total + '개를 모두 "없음"으로 답했어요. 이제 보러 가도 돼요.'),
+      h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { applyStatus(prop, 'planned'); } }, '임장 예정으로 바꾸기')
+    ));
   }
 
   var EARLY_STATUSES = { planned: 1, visited: 1, contract: 1 };
@@ -2525,7 +2831,7 @@
   function applyStatus(prop, next) {
     setPropStatus(prop, next); // 탈락 사유는 지우지 않고 보관(다시 탈락시킬 때 기본값으로 씀)
     afterStatusChange(prop);
-    toast('상태: ' + STATUS_LABEL[next]);
+    toast('상태: ' + STATUS_LABEL[next], { duration: 1500 }); // 1.5.0 검토 반영: 짧게(집 안 항목의 [양호] 위에 겹치는 시간을 줄임)
   }
 
   function afterStatusChange(prop) {
@@ -2582,6 +2888,7 @@
         h('p', { class: 'alert-foot', text: '바로 탈락 사유는 아니지만, 계약 전에 해결 방법(예: 잔금일에 갚고 말소)을 확인하고 특약에 적어 두세요. 요약의 "협상·특약 후보"에 모여요.' })
       ));
     }
+    refreshFlowHint(prop); // 1.5.0(L2): 멈춤 신호가 모두 "없음"이면 헤더 아래 "[임장 예정으로 바꾸기]" 제안 줄(경고 상자와 따로)
   }
 
   function sectionChips(prop) {
@@ -2589,15 +2896,66 @@
     CL.sections.forEach(function (sec) {
       var p = sectionProgress(prop, sec);
       var n = h('span', { class: 'n', text: p.done + '/' + p.total });
+      // 1.5.0: 칩 글자는 짧은 제목(data.js shortTitle, 없으면 title). 긴 제목은 title 속성으로
       var chip = h('button', {
         type: 'button',
         class: 'sec-chip' + (sec.gate ? ' is-gate' : '') + (p.total && p.done === p.total ? ' is-complete' : ''),
+        title: sec.shortTitle && sec.shortTitle !== sec.title ? sec.title : null,
         onclick: function () { jumpToSection(sec.id); }
-      }, sec.title, n);
+      }, sec.shortTitle || sec.title, n);
       view.refs.chips[sec.id] = { el: chip, n: n };
       nav.append(chip);
     });
     return chipScroller(nav);
+  }
+
+  /**
+   * 1.5.0: 지금 보고 있는 섹션의 칩에 aria-current="true"(죽어 있던 CSS 살리기).
+   * 열린 섹션 가운데 칩 줄 아래로 아직 끝나지 않은 첫 섹션 = 화면에서 가장 위에 보이는 열린 섹션.
+   * 열린 섹션이 모두 위로 지나갔으면 마지막 열린 섹션. 바뀔 때만 그 칩이 보이도록 줄을 옮긴다(세로 스크롤은 건드리지 않음)
+   */
+  function syncCurrentChip() {
+    if (view.name !== 'detail' || !view.refs.chips || !view.refs.secs) return;
+    var wrap = view.refs.chipsWrap;
+    var line = wrap ? wrap.getBoundingClientRect().bottom : 0;
+    var opens = CL.sections.filter(function (sec) { var r = view.refs.secs[sec.id]; return r && !r.body.hidden; });
+    var cur = null;
+    opens.forEach(function (sec) {
+      if (!cur && view.refs.secs[sec.id].wrap.getBoundingClientRect().bottom > line + 1) cur = sec.id;
+    });
+    if (!cur && opens.length) cur = opens[opens.length - 1].id;
+    var changed = false;
+    CL.sections.forEach(function (sec) {
+      var c = view.refs.chips[sec.id];
+      if (!c) return;
+      var on = sec.id === cur;
+      if (on === (c.el.getAttribute('aria-current') === 'true')) return;
+      changed = true;
+      if (on) c.el.setAttribute('aria-current', 'true'); else c.el.removeAttribute('aria-current');
+    });
+    if (changed && cur) revealChip(view.refs.chips[cur].el);
+  }
+  var chipSyncRaf = 0;
+  function scheduleChipSync() {
+    if (chipSyncRaf || view.name !== 'detail') return;
+    chipSyncRaf = requestAnimationFrame(function () { chipSyncRaf = 0; syncCurrentChip(); });
+  }
+  window.addEventListener('scroll', scheduleChipSync, { passive: true });
+  window.addEventListener('resize', scheduleChipSync);
+
+  /** 칩이 줄 밖에 있으면 가로로만 옮겨 보이게 한다(scrollIntoView 는 세로 스크롤까지 움직일 수 있어 쓰지 않음) */
+  function revealChip(chip) {
+    var nav = chip.parentNode;
+    if (!nav) return;
+    var cr = chip.getBoundingClientRect();
+    var nr = nav.getBoundingClientRect();
+    var pad = 12;
+    var left = nav.scrollLeft;
+    if (cr.left < nr.left + pad) left += cr.left - nr.left - pad;
+    else if (cr.right > nr.right - pad) left += cr.right - nr.right + pad;
+    else return;
+    if (nav.scrollTo) nav.scrollTo({ left: left, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+    else nav.scrollLeft = left;
   }
 
   /**
@@ -2615,10 +2973,15 @@
     }
     var prev = h('button', { type: 'button', class: 'chip-arrow chip-arrow-prev', tabindex: '-1', 'aria-label': '앞쪽 섹션 보기', hidden: true, onclick: function () { step(-1); } }, icon('back'));
     var next = h('button', { type: 'button', class: 'chip-arrow chip-arrow-next', tabindex: '-1', 'aria-label': '뒤쪽 섹션 보기', hidden: true, onclick: function () { step(1); } }, icon('forward'));
+    var wrap = h('div', { class: 'sec-chips-wrap' }, nav, prev, next);
+    view.refs.chipsWrap = wrap; // 1.5.0: syncCurrentChip 이 "칩 줄 아래" 기준선으로 씀
     function update() {
       var max = nav.scrollWidth - nav.clientWidth;
       prev.hidden = !(nav.scrollLeft > 2);
       next.hidden = !(max > 2 && nav.scrollLeft < max - 2);
+      // 1.5.0: ◀ ▶ 는 마우스 환경(hover+fine pointer)에서만 보이고(CSS), 터치에서는 양 끝 그라데이션으로 "더 있음"을 알린다
+      wrap.classList.toggle('has-prev', !prev.hidden);
+      wrap.classList.toggle('has-next', !next.hidden);
     }
     nav.addEventListener('scroll', update, { passive: true });
     if (window.ResizeObserver) new ResizeObserver(update).observe(nav);
@@ -2663,7 +3026,7 @@
     }, true);
     nav.addEventListener('dragstart', function (e) { e.preventDefault(); }); // 버튼 글자를 끌어 놓기로 잡지 않게
 
-    return h('div', { class: 'sec-chips-wrap' }, nav, prev, next);
+    return wrap;
   }
 
   function sectionEl(prop, sec) {
@@ -2705,6 +3068,7 @@
     r.wrap.classList.toggle('is-open', open);
     var openIds = Object.keys(view.refs.secs).filter(function (k) { return !view.refs.secs[k].body.hidden; });
     if (view.prop) sessionSet('imjang.open.' + view.prop.id, JSON.stringify(openIds));
+    syncCurrentChip(); // 1.5.0
   }
 
   function jumpToSection(secId) {
@@ -2713,6 +3077,98 @@
     if (!r) return;
     r.wrap.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' });
     setTimeout(function () { try { r.head.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }, 350);
+  }
+
+  /** 1.5.0: 항목으로 이동. 섹션을 열고, 접힌 항목이면 펼친 뒤 칩 줄 아래에 오도록 스크롤하고 항목에 초점(tabindex=-1) */
+  function jumpToItem(itemId) {
+    var it = CL.itemById[itemId];
+    if (!it) return;
+    toggleSection(it.sectionId, true);
+    var ref = view.refs.items && view.refs.items[itemId];
+    if (!ref) return;
+    ref.fold(false);
+    ref.el.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' });
+    setTimeout(function () { try { ref.el.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }, 350);
+    // 1.5.0 검토 반영: 터치 뒤의 프로그램 초점은 :focus-visible 테두리가 안 그려지므로 1.5초 동안 배경을 밝혀 어디로 왔는지 보여 준다(CSS .is-target)
+    ref.el.classList.remove('is-target');
+    void ref.el.offsetWidth; // 같은 항목으로 다시 오면 애니메이션을 처음부터
+    ref.el.classList.add('is-target');
+    clearTimeout(ref.targetTimer);
+    ref.targetTimer = setTimeout(function () { ref.el.classList.remove('is-target'); }, 1600);
+  }
+
+  /**
+   * 1.5.0 검토 반영: 등기부 멈춤 신호에 답한 그 자리(접힌 줄 바로 아래)에 "멈춤 신호 N개 남음 · [다음 멈춤 신호로]" 한 줄.
+   * 미니 진행 줄의 버튼은 섹션 맨 위라 둘째 멈춤 신호부터는 500~1,000px 위에 있었음. 한 줄은 늘 하나뿐(마지막에 답한 항목 아래),
+   * 멈춤 신호를 모두 답했거나 답을 지웠으면 없앤다. 누르면 줄을 없애고 다음 미답 멈춤 신호로(jumpToItem)
+   */
+  function updateNextStopRow(prop, it, el) {
+    var r = view.refs;
+    if (r.nextRow) { r.nextRow.remove(); r.nextRow = null; }
+    var st = getItemState(prop, it.id).status;
+    if (st !== 'yes' && st !== 'no') return;
+    var gs = gateStopState(prop);
+    var next = gs.unanswered ? nextStopItem(prop) : null;
+    if (!next) return;
+    var row = h('div', { class: 'next-stop-row' },
+      h('span', { class: 'next-stop-text', text: '멈춤 신호 ' + gs.unanswered + '개 남음' }),
+      h('button', {
+        type: 'button', class: 'btn btn-small btn-accent',
+        onclick: function () { row.remove(); if (r.nextRow === row) r.nextRow = null; jumpToItem(next.id); }
+      }, '다음 멈춤 신호로'));
+    el.after(row);
+    r.nextRow = row;
+  }
+
+  /** 1.5.0: 등기부 멈춤 신호 가운데 아직 답하지 않은 첫 항목. 없으면 null */
+  function nextStopItem(prop) {
+    var found = null;
+    gateSections().forEach(function (s) {
+      s.items.forEach(function (it) {
+        if (found || it.type !== 'flag' || it.severity !== 'stop') return;
+        var st = getItemState(prop, it.id).status;
+        if (st !== 'yes' && st !== 'no') found = it;
+      });
+    });
+    return found;
+  }
+
+  /**
+   * 1.5.0: 섹션 본문 맨 위의 미니 진행 줄. 등기부(gate)는 "멈춤 신호 N개 중 M개 답함"(N = gateStopState total, 2026-10c 데이터는 8) + [다음 멈춤 신호로],
+   * 다른 섹션은 "N/M 답함". 답이 바뀌면 refreshMini 가 다시 쓴다(전에는 등기부 섹션 안에 진행 표시가 없었음)
+   */
+  function miniProgress(prop, sec) {
+    var text = h('span', { class: 'mini-prog-text' });
+    var btn = sec.gate ? h('button', {
+      type: 'button', class: 'btn btn-small btn-accent',
+      onclick: function () { var it = nextStopItem(prop); if (it) jumpToItem(it.id); }
+    }, '다음 멈춤 신호로') : null;
+    var el = h('div', { class: 'mini-prog' + (sec.gate ? ' mini-prog-gate' : '') }, text, btn);
+    if (!view.refs.minis) view.refs.minis = {};
+    view.refs.minis[sec.id] = { el: el, text: text, btn: btn, sec: sec };
+    refreshMini(prop);
+    return el;
+  }
+  function refreshMini(prop) {
+    if (view.prop !== prop || !view.refs.minis) return;
+    var gs = null;
+    Object.keys(view.refs.minis).forEach(function (sid) {
+      var m = view.refs.minis[sid];
+      if (m.sec.gate && gateStopState(prop).total) {
+        gs = gs || gateStopState(prop);
+        var answered = gs.total - gs.unanswered;
+        m.text.textContent = gs.unanswered
+          ? '멈춤 신호 ' + gs.total + '개 중 ' + answered + '개 답함'
+          : '멈춤 신호 ' + gs.total + '개 모두 답함' + (gs.yes ? ' · 있음 ' + gs.yes + '개' : '');
+        m.el.classList.toggle('is-complete', gs.unanswered === 0);
+        if (m.btn) m.btn.hidden = gs.unanswered === 0;
+      } else {
+        var p = sectionProgress(prop, m.sec);
+        m.text.textContent = p.done + '/' + p.total + ' 답함';
+        m.el.classList.toggle('is-complete', p.total > 0 && p.done === p.total);
+        if (m.btn) m.btn.hidden = true;
+      }
+    });
   }
 
   function renderSectionBody(prop, sec, body) {
@@ -2736,6 +3192,7 @@
       body.append(stopLine, hint);
       refreshHints(prop);
     }
+    body.append(miniProgress(prop, sec)); // 1.5.0: 미니 진행(등기부는 멈춤 신호 기준 + [다음 멈춤 신호로])
     if (sec.desc) body.append(h('p', { class: 'sec-desc', text: sec.desc }));
 
     var list = h('div', { class: 'items' });
@@ -2825,9 +3282,19 @@
     // 위쪽 경고 상자가 생기거나 사라져도 지금 누른 항목이 손가락 아래에 그대로 있도록 스크롤을 보정한다
     var before = el.getBoundingClientRect().top;
     applyItemClasses(el, it, getItemState(prop, it.id));
+    var ref = view.refs.items && view.refs.items[it.id];
+    if (ref) ref.sync(); // 1.5.0: applyItemClasses 가 className 을 통째로 다시 쓰므로 접힘·도구 줄 클래스를 다시 붙인다
     refreshProgress(prop);
+    refreshMini(prop); // 1.5.0
+    // 1.5.0(L2): 마지막 멈춤 신호를 "없음"으로 답한 그 순간에만 토스트([임장 예정으로]). 제안 줄(refreshFlowHint)은 화면 위라 답한 자리에서 안 보임.
+    // 상태를 되돌려 제안 줄이 다시 생길 때는 토스트하지 않는다(afterStatusChange 가 "상태: …" 토스트를 띄움)
+    var hintWas = !!(view.refs.flowHint && view.refs.flowHint.firstChild);
     if (it.type === 'flag') { renderAlerts(prop); refreshStopWords(prop); }
+    if (sec.gate && it.type === 'flag' && !hintWas && view.refs.flowHint && view.refs.flowHint.firstChild) {
+      toast('멈춤 신호 없음 · 이제 보러 가도 돼요', { duration: 5000, action: { label: '임장 예정으로', fn: function () { applyStatus(prop, 'planned'); } } });
+    }
     if (sec.gate) refreshHints(prop);
+    if (sec.gate && it.type === 'flag' && it.severity === 'stop') updateNextStopRow(prop, it, el); // 1.5.0 검토 반영: 답한 자리 아래 [다음 멈춤 신호로]
     var shift = el.getBoundingClientRect().top - before;
     if (Math.abs(shift) > 1) window.scrollBy(0, shift);
   }
@@ -2854,7 +3321,8 @@
     return Math.min(8, Math.max(2, lines + (str(text).length > 60 ? 1 : 0)));
   }
 
-  function memoField(prop, it, placeholder) {
+  /** 항목 메모 칸. onInput(선택, 1.5.0): 메모가 바뀔 때마다 부르는 콜백(항목 요약 줄의 "메모 있음" 표시용) */
+  function memoField(prop, it, placeholder, onInput) {
     var st = getItemState(prop, it.id);
     var id = 'memo-' + domId(it.id);
     var wrapId = id + '-wrap';
@@ -2876,6 +3344,7 @@
     ta.addEventListener('input', function () {
       setItemState(prop, it.id, { memo: ta.value });
       setName(!!ta.value.trim());
+      if (onInput) onInput();
     });
     return { btn: btn, wrap: wrap, open: function () { setOpen(true, false); } };
   }
@@ -2887,16 +3356,57 @@
     return st.date ? '날짜만 적음(체크 안 함)' : '메모만 있음';
   }
 
+  /** 1.5.0: 접힌 항목 요약 줄의 답 표시 [글자, 종류]. 답하지 않았으면 null */
+  function answerLabel(it, st) {
+    if (it.type === 'rate') return st.status === 'good' ? ['양호', 'good'] : st.status === 'caution' ? ['주의', 'caution'] : null;
+    if (it.type === 'flag') return st.status === 'yes' ? ['있음', it.severity === 'stop' ? 'stop' : 'yes'] : st.status === 'no' ? ['없음', 'no'] : null;
+    if (it.type === 'ask') return (st.answer && st.answer.trim()) || st.done ? ['답변 있음', 'ask'] : null;
+    if (it.type === 'visit') return st.done ? ['다녀옴', 'done'] : null;
+    return st.done ? ['완료', 'done'] : null;
+  }
+
+  /** 1.5.0: 길게 누르기(550ms, 8px 안 움직임). 버튼·입력 칸 위에서 시작한 누름은 무시 */
+  function onLongPress(el, fn) {
+    var timer = 0;
+    var sx = 0;
+    var sy = 0;
+    function clear() { if (timer) { clearTimeout(timer); timer = 0; } }
+    el.addEventListener('pointerdown', function (e) {
+      if (e.target && e.target.closest && e.target.closest('button, a, input, textarea, select, label')) return;
+      sx = e.clientX; sy = e.clientY;
+      clear();
+      timer = setTimeout(function () { timer = 0; fn(); }, 550);
+    });
+    el.addEventListener('pointermove', function (e) {
+      if (timer && (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8)) clear();
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) { el.addEventListener(t, clear); });
+  }
+
+  /**
+   * 항목 하나. 1.5.0(M6)에서 바뀐 것:
+   * - 메모·사진 도구 줄은 답한 뒤(또는 메모·사진이 이미 있을 때, 머리 줄의 [메모·사진] 버튼, 항목 길게 누르기)에만 보인다(.tools-off)
+   * - 팁은 (?) 쉬운 설명 안에 들어간다(help 가 없고 tip 만 있어도 (?) 가 생김)
+   * - 답한 항목은 한 줄 요약(문장 + 답 + 메모·사진 표시)으로 접고 누르면 펼친다(.is-folded). 멈춤 신호 "있음"은 접지 않는다
+   *   답하는 순간 접는 것은 깔끔한 답(없음·양호·check 완료)뿐이고, 주의·있음·답변·재방문은 메모를 이어 쓰도록 펼쳐 둔다
+   * 상태 클래스는 applyItemClasses 가 className 을 통째로 다시 쓰므로, 접힘·도구 줄 클래스는 sync() 가 늘 다시 붙인다(afterItemChange 가 부름)
+   */
   function itemEl(prop, sec, it) {
     var st = getItemState(prop, it.id);
-    var el = h('div', { id: 'item-' + domId(it.id) });
+    var el = h('div', { id: 'item-' + domId(it.id), tabindex: '-1' });
     var helpId = 'help-' + domId(it.id);
     var textId = 'itxt-' + domId(it.id);
+    var bodyId = 'item-body-' + domId(it.id);
     var dateInput = null;
     var cb = null;
+    var folded = false;   // 한 줄 요약으로 접힘
+    var revealed = false; // 답하기 전에 [메모·사진]을 눌러 도구 줄을 연 상태
 
-    var helpPanel = it.help ? h('div', { class: 'item-help', id: helpId, hidden: true, text: it.help }) : null;
-    var helpBtn = it.help ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': '쉬운 설명: ' + it.text, 'aria-expanded': 'false', 'aria-controls': helpId }, icon('help')) : null;
+    // (?) 쉬운 설명 — 1.5.0: 팁도 이 안에(전에는 항상 펼쳐져 있었음)
+    var helpPanel = (it.help || it.tip) ? h('div', { class: 'item-help', id: helpId, hidden: true },
+      it.help ? h('span', { text: it.help }) : null,
+      it.tip ? h('span', { class: 'tip' }, h('b', { text: '팁 ' }), it.tip) : null) : null;
+    var helpBtn = helpPanel ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': '쉬운 설명: ' + it.text, 'aria-expanded': 'false', 'aria-controls': helpId }, icon('help')) : null;
     if (helpBtn) {
       helpBtn.addEventListener('click', function () {
         var open = helpPanel.hidden;
@@ -2904,6 +3414,10 @@
         helpBtn.setAttribute('aria-expanded', String(open));
       });
     }
+    // 1.5.0: 답하기 전에 메모·사진을 남기고 싶을 때(머리 줄 작은 버튼). 도구 줄이 숨어 있을 때만 보임(CSS .tools-off)
+    var moreBtn = h('button', { type: 'button', class: 'icon-btn item-more', 'aria-label': '메모·사진 열기: ' + it.text }, icon('note'));
+    // 1.5.0: 펼친 답한 항목을 다시 접는 버튼. 답했고 접히지 않았을 때만 보임(CSS)
+    var collapseBtn = h('button', { type: 'button', class: 'icon-btn item-collapse', 'aria-label': '접기: ' + it.text }, icon('chevron'));
 
     // 머리 줄: check·visit 은 넓은 체크 버튼, 나머지는 문장
     var head;
@@ -2921,10 +3435,13 @@
         setItemState(prop, it.id, patch);
         cb.setAttribute('aria-checked', String(done));
         afterItemChange(prop, sec, it, el);
+        if (done && it.type === 'check') setFold(true, true); // 재방문은 메모를 이어 쓰도록 펼쳐 둔다
       });
-      head = h('div', { class: 'item-head' }, cb, helpBtn);
+      head = h('div', { class: 'item-head' }, cb, helpBtn, moreBtn, collapseBtn);
     } else {
-      head = h('div', { class: 'item-head' }, h('p', { class: 'item-text', id: textId, text: it.text }), helpBtn);
+      // flag·rate 의 [메모·사진 열기]는 머리 줄이 아니라 [있음][없음] 줄 끝에 둔다(머리 줄에 버튼이 둘이면 문장이 더 많이 줄바꿈돼 오히려 길어짐)
+      head = h('div', { class: 'item-head' }, h('p', { class: 'item-text', id: textId, text: it.text }), helpBtn,
+        it.type === 'flag' || it.type === 'rate' ? null : moreBtn, collapseBtn);
     }
 
     var tags = it.type === 'flag'
@@ -2932,33 +3449,43 @@
         ? stopWordEl(prop, 'span', 'sev sev-stop', 'tag', sec.gate)
         : h('span', { class: 'sev sev-caution', text: '주의 신호 · 있으면 조심해서 진행' }))
       : null;
-    var tip = it.tip ? h('p', { class: 'item-tip' }, h('b', { text: '팁 ' }), it.tip) : null;
 
     var controls = null;
     var extra = null;
     var memo = null;
     var stopInline = null;
+    var linkEl = null; // 1.5.0(C11): flag "있음"일 때 보이는 [등기부 섹션 열기](data.js linkTo)
 
     // 1.4.5: data.js 항목에 memoHint 가 있으면 메모 칸 자리표시로 쓴다(없으면 종류별 기본 문구)
     var hint = it.memoHint;
     if (it.type === 'rate') {
-      memo = memoField(prop, it, hint || (sec.cautionUse === 'reference' ? '어떤 점이 아쉬운지 적어 두면 가격을 판단할 때 써요' : '어떤 점이 아쉬운지 적어 두면 협상·특약 때 써요'));
+      memo = memoField(prop, it, hint || (sec.cautionUse === 'reference' ? '어떤 점이 아쉬운지 적어 두면 가격을 판단할 때 써요' : '어떤 점이 아쉬운지 적어 두면 협상·특약 때 써요'), sync);
       controls = segment([{ v: 'good', label: '양호' }, { v: 'caution', label: '주의' }], st.status, function (val) {
         setItemState(prop, it.id, { status: val });
         if (val === 'caution') memo.open();
         afterItemChange(prop, sec, it, el);
+        if (val === 'good') setFold(true, true);
       }, textId);
     } else if (it.type === 'flag') {
-      memo = memoField(prop, it, hint || '예: 채권최고액, 접수 날짜, 권리자');
+      memo = memoField(prop, it, hint || '예: 채권최고액, 접수 날짜, 권리자', sync);
       controls = segment([{ v: 'yes', label: '있음' }, { v: 'no', label: '없음' }], st.status, function (val) {
         setItemState(prop, it.id, { status: val });
         afterItemChange(prop, sec, it, el);
+        if (val === 'no') setFold(true, true);
       }, textId);
       if (it.severity === 'stop') {
         // '있음'을 누른 바로 그 자리에서 결과와 [탈락 처리]를 보여 준다(위쪽 배너는 화면 밖일 수 있음). 문구는 상단 경고와 같은 기준
         stopInline = h('div', { class: 'stop-inline', role: 'note' },
           stopWordEl(prop, 'p', null, 'inline', sec.gate),
           h('button', { type: 'button', class: 'btn btn-small btn-danger drop-btn', onclick: function () { dropProperty(prop); } }, '탈락 처리'));
+      }
+      // 1.5.0(C11): data.js linkTo 가 있는 flag(계약 단계의 "다시 뗀 등기부에 달라진 기록이 있다" 셋)를 "있음"으로 표시하면
+      // 그 자리에 [등기부 섹션 열기] — 달라진 등기부 항목도 "있음"으로 바꾸러 가게(전에는 help 글로만 "맨 위 섹션도 고치세요"). sync 가 보이고 숨김
+      if (it.linkTo && CL.sectionById[it.linkTo]) {
+        var linkSec = CL.sectionById[it.linkTo];
+        linkEl = h('div', { class: 'item-link', hidden: true },
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: function () { jumpToSection(it.linkTo); } },
+            (linkSec.gate ? '등기부' : linkSec.title) + ' 섹션 열기'));
       }
     } else if (it.type === 'ask') {
       var ansId = 'ans-' + domId(it.id);
@@ -2984,26 +3511,74 @@
       };
       dateInput.addEventListener('change', onDate);
       var vmemo = h('textarea', { class: 'input', id: vmId, rows: rowsFor(st.memo), placeholder: hint || '예: 밤 10시, 위층 발소리 거의 없음', value: st.memo || '', 'aria-describedby': textId });
-      vmemo.addEventListener('input', function () { setItemState(prop, it.id, { memo: vmemo.value }); });
+      vmemo.addEventListener('input', function () { setItemState(prop, it.id, { memo: vmemo.value }); sync(); });
       extra = h('div', { class: 'visit-fields' },
         h('div', {}, h('label', { class: 'inline-label', for: dId, text: '다녀온 날짜 (갈 날을 미리 적어도 돼요)' }), dateInput),
         h('div', {}, h('label', { class: 'inline-label', for: vmId, text: '메모' }), vmemo)
       );
     } else {
-      memo = memoField(prop, it, hint || '메모');
+      memo = memoField(prop, it, hint || '메모', sync);
     }
 
     var tools = h('div', { class: 'item-tools' }, memo ? memo.btn : null, photoAddButton(prop, { itemId: it.id }, it.text));
-    el.append(head);
-    appendKid(el, tags);
-    appendKid(el, helpPanel);
-    appendKid(el, tip);
-    appendKid(el, controls);
-    appendKid(el, stopInline);
-    appendKid(el, extra);
-    if (memo) el.append(memo.wrap);
-    el.append(tools, photoStrip('i:' + it.id, it.text));
+    if (it.type === 'flag' || it.type === 'rate') controls = h('div', { class: 'item-ctl' }, controls, moreBtn);
+    // 1.5.0: 본문을 한 상자에 담아 접힘(.is-folded)과 요약 줄의 aria-controls 대상으로 쓴다
+    var body = h('div', { class: 'item-body', id: bodyId },
+      head, tags, helpPanel, controls, stopInline, linkEl, extra, memo ? memo.wrap : null, tools, photoStrip('i:' + it.id, it.text));
+
+    // 1.5.0: 접힌 항목의 한 줄 요약(누르면 펼침). 사진 표시는 사진 줄이 보일 때 CSS(:has)가 켠다
+    var foldAns = h('span', { class: 'fold-ans' });
+    // 검토 반영: data.js 에 shortTitle 이 있으면(등기부 flag 13개) 접힌 줄에는 그 짧은 이름 — 같은 머리말("갑구에 말소되지 않은…")의
+    // 멈춤 신호 5개가 한 줄로 접히면 글자가 똑같아 구별되지 않았음(390px 에서 "갑구에 말소되지 않은(빨간 줄이 없…")
+    var foldBtn = h('button', { type: 'button', class: 'item-fold', 'aria-expanded': 'false', 'aria-controls': bodyId },
+      h('span', { class: 'fold-text', text: it.shortTitle || it.text }),
+      foldAns,
+      h('span', { class: 'fold-memo' }, icon('note', 'ic-sm'), h('span', { class: 'sr-only', text: '메모 있음' })),
+      h('span', { class: 'fold-photo' }, icon('camera', 'ic-sm'), h('span', { class: 'sr-only', text: '사진 있음' })),
+      icon('chevron', 'ic-sm ic-chev'));
+    foldBtn.addEventListener('click', function () { setFold(false, true); });
+    collapseBtn.addEventListener('click', function () { setFold(true, true); });
+
+    function reveal() {
+      if (revealed) return;
+      revealed = true;
+      sync();
+      if (memo) memo.open();
+    }
+    moreBtn.addEventListener('click', reveal);
+    onLongPress(el, reveal);
+
+    /** 접힘·도구 줄·메모 표시 클래스를 지금 상태에 맞춘다. 답을 지웠거나 멈춤 신호 "있음"이면 접지 않는다 */
+    function sync() {
+      var cur = getItemState(prop, it.id);
+      var done = isItemDone(it, cur);
+      var stopYes = it.type === 'flag' && it.severity === 'stop' && cur.status === 'yes';
+      var hasMemo = !!(cur.memo && cur.memo.trim());
+      if (!done || stopYes) folded = false;
+      el.classList.toggle('is-folded', folded);
+      el.classList.toggle('has-memo', hasMemo);
+      el.classList.toggle('tools-off', !(done || hasMemo || revealed));
+      if (linkEl) linkEl.hidden = cur.status !== 'yes'; // 1.5.0(C11)
+      foldBtn.setAttribute('aria-expanded', String(!folded));
+      var a = answerLabel(it, cur);
+      foldAns.textContent = a ? a[0] : '';
+      foldAns.className = 'fold-ans' + (a ? ' fold-ans-' + a[1] : '');
+    }
+    /** 접거나 펼친다. focus: 접으면 요약 줄, 펼치면 [접기] 버튼으로 초점을 옮긴다(키보드·VoiceOver 가 자리를 잃지 않게) */
+    function setFold(on, focus) {
+      var wasInside = el.contains(document.activeElement);
+      folded = !!on;
+      sync();
+      if (!focus || !wasInside) return;
+      try { (folded ? foldBtn : collapseBtn).focus({ preventScroll: true }); } catch (e) { /* 무시 */ }
+    }
+
+    el.append(foldBtn, body);
     applyItemClasses(el, it, st);
+    folded = isItemDone(it, st); // 처음 그릴 때 이미 답한 항목은 접어서 보여 준다(멈춤 "있음"은 sync 가 펼침)
+    sync();
+    if (!view.refs.items) view.refs.items = {};
+    view.refs.items[it.id] = { el: el, sync: sync, fold: function (on) { setFold(on, false); } };
     return el;
   }
 
@@ -3145,18 +3720,24 @@
   // ---------------- 요약 ----------------
   function collectSummary(prop) {
     var S = {
-      stops: [], cautionFlags: [], rateCautions: [], contractCautions: [], refCautions: [],
+      stops: [], cautionFlags: [], contractFlags: [], refFlags: [], rateCautions: [], contractCautions: [], refCautions: [],
       answered: [], unanswered: [], visits: [], memos: [], sectionMemos: []
     };
     CL.sections.forEach(function (sec) {
       sec.items.forEach(function (it) {
         var st = getItemState(prop, it.id);
         var row = { it: it, st: st, sec: sec };
-        if (it.type === 'flag' && st.status === 'yes') (it.severity === 'stop' ? S.stops : S.cautionFlags).push(row);
+        // 1.5.0: 항목 cautionUse 가 섹션 값보다 우선('reference' = 가격 판단 참고, 특약 대상 아님)
+        var useRef = (it.cautionUse || sec.cautionUse) === 'reference';
+        if (it.type === 'flag' && st.status === 'yes') {
+          (it.severity === 'stop' ? S.stops : S.cautionFlags).push(row);
+          // 주의 신호를 특약으로 풀 수 있는 것(contractFlags)과 참고용(refFlags)으로 나눠 둔다(cautionFlags 는 둘 다)
+          if (it.severity !== 'stop') (useRef ? S.refFlags : S.contractFlags).push(row);
+        }
         else if (it.type === 'rate' && st.status === 'caution') {
           S.rateCautions.push(row);
           // 집 안처럼 고칠 수 있는 것은 협상·특약 후보, 동네·단지는 가격 판단 참고(특약으로 바꿀 수 없음)
-          (sec.cautionUse === 'reference' ? S.refCautions : S.contractCautions).push(row);
+          (useRef ? S.refCautions : S.contractCautions).push(row);
         }
         else if (it.type === 'ask') (st.answer && st.answer.trim() ? S.answered : S.unanswered).push(row);
         else if (it.type === 'visit') { if (st.done || st.date || st.memo) S.visits.push(row); }
@@ -3170,10 +3751,30 @@
 
   function sumCard(title, count, children, emptyText) {
     var has = Array.isArray(children) ? children.length > 0 : !!children;
-    return h('section', { class: 'card' },
+    // 1.5.0(L8): 비어 있는 카드는 한 줄(제목 · 0개 · 설명)로 줄인다(첫날 요약이 0개 카드 5개로 길지 않게)
+    return h('section', { class: 'card' + (has ? '' : ' sum-card-empty') },
       h('h2', { class: 'card-title' }, title, count !== null && count !== undefined ? h('span', { class: 'count', text: count + '개' }) : null),
       has ? children : h('p', { class: 'sum-empty', text: emptyText })
     );
+  }
+
+  /**
+   * 1.5.0(L8): 요약 맨 위 한 줄 — 아직 체크한 것이 거의 없을 때(아무것도 안 봤거나, 등기부 멈춤 신호가 남았고 진행 15% 미만).
+   * [등기부 보기]는 상세로 돌아가 등기부 섹션을 열고 스크롤(pendingSection). 탈락 매물·등기부 섹션 없는 데이터면 null
+   */
+  function summaryIntro(prop, o) {
+    if (prop.status === 'dropped') return null;
+    var gates = gateSections();
+    if (!gates.length) return null;
+    var gs = gateStopState(prop);
+    var low = o.done === 0 || (gs.unanswered > 0 && o.pct < 15);
+    if (!low) return null;
+    return h('div', { class: 'sum-intro', role: 'note' },
+      h('p', { text: '등기부 확인부터 하면 여기에 위험 신호·특약 후보가 정리돼요.' }),
+      h('button', {
+        type: 'button', class: 'btn btn-small btn-secondary',
+        onclick: function () { pendingSection = gates[0].id; goBack('/p/' + prop.id, true); }
+      }, '등기부 보기'));
   }
 
   function renderSummary(id) {
@@ -3192,6 +3793,7 @@
     var line = propLine(prop);
     var diff = diffPercent(prop.askPrice, prop.realPrice);
 
+    appendKid(main, summaryIntro(prop, o)); // 1.5.0(L8): 진행이 거의 없을 때 맨 위 한 줄
     main.append(h('section', { class: 'card' },
       h('div', { class: 'dh-top' },
         h('div', {},
@@ -3222,8 +3824,9 @@
       riskRows.length ? h('ul', { class: 'sum-list' }, riskRows) : null,
       '"있음"으로 표시한 위험 신호가 없어요. (등기부: ' + reg.label + ')'));
 
-    // 협상·특약 후보 = 등기부 주의 신호(근저당 말소·전세권 정리 등) + 집 안 "주의" 항목 + 메모 + 사진
-    var cand = S.cautionFlags.map(function (r) { return sumRow(r, 'is-caution', '주의 신호', true); })
+    // 협상·특약 후보 = 등기부 주의 신호 가운데 특약으로 풀 수 있는 것(근저당 말소·전세권 정리 등) + 집 안 "주의" 항목 + 메모 + 사진.
+    // 1.5.0(L37): 특약으로 풀 수 없는 주의 신호(data.js cautionUse 'reference': 잦은 소유자 변경, 지난 기록)는 아래 "가격 판단 참고"로(S.refFlags)
+    var cand = S.contractFlags.map(function (r) { return sumRow(r, 'is-caution', '주의 신호', true); })
       .concat(S.contractCautions.map(function (r) { return sumRow(r, 'is-caution', null, true); }));
     main.append(sumCard('협상·특약 후보', cand.length,
       cand.length ? [
@@ -3232,11 +3835,13 @@
       ] : null,
       '등기부 주의 신호나 집 안에서 "주의"로 표시한 항목이 없어요.'));
 
-    // 가격 판단 참고 = 동네·단지 "주의" (특약으로 고칠 수 없는 것)
-    if (S.refCautions.length) {
-      main.append(sumCard('가격 판단 참고 (특약 대상 아님)', S.refCautions.length, [
-        h('p', { class: 'muted small', text: '동네·단지에서 "주의"로 표시한 항목이에요. 계약서로 고칠 수 없으니 이 집을 고를지, 가격이 맞는지 판단할 때 참고하세요.' }),
-        h('ul', { class: 'sum-list' }, S.refCautions.map(function (r) { return sumRow(r, '', null, true); }))
+    // 가격 판단 참고 = 특약으로 풀 수 없는 등기부 주의 신호(1.5.0 L37, S.refFlags) + 동네·단지 "주의" (특약으로 고칠 수 없는 것)
+    var refRows = S.refFlags.map(function (r) { return sumRow(r, 'is-caution', '주의 신호', true); })
+      .concat(S.refCautions.map(function (r) { return sumRow(r, '', null, true); }));
+    if (refRows.length) {
+      main.append(sumCard('가격 판단 참고 (특약 대상 아님)', refRows.length, [
+        h('p', { class: 'muted small', text: '동네·단지에서 "주의"로 표시한 항목과, 특약으로 풀 수 없는 등기부 주의 신호(잦은 소유자 변경·지난 기록)예요. 계약서로 고칠 수 없으니 이 집을 고를지, 가격이 맞는지 판단할 때 참고하세요.' }),
+        h('ul', { class: 'sum-list' }, refRows)
       ], ''));
     }
 
@@ -3327,11 +3932,14 @@
     if (prop.status === 'dropped') block('탈락 사유', [prop.dropReason || '(사유 없음)']);
     block('위험 신호', S.stops.map(function (r) { return '- [멈춤 신호] ' + r.it.text + withMemo(r); })
       .concat(S.cautionFlags.map(function (r) { return '- [주의 신호] ' + r.it.text + withMemo(r); })));
-    block('협상·특약 후보', S.cautionFlags.map(function (r) { return '- [등기부] ' + r.it.text + withMemo(r) + photoNote(r); })
+    // 1.5.0(L37): 협상·특약 후보에는 특약으로 풀 수 있는 주의 신호만(contractFlags). 참고용 주의 신호(refFlags)는 가격 판단 참고로
+    block('협상·특약 후보', S.contractFlags.map(function (r) { return '- [등기부] ' + r.it.text + withMemo(r) + photoNote(r); })
       .concat(S.contractCautions.map(function (r) { return '- ' + r.it.text + withMemo(r) + photoNote(r); })));
-    block('가격 판단 참고 (동네·단지 "주의", 특약 대상 아님)', S.refCautions.map(function (r) { return '- ' + r.it.text + withMemo(r) + photoNote(r); }));
+    block('가격 판단 참고 (특약 대상 아님)', S.refFlags.map(function (r) { return '- [등기부] ' + r.it.text + withMemo(r) + photoNote(r); })
+      .concat(S.refCautions.map(function (r) { return '- ' + r.it.text + withMemo(r) + photoNote(r); })));
     block('질문과 답변', S.answered.map(function (r) { return '- Q. ' + r.it.text + '\n  A. ' + r.st.answer.trim().replace(/\r?\n/g, '\n     '); }));
-    block('아직 답을 못 받은 질문', S.unanswered.map(function (r) { return '- ' + r.it.text; }));
+    // 1.5.0(L33): 미답 질문은 16줄 대신 한 줄(가족에게 보내는 글에 질문 목록은 필요 없음. 앱의 요약 화면에 접힌 목록이 있음)
+    if (S.unanswered.length) { lines.push(''); lines.push('■ 아직 답 못 받은 질문 ' + S.unanswered.length + '개(앱에서 보기)'); }
     block('재방문 기록', S.visits.map(function (r) {
       return '- [' + visitLabel(r.st) + '] ' + r.it.text + (r.st.date ? ' (' + formatISODate(r.st.date) + ')' : '') + withMemo(r);
     }));
@@ -3413,7 +4021,7 @@
   ];
 
   function renderCompare() {
-    newView('compare');
+    var v = newView('compare');
     setTopbar({ title: '매물 비교' });
     updateTabbar('compare');
     var main = resetMain();
@@ -3432,7 +4040,6 @@
     var sortSel = h('select', { class: 'select', 'aria-label': '정렬 기준' }, SORTS.map(function (s) { return h('option', { value: s.id, text: s.label }); }));
     sortSel.value = SORTS.some(function (s) { return s.id === sortKey; }) ? sortKey : 'updated';
     var dropToggle = h('input', { type: 'checkbox', checked: includeDropped });
-    var droppedCount = state.properties.filter(function (p) { return p.status === 'dropped'; }).length;
     var hiddenNote = h('p', { class: 'small muted', 'aria-live': 'polite', style: 'margin:-4px 2px 10px' });
     var tableWrap = h('div', { class: 'table-scroll', tabindex: '0', role: 'region', 'aria-label': '매물 비교 표 (옆으로 밀어서 보기)' });
 
@@ -3441,7 +4048,8 @@
       h('p', { text: '매물을 하나 더 추가하면 호가·등기부 결과를 나란히 비교할 수 있어요.' }),
       h('a', { class: 'btn btn-small btn-accent', href: '#/new' }, icon('plus', 'ic-sm'), '매물 추가')) : null;
     main.append(
-      h('p', { class: 'page-sub', text: '표를 옆으로 밀면 더 볼 수 있어요. 매물 이름을 누르면 상세 화면으로 가요.' }),
+      // 1.5.0 검토 반영: 빠른 동작 열을 등기부 결과 바로 뒤(3번째 열)로 — 맨 끝(11번째)이면 390px 에서 약 900px 을 밀어야 보여 "바로"가 아니었음. 버튼 순서대로 적음
+      h('p', { class: 'page-sub', text: '옆으로 밀어서 더 보세요. 이름을 누르면 상세로, 등기부 결과 옆 [임장 예정]·[탈락]으로 상태를 바로 바꿔요.' }),
       h('div', { class: 'compare-tools' }, sortSel, h('label', { class: 'toggle' }, dropToggle, '탈락 매물도 보기')),
       hiddenNote
     );
@@ -3462,8 +4070,82 @@
       return dir * (x - y);
     }
 
+    /** 1.5.0(M5): 고정 열 부제 "204동 1604호 · 16/16층 동향" — 같은 단지·같은 동 매물을 층·방향으로 구분(전에는 동·호만) */
+    function subText(p) {
+      var fl = [floorText(p.floor), str(p.direction).trim()].filter(Boolean).join(' ');
+      return [unitText(p), fl].filter(Boolean).join(' · ');
+    }
+    function fullName(p) { var s = subText(p); return p.name + (s ? ' ' + s : ''); }
+
+    /**
+     * 1.5.0(M5): 행 끝 빠른 동작. 상세 화면의 상태 바꾸기(changeStatus)와 같은 확인창을 띄우되, 비교 화면에는 상태 select 가
+     * 없어 끝난 뒤 표를 다시 그린다(전에는 이름 → 상세 → 상태 select → [탈락 처리] → 뒤로 4~5탭). 문구를 바꾸면 changeStatus 도 같이
+     */
+    function quickDrop(p) {
+      openDialog({
+        title: '탈락 처리할까요?',
+        message: fullName(p) + '\n탈락 사유를 남겨 두면 나중에 비교할 때 도움이 돼요. (비워 둬도 돼요)',
+        input: { multiline: true, placeholder: '예: 등기부에 신탁 기록, 누수 흔적', value: p.dropReason || suggestedDropReason(p), label: '탈락 사유' },
+        buttons: [{ label: '탈락 처리', value: 'ok', kind: 'danger' }, { label: '취소', value: null, kind: 'secondary' }]
+      }).then(function (r) {
+        if (r.value !== 'ok') return;
+        var prev = p.status;
+        setPropStatus(p, 'dropped', r.text.trim());
+        saveNow();
+        draw();
+        // 1.5.0 검토 반영: 행이 바로 사라지므로("탈락 매물도 보기"가 꺼져 있으면) 토스트에 [되돌리기](전 상태로. 탈락 사유는 보관)
+        toast('탈락 처리했어요', {
+          duration: 6000,
+          action: { label: '되돌리기', fn: function () {
+            setPropStatus(p, prev);
+            afterStatusChange(p); // 그 매물 상세를 열어 둔 상태면 select·경고 상자도 맞춘다(다른 화면이면 아무것도 안 함)
+            saveNow();
+            if (view === v) draw();
+            toast('되돌렸어요 · ' + STATUS_LABEL[prev], { duration: 1500 });
+          } }
+        });
+      });
+    }
+    /** 임장 예정으로. 등기부 멈춤 신호를 다 보기 전이면 한 번 더 묻고, [등기부 먼저 보기]는 그 매물 상세의 등기부 섹션을 연 채로 간다 */
+    function quickPlan(p) {
+      var gs = gateStopState(p);
+      if (!(gs.unanswered > 0 || gs.yes > 0)) { applyStatus(p, 'planned'); saveNow(); draw(); return; }
+      var hasStop = gs.yes > 0;
+      openDialog({
+        title: hasStop ? '멈춤 신호가 있는 매물이에요' : '등기부 멈춤 신호를 먼저 확인하세요',
+        message: fullName(p) + '\n' + (hasStop
+          ? '등기부에 멈춤 신호가 있다고 표시했어요. 이 집은 보러 갈 필요가 없어요. 그래도 상태를 "임장 예정"으로 바꿀까요?'
+          : '아직 확인하지 않은 멈춤 신호가 ' + gs.unanswered + '개 있어요. 신탁·가압류 같은 문제가 있으면 보러 갈 필요가 없어요. 그래도 상태를 "임장 예정"으로 바꿀까요?'),
+        buttons: [{ label: '그래도 바꾸기', value: 'ok' }, { label: '등기부 먼저 보기', value: 'reg', kind: 'secondary' }]
+      }).then(function (r) {
+        if (r.value === 'ok') { applyStatus(p, 'planned'); saveNow(); draw(); return; }
+        if (r.value !== 'reg') return; // Esc·바탕 누름: 그대로
+        var g = gateSections()[0];
+        if (g) pendingSection = g.id; // 상세가 그 섹션을 열고 스크롤한다(renderDetail, 1.5.0 M8 과 같은 길)
+        navigate('/p/' + p.id);
+      });
+    }
+    function rowActions(p) {
+      if (p.status === 'dropped') {
+        return h('button', {
+          type: 'button', class: 'btn btn-small btn-ghost', 'aria-label': '다시 검토하기: ' + fullName(p),
+          onclick: function () { applyStatus(p, 'review'); saveNow(); draw(); }
+        }, '다시 검토');
+      }
+      return h('div', { class: 'cmp-act-row' },
+        p.status === 'review' ? h('button', {
+          type: 'button', class: 'btn btn-small btn-secondary', 'aria-label': '임장 예정으로 바꾸기: ' + fullName(p),
+          onclick: function () { quickPlan(p); }
+        }, '임장 예정') : null,
+        h('button', {
+          type: 'button', class: 'btn btn-small btn-danger-ghost', 'aria-label': '탈락 처리: ' + fullName(p),
+          onclick: function () { quickDrop(p); }
+        }, '탈락'));
+    }
+
     function draw() {
       var list = state.properties.filter(function (p) { return includeDropped || p.status !== 'dropped'; });
+      var droppedCount = state.properties.filter(function (p) { return p.status === 'dropped'; }).length; // 빠른 동작으로 바뀌므로 그릴 때마다 센다
       var k = sortSel.value;
       list.sort(function (a, b) {
         if (k === 'ask') return nullsLast(a, b, function (p) { return p.askPrice || null; }, 1);
@@ -3479,36 +4161,39 @@
         tableWrap.append(h('p', { class: 'muted', style: 'padding:16px', text: '보여 줄 매물이 없어요.' }));
         return;
       }
-      // 핵심 판단 기준(등기부 결과)을 매물 이름 바로 옆에 둔다
+      // 핵심 판단 기준(등기부 결과)을 매물 이름 바로 옆에, 그다음 빠른 동작(1.5.0 검토 반영: 맨 끝에서 3번째 열로. 등기부 결과를 보고
+      // 바로 [임장 예정]·[탈락]), 1.5.0(M5): 같은 단지 매물을 구분할 층·방향, 거의 같은 값(최근 실거래가·전용면적)은 뒤로
       var thead = h('thead', {}, h('tr', {},
         h('th', { class: 'sticky-col', scope: 'col', text: '매물' }),
         h('th', { scope: 'col', text: '등기부 결과' }),
+        h('th', { class: 'cmp-act', scope: 'col', text: '빠른 동작' }),
+        h('th', { scope: 'col', text: '층·방향' }),
         h('th', { scope: 'col', text: '상태' }),
         h('th', { class: 'num', scope: 'col', text: '호가' }),
         h('th', { class: 'num', scope: 'col', text: '실거래 대비' }),
         h('th', { class: 'num', scope: 'col', text: '주의' }),
         h('th', { scope: 'col', text: '진행률' }),
         h('th', { class: 'num', scope: 'col', text: '최근 실거래가' }),
-        h('th', { class: 'num', scope: 'col', text: '전용면적' }),
-        h('th', { scope: 'col', text: '층·방향' })
+        h('th', { class: 'num', scope: 'col', text: '전용면적' })
       ));
       var tbody = h('tbody', {}, list.map(function (p) {
         var prog = overallProgress(p);
         var reg = registryResult(p);
         var diff = diffPercent(p.askPrice, p.realPrice);
-        var unit = unitText(p);
+        var sub = subText(p);
         return h('tr', { class: p.status === 'dropped' ? 'is-dropped' : null },
           h('th', { class: 'sticky-col', scope: 'row' },
-            h('a', { href: '#/p/' + encodeURIComponent(p.id) }, p.name, unit ? h('span', { class: 'unit-sub', text: unit }) : null)),
+            h('a', { href: '#/p/' + encodeURIComponent(p.id) }, p.name, sub ? h('span', { class: 'unit-sub', text: sub }) : null)),
           h('td', {}, h('span', { class: 'meta-chip reg-' + reg.code, text: reg.label })),
+          h('td', { class: 'cmp-act' }, rowActions(p)),
+          h('td', { text: [floorText(p.floor), str(p.direction).trim()].filter(Boolean).join(' · ') || '-' }),
           h('td', {}, statusChip(p.status)),
           h('td', { class: 'num', text: p.askPrice ? formatManwon(p.askPrice) : '-' }),
           h('td', { class: 'num' + (diff !== null ? (diff > 0 ? ' diff-up' : ' diff-down') : ''), text: pctText(diff) }),
           h('td', { class: 'num', text: String(cautionCount(p)) }),
           h('td', {}, h('span', { class: 'mini-bar' }, makeBar(prog.pct, null, { thin: true, ariaLabel: p.name + ' 진행률' }).el), prog.pct + '%'),
           h('td', { class: 'num', text: p.realPrice ? formatManwon(p.realPrice) : '-' }),
-          h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' }),
-          h('td', { text: [floorText(p.floor), str(p.direction).trim()].filter(Boolean).join(' · ') || '-' })
+          h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' })
         );
       }));
       tableWrap.append(h('table', { class: 'ctable' }, h('caption', { class: 'sr-only', text: '매물 비교' }), thead, tbody));
@@ -3943,7 +4628,8 @@
       hideToast();
       openDialog({
         title: '백업 파일이 준비됐어요',
-        message: fname + '\n크기: ' + bytesText(blob.size) +
+        // 1.5.0(L34): 첫 줄에 두 기기 맞추기의 다음 단계(합치기 결과창의 [이 기기 백업 파일 만들기]로 왔을 때 특히)
+        message: '다른 기기와 맞추려면: 그 기기에서 설정 → 백업 불러오기 → [합치기]\n\n' + fname + '\n크기: ' + bytesText(blob.size) +
           (photoBlob ? ' · 사진 ' + photoCount + '장 포함' : (includePhotos ? ' · 사진 없이 만들었어요' : '')) +
           (!photoBlob && skipped ? '\n사진 ' + skipped + '장은 들어가지 않아요. 사진도 옮기려면 "사진도 함께 넣기"를 켜고 다시 만드세요.' : '') +
           '\n\niPhone 에서는 "공유하기 → 파일에 저장"이 가장 확실해요.' +
@@ -4053,6 +4739,9 @@
         var incoming = normalizeState(data);
         var photos = Array.isArray(obj.photos) ? obj.photos.filter(validPhotoEntry) : [];
         var origin = backupOrigin(obj);
+        // 1.5.0 검토 반영: 더 새로운 앱이 만든 백업이면 이 앱이 모르는 정보(예: 1.5.0 의 가져오기 참고)가 합치면서 빠질 수 있다고 알린다
+        var backupVer = str(obj.appVersion) || str(obj.meta && obj.meta.appVersion);
+        var newerVer = isNewerVersion(backupVer, APP_VERSION) ? backupVer : '';
         obj = null;
         data = null;
         // 1.3.1: 합치면 이 기기에서 지워질 매물 수를 미리 계산해 보여 준다(저장하지 않음)
@@ -4064,9 +4753,13 @@
             '· 합치기(권장): 두 기록을 항목마다 합쳐요. 같은 항목은 더 최근에 고친 쪽을 남기고, 백업을 만든 기기에서 지운 매물은 여기서도 지워요.' +
             (willDelete ? ' 지금 합치면 이 기기에서 매물 ' + willDelete + '개가 지워져요(다음 화면에서 확인).' : '') + '\n' +
             '· 덮어쓰기: 이 기기의 지금 기록을 모두 지우고 백업 내용으로 바꿔요.',
-          content: oldN ? h('div', { class: 'dlg-warn' },
-            h('strong', { text: '예전 버전 앱에서 만든 백업이에요' + (oldN < incoming.properties.length ? ' (매물 ' + oldN + '개)' : '') }),
-            h('p', { text: '항목별로 정확히 합치지 못해, 이 기기에서 고친 내용이 그 기기의 예전 값으로 덮일 수 있어요. 그 기기를 인터넷에 연결해 앱을 새로고침(업데이트)한 뒤 새로 백업해 오세요.' })) : null,
+          content: oldN || newerVer ? h('div', {},
+            oldN ? h('div', { class: 'dlg-warn' },
+              h('strong', { text: '예전 버전 앱에서 만든 백업이에요' + (oldN < incoming.properties.length ? ' (매물 ' + oldN + '개)' : '') }),
+              h('p', { text: '항목별로 정확히 합치지 못해, 이 기기에서 고친 내용이 그 기기의 예전 값으로 덮일 수 있어요. 그 기기를 인터넷에 연결해 앱을 새로고침(업데이트)한 뒤 새로 백업해 오세요.' })) : null,
+            newerVer ? h('div', { class: 'dlg-warn' },
+              h('strong', { text: '더 새로운 앱(' + newerVer + ')에서 만든 백업이에요' }),
+              h('p', { text: '이 앱(' + APP_VERSION + ')이 모르는 정보는 합치면서 빠질 수 있어요. 인터넷에 연결해 이 앱을 새로고침(업데이트)한 뒤 불러오면 그대로 들어와요.' })) : null) : null,
           buttons: [
             { label: '합치기', value: 'merge' },
             { label: '덮어쓰기', value: 'replace', kind: 'danger-ghost' }, // 위험하지만 주 버튼은 아님(합치기가 기본)
@@ -4127,6 +4820,20 @@
   }
 
   /** 백업 파일이 어디서 언제 만들어졌는지: "iPad에서 10월 9일 21:10에 만든 백업" (1.2.x 백업은 기기 이름이 없음) */
+  /** 1.5.0 검토 반영: a 가 b 보다 새 버전이면 true(숫자 마디 비교: '1.10.0' > '1.9.0'). 둘 중 하나라도 '숫자.숫자…' 꼴이 아니면 false */
+  function isNewerVersion(a, b) {
+    a = str(a); b = str(b);
+    if (!/^\d+(\.\d+)*$/.test(a) || !/^\d+(\.\d+)*$/.test(b)) return false;
+    var x = a.split('.');
+    var y = b.split('.');
+    for (var i = 0; i < Math.max(x.length, y.length); i++) {
+      var p = parseInt(x[i] || '0', 10);
+      var q = parseInt(y[i] || '0', 10);
+      if (p !== q) return p > q;
+    }
+    return false;
+  }
+
   function backupOrigin(obj) {
     var meta = obj && obj.meta && typeof obj.meta === 'object' ? obj.meta : {};
     var dev = cleanDeviceName(meta.deviceName);
@@ -4281,10 +4988,19 @@
       group('is-kept', '같은 매물로 보이는 것', '두 기기에서 따로 추가한 같은 매물로 보여요(매물번호나 링크가 같음). 하나를 지우기 전에 양쪽의 체크 기록과 사진을 확인하세요. 지운 쪽의 기록과 사진은 함께 사라져요.', dups),
       extra.photoCount === 0 ? h('p', { class: 'small muted', text: '이 백업에는 사진이 없어요. 사진도 옮기려면 그 기기에서 "사진도 함께 넣기"를 켜고 백업하세요.' }) : null,
       rep.incomingBehind
-        ? h('p', { class: 'small muted', text: '이 기기에만 있던 내용도 있어요. 백업을 만든 기기도 맞추려면 여기서 백업 파일을 만들어 그 기기에서 [합치기] 하세요.' })
+        ? h('p', { class: 'small muted', text: '이 기기에만 있던 내용도 있어요. 백업을 만든 기기도 맞추려면 아래 [이 기기 백업 파일 만들기]로 만든 파일을 그 기기에서 [합치기] 하세요.' })
         : (sameHere ? null : h('p', { class: 'small muted', text: '이제 이 기기 기록이 백업과 같아요.' }))
     );
-    return openDialog({ title: sameHere && !notes ? '합쳤어요 · 바뀐 것 없음' : '합쳤어요', content: content, buttons: [{ label: '확인', value: true }] });
+    // 1.5.0(L34): 이 기기에만 있던 내용이 있으면 다음 단계(백업 파일 만들기)를 바로 누르게(전에는 [확인]만 있어 설정에서 다시 찾아야 했음).
+    // 사진 포함 여부는 설정의 "사진도 함께 넣기" 기억값(ui.backupWithPhotos)을 따른다(백업 대화상자가 빠진 사진 수를 알려 줌)
+    var buttons = [];
+    if (rep.incomingBehind) buttons.push({ label: '이 기기 백업 파일 만들기', value: 'backup', kind: 'accent' });
+    buttons.push({ label: '확인', value: true });
+    return openDialog({ title: sameHere && !notes ? '합쳤어요 · 바뀐 것 없음' : '합쳤어요', content: content, buttons: buttons })
+      .then(function (r) {
+        if (r.value === 'backup') createBackup(state.ui.backupWithPhotos === true);
+        return r;
+      });
   }
 
   function wipeAll() {
@@ -4418,7 +5134,7 @@
           step('동작 "클립보드에 복사"를 넣어요.'),
           step('동작 "알림 표시"를 넣고 글을 "복사했어요. 임장체크 앱에서 붙여넣으세요"로 해요.')),
         h('p', { class: 'imp-sc-title', text: '쓰는 법' }),
-        h('p', { class: 'small', text: 'Safari에서 네이버 매물 상세 화면을 연 채로 공유 → "임장체크에 담기" → 홈 화면의 임장체크 앱 → [코드·글로 추가] → 붙여넣기.' }),
+        h('p', { class: 'small', text: 'Safari에서 네이버 매물 상세 화면을 연 채로 공유 → "임장체크에 담기" → 홈 화면의 임장체크 앱 → [글·코드로 추가] → 붙여넣기.' }),
         h('p', { class: 'small muted', text: '"웹 페이지에서 JavaScript 실행"이 막히면 설정 → 단축어 → 고급 → "스크립트 실행 허용"을 켜요. iPadOS 버전에 따라 메뉴 이름이 조금 다를 수 있어요.' })));
   }
 
@@ -4453,13 +5169,20 @@
     // 링크나 지난번 글로 채운 뒤 아직 손대지 않았으면 true. 이때 새로 붙여 넣으면 뒤에 덧붙이지 않고 통째로 바꾼다
     var restored = !!initial;
 
-    // 1) 방법 안내(Claude 코드 / 네이버 매물 글) + 요청문 + iPad 단축어 (딥링크로 열면 접어 두고 미리보기를 먼저 보여 준다)
+    // 1) 방법 안내 + 요청문 + iPad 단축어. 1.5.0(L32): 방법 1 네이버 매물 글 붙여넣기(권장) → 방법 2 Claude 코드 순서로 바꾸고,
+    //    처음 쓸 때도 접힌 <details>로 입력 칸 아래에 둔다(전에는 안내 카드 944px 뒤에 입력 칸이 있어 글을 들고 온 사람이 1.3화면을 내려야 했음)
     var howBody = [
-      h('h3', { class: 'imp-way', text: '방법 1. Claude에게 코드 받기' }),
+      h('h3', { class: 'imp-way', text: '방법 1. 네이버 매물 글 붙여넣기 (권장)' }),
+      h('ol', { class: 'isteps', role: 'list' },
+        importStep(1, '네이버 부동산에서 매물 상세 화면을 열어요', 'Safari나 Mac 브라우저에서 매물을 눌러 상세 정보가 보이게 해요.'),
+        importStep(2, '화면 글을 전체 복사해요', 'Mac은 빈 곳을 누르고 ⌘A → ⌘C. iPad는 아래 단축어를 쓰면 한 번에 돼요. 면적 단위를 ㎡로 바꾸고 복사하면 면적이 정확해요.'),
+        importStep(3, '위 칸에 붙여 넣어요', 'Claude 없이 앱이 바로 읽어요. 옆의 관심·최근 목록이 섞여도 괜찮아요.')),
+      shortcutGuide(),
+      h('h3', { class: 'imp-way', text: '방법 2. Claude에게 코드 받기' }),
       h('ol', { class: 'isteps', role: 'list' },
         importStep(1, '네이버 부동산 매물 화면을 캡처해요', '화면 글을 복사해 보내도 돼요. 링크만 보내면 Claude가 읽지 못해요.'),
         importStep(2, 'Claude 앱 채팅에 요청문과 함께 보내요', '[요청문 복사]를 누른 뒤 채팅창에 붙여 넣고, 캡처한 화면을 첨부해요.'),
-        importStep(3, 'Claude가 준 코드를 아래에 붙여 넣어요', '답변 전체를 복사해도 돼요. 코드만 찾아 읽어요. 코드가 여러 개면 모두 읽어요.')),
+        importStep(3, 'Claude가 준 코드를 위 칸에 붙여 넣어요', '답변 전체를 복사해도 돼요. 코드만 찾아 읽어요. 코드가 여러 개면 모두 읽어요.')),
       h('button', {
         type: 'button', class: 'btn btn-secondary btn-block',
         onclick: function () { copyText(IMP.PROMPT, { ok: '요청문을 복사했어요. Claude 채팅에 붙여 넣으세요.', title: '요청문' }); }
@@ -4467,20 +5190,11 @@
       h('details', { class: 'prompt-box' },
         h('summary', {}, '요청문 펼쳐 보기'),
         h('pre', { class: 'prompt-text', text: IMP.PROMPT })),
-      h('h3', { class: 'imp-way', text: '방법 2. 네이버 매물 글 붙여넣기' }),
-      h('ol', { class: 'isteps', role: 'list' },
-        importStep(1, '네이버 부동산에서 매물 상세 화면을 열어요', 'Safari나 Mac 브라우저에서 매물을 눌러 상세 정보가 보이게 해요.'),
-        importStep(2, '화면 글을 전체 복사해요', 'Mac은 빈 곳을 누르고 ⌘A → ⌘C. iPad는 아래 단축어를 쓰면 한 번에 돼요. 면적 단위를 ㎡로 바꾸고 복사하면 면적이 정확해요.'),
-        importStep(3, '아래 칸에 붙여 넣어요', 'Claude 없이 앱이 바로 읽어요. 옆의 관심·최근 목록이 섞여도 괜찮아요.')),
-      shortcutGuide(),
       h('p', { class: 'small muted', text: '호수는 네이버 부동산에 없어서 담은 뒤 직접 입력해요. 숫자를 잘못 읽을 수 있으니 미리보기에서 꼭 확인하세요.' })
     ];
-    // 1.4.1: 한 번이라도 코드·글로 담은 적이 있으면(가져온 매물이 있음) 안내를 접어 입력 칸 아래로 보낸다(다시 쓸 때 바로 붙여넣기)
+    // 한 번이라도 코드·글로 담은 적이 있으면(가져온 매물이 있음) 입력 카드의 한 줄 안내를 생략한다
     var returning = !linkMode && state.properties.some(function (p) { return !!p.importedAt; });
-    var howEl = linkMode || returning
-      ? h('details', { class: 'card flow-details imp-how-more' }, h('summary', {}, '매물 정보 가져오는 방법'), howBody)
-      : h('section', { class: 'card', 'aria-labelledby': 'imp-how' },
-        h('h2', { class: 'card-title', id: 'imp-how', text: '매물 정보 가져오기' }), howBody);
+    var howEl = h('details', { class: 'card flow-details imp-how-more' }, h('summary', {}, '매물 정보 가져오는 방법'), howBody);
 
     // 2) 붙여넣기
     var ta = h('textarea', {
@@ -4498,7 +5212,9 @@
       h('strong', { text: '지난번에 붙여 넣은 글이에요' }),
       h('p', { text: '새로 붙여 넣으면 이 글을 바꿔요. 필요 없으면 [지우기]를 누르세요.' })) : null;
     var pasteCard = h('section', { class: 'card', 'aria-labelledby': 'imp-paste' },
-      h('h2', { class: 'card-title', id: 'imp-paste' }, h('label', { for: 'imp-text', text: 'Claude 코드나 네이버 매물 글' })),
+      h('h2', { class: 'card-title', id: 'imp-paste' }, h('label', { for: 'imp-text', text: '네이버 매물 글이나 Claude 코드' })),
+      // 1.5.0(L32): 처음 쓰는 사람에게 한 줄만(자세한 방법은 아래 접힌 안내)
+      !returning && !linkMode ? h('p', { class: 'small muted', text: '네이버 매물 상세 화면의 글을 전체 복사해 붙여 넣으면 앱이 바로 읽어요. 자세한 방법은 아래에 있어요.' }) : null,
       linkBad ? h('p', { class: 'notice', role: 'alert', text: '링크 속 코드를 읽지 못했어요. 링크가 잘렸을 수 있어요. Claude 답변의 코드를 복사해 붙여 주세요.' }) : null,
       restoredNote,
       pasteBtn,
@@ -4521,10 +5237,10 @@
             ? '링크는 Safari(또는 앱 안 브라우저)로 열려요. 홈 화면 앱과는 저장 공간이 따로라서, 여기서 담은 매물은 홈 화면 앱에 보이지 않아요.'
             : '여기서 담은 매물은 링크를 연 이 브라우저에만 저장돼요. 다른 기기나 홈 화면 앱에는 보이지 않아요.'
         }),
-        h('p', { text: '[코드 복사]를 누른 뒤, 평소 쓰는 앱의 [코드·글로 추가]에 붙여 넣으세요.' }),
+        h('p', { text: '[코드 복사]를 누른 뒤, 평소 쓰는 앱의 [글·코드로 추가]에 붙여 넣으세요.' }),
         h('button', {
           type: 'button', class: 'btn btn-small btn-secondary',
-          onclick: function () { copyText(ta.value || linkText, { ok: '코드를 복사했어요. 평소 쓰는 앱의 [코드·글로 추가]에 붙여 넣으세요.', title: '가져오기 코드' }); }
+          onclick: function () { copyText(ta.value || linkText, { ok: '코드를 복사했어요. 평소 쓰는 앱의 [글·코드로 추가]에 붙여 넣으세요.', title: '가져오기 코드' }); }
         }, icon('copy', 'ic-sm'), '코드 복사'))
     ) : null;
 
@@ -4542,11 +5258,9 @@
     var actions = h('div', { class: 'imp-actions', hidden: true }, submitBtn);
     var resultEl = h('section', { class: 'imp-result', 'aria-label': '미리보기' }, errBox, naverNote, status, hint, list, actions);
 
-    // 딥링크: 안내 → 미리보기 → 입력 칸 → (접힌) 방법 안내. 처음: 방법 안내 → 입력 칸 → 미리보기.
-    // 1.4.1 다시 쓰는 사람(가져온 매물이 있음): 입력 칸 → 미리보기 → (접힌) 방법 안내
+    // 딥링크: 안내 → 미리보기 → 입력 칸 → (접힌) 방법 안내. 그 밖(1.5.0: 처음 쓸 때도 같음): 입력 칸 → 미리보기 → (접힌) 방법 안내
     if (linkMode) main.append(linkCard, resultEl, pasteCard, howEl);
-    else if (returning) main.append(pasteCard, resultEl, howEl);
-    else main.append(howEl, pasteCard, resultEl);
+    else main.append(pasteCard, resultEl, howEl);
 
     var current = null; // 마지막 해석 결과
     var picks = {};     // 사용자가 바꾼 담기 선택 (코드를 조금 고쳐도 유지)
@@ -4758,13 +5472,17 @@
       var src = current && current.source === 'naver' ? (IMP.NAVER_SOURCE_ID || 'naver-text') : IMP.SOURCE_ID; // 어디서 읽은 매물인지
       var made = picked.map(function (e, i) {
         var p = e.prop;
-        var memo = p.memo;
+        // 1.5.0(M7): 앱 안내 문장(면적 환산 안내 등)과 가져오기 참고 문구(e.notes)는 메모가 아니라 importNotes 로.
+        // "다른 연락처: …" 같은 정보는 메모에 남는다(splitImportMemo)
+        var sp = splitImportMemo(p.memo, e.notes);
+        var memo = sp.memo;
         if (p.tradeType && p.tradeType !== '매매') memo = '거래 종류: ' + p.tradeType + (memo ? '\n' + memo : '');
         return normalizeProperty({
           id: uid(), name: p.name, dong: p.dong, ho: '', // 호수는 늘 사용자가 직접
           area: p.area, supplyArea: p.supplyArea, floor: p.floor, direction: p.direction,
           askPrice: p.askPrice, realPrice: p.realPrice, agentName: p.agentName, agentPhone: p.agentPhone,
           memo: memo, sourceUrl: p.sourceUrl, articleNo: p.articleNo, confirmedAt: p.confirmedAt,
+          importNotes: sp.notes,
           status: 'review', createdAt: now, updatedAt: now - i, // 코드 순서대로 목록 맨 위에
           importedAt: now, source: src,
           fieldsAt: {} // 새 매물(예전 기록이 아님)
@@ -4777,7 +5495,7 @@
       // hashchange 를 기다리지 않고 이 클릭 안에서 다음 화면을 그린다(1개면 호수 칸에 바로 키보드가 뜨게)
       if (made.length === 1) {
         pendingFocus = 'ho';
-        toast('매물을 담았어요. 호수만 입력하면 돼요.');
+        toast('매물을 담았어요'); // 1.5.0 검토 반영: "호수만 입력하면 돼요"는 수정 폼의 배너가 같은 자리에서 말하므로 토스트에서 뺌
         navigateNow('/p/' + made[0].id + '/edit', true);
       } else {
         toast(made.length + '개 담았어요. 호수를 입력해 주세요', { duration: 4000 });
@@ -5059,6 +5777,7 @@
       try { history.replaceState(null, '', '#/'); } catch (e) { /* 무시 */ }
     }
     onRoute();
+    if (migratedOnLoad) { migratedOnLoad = false; scheduleSave(); } // 1.5.0 검토 반영: 옮긴 항목과 dataVersion 을 저장본에도
 
     if (loadProblem === 'blocked') showSaveError(new Error('blocked'));
     if (loadProblem === 'broken') {

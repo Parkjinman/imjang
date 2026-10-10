@@ -1332,3 +1332,182 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
   .chip-arrow:hover { border-color: var(--teal); color: var(--teal); }
 }
 .sec-chips.is-dragging, .sec-chips.is-dragging .sec-chip { cursor: grabbing; user-select: none; -webkit-user-select: none; }
+
+/* ---------- 1.5.0 compare-home ---------- */
+/* 홈 화면 추가 안내: 한 줄 배너(L6). 자세한 글은 [방법] 대화상자(.install-how) */
+.install-bar {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 12px; padding: 4px 4px 4px 14px;
+  border-radius: var(--radius-sm); background: var(--teal-soft); color: var(--teal-ink);
+  font-size: 0.8824rem; font-weight: 700;
+}
+.install-bar-text { flex: 1; min-width: 0; }
+.install-bar .install-bar-how { flex: none; min-height: 36px; padding: 6px 12px; font-size: 0.8824rem; background: var(--card); border: 1.5px solid var(--line); }
+.install-bar .icon-btn { flex: none; color: var(--teal-ink); }
+.install-how > * + * { margin-top: 8px; }
+.install-how p { font-size: 0.9412rem; line-height: 1.55; }
+.install-how .tip-move { font-weight: 700; }
+/* 빈 홈(L1·L11): 버튼을 제목 바로 아래, 5단계 목록은 접힌 "순서 자세히 보기" */
+.flow-card .flow-cta { margin-top: 14px; }
+.flow-intro-hint { text-align: center; } /* 이름 주의: .flow-hint 는 상세의 "멈춤 신호 없음" 줄(1.5.0 flow 블록) */
+details.flow-details-first { margin-top: 8px; }
+details.flow-details-first > .flow { margin-top: 6px; }
+.flow .flow-link { margin-top: 2px; }
+/* 비교표(M5): 행 끝 빠른 동작 [임장 예정]·[탈락](탈락 행은 [다시 검토]) */
+.ctable .cmp-act { text-align: right; }
+.cmp-act-row { display: inline-flex; gap: 6px; }
+.ctable .cmp-act .btn-small { min-height: 36px; padding: 4px 12px; font-size: 0.8235rem; border-radius: 10px; white-space: nowrap; }
+/* 가져오기(L32): 접힌 안내의 첫 소제목은 summary 바로 아래라 윗 구분선을 뺀다 */
+.card.imp-how-more > summary + .imp-way { margin-top: 0; padding-top: 4px; border-top: 0; }
+
+/* ---------- 1.5.0 section: 등기부 섹션·항목 UI·칩 줄 (M6·L15) ---------- */
+/* 항목: [다음 멈춤 신호로]·요약에서 항목으로 올 때 칩 줄(sticky) 아래에 오도록. 초점(tabindex=-1)은 안쪽 테두리 */
+.item { scroll-margin-top: calc(var(--topbar-h) + var(--safe-top) + 76px); }
+.item:focus { outline: none; }
+.item:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; border-radius: 8px; }
+
+/* 머리 줄의 작은 버튼: [메모·사진 열기]는 도구 줄이 숨어 있을 때만, [접기]는 답했고 펼쳐져 있을 때만 */
+.item-more, .item-collapse { display: none; }
+.item.tools-off .item-more { display: inline-flex; }
+.item.is-done:not(.st-yes-stop):not(.is-folded) .item-collapse { display: inline-flex; }
+.item-collapse .ic { transform: rotate(180deg); }
+
+/* 도구 줄(메모·사진): 답하기 전엔 숨김. 사진이 이미 있으면(사진 줄이 보이면) 보임 */
+.item.tools-off > .item-body > .item-tools { display: none; }
+.item.tools-off:has(.thumbs:not([hidden])) > .item-body > .item-tools { display: flex; }
+
+/* 답한 항목의 한 줄 요약(문장 + 답 + 메모·사진 표시). 누르면 펼침 */
+.item-fold { display: none; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; border-radius: 8px; }
+.item.is-folded > .item-fold { display: flex; }
+.item.is-folded > .item-body { display: none; }
+.item.is-folded { padding-top: 4px; padding-bottom: 4px; }
+.item.is-folded::before { top: 10px; bottom: 10px; }
+.fold-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9412rem; font-weight: 600; color: var(--muted); }
+.fold-ans { flex: none; font-size: 0.8235rem; font-weight: 800; padding: 2px 8px; border-radius: 6px; background: var(--chip); color: var(--muted); }
+.fold-ans-good, .fold-ans-no, .fold-ans-done { background: var(--green-soft); color: var(--green-ink); }
+.fold-ans-caution, .fold-ans-yes { background: var(--yellow-soft); color: var(--yellow-ink); }
+.fold-ans-stop { background: var(--red-soft); color: var(--red-ink); }
+.fold-ans-ask { background: var(--teal-soft); color: var(--teal-ink); }
+.fold-memo, .fold-photo { display: none; flex: none; color: var(--teal-ink); }
+.item.has-memo > .item-fold .fold-memo { display: inline-flex; }
+.item:has(.thumbs:not([hidden])) > .item-fold .fold-photo { display: inline-flex; }
+.item-fold .ic-chev { flex: none; color: var(--muted); }
+.item-fold:active { background: var(--card-2); }
+
+/* 섹션 본문 맨 위 미니 진행: 등기부 "멈춤 신호 7개 중 N개 답함" + [다음 멈춤 신호로], 다른 섹션 "N/M 답함" */
+.mini-prog { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; margin-top: 12px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--card-2); font-size: 0.8824rem; font-weight: 700; color: var(--muted); }
+.mini-prog-gate { background: var(--orange-soft); color: var(--orange-ink); }
+.mini-prog.is-complete { color: var(--green-ink); }
+.mini-prog-gate.is-complete { background: var(--green-soft); }
+.mini-prog .btn { flex: none; }
+
+/* 칩 줄: ◀ ▶(후광 없이)는 마우스 환경(hover + fine pointer)에서만. 터치에서는 양 끝 그라데이션으로 "더 있음"만 알린다 */
+.chip-arrow { display: none; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12); }
+.sec-chips-wrap::before, .sec-chips-wrap::after { content: ""; position: absolute; top: 0; bottom: 0; z-index: 1; width: 40px; pointer-events: none; opacity: 0; }
+.sec-chips-wrap::before { left: 0; background: linear-gradient(90deg, var(--bg) 25%, transparent); }
+.sec-chips-wrap::after { right: 0; background: linear-gradient(270deg, var(--bg) 25%, transparent); }
+.sec-chips-wrap.has-prev::before, .sec-chips-wrap.has-next::after { opacity: 1; }
+@media (hover: hover) and (pointer: fine) {
+  .chip-arrow:not([hidden]) { display: inline-flex; }
+  .sec-chips-wrap::before, .sec-chips-wrap::after { display: none; }
+}
+
+/* ---------- 1.5.0 flow: 상태 흐름·가져온 매물 헤더·호수 마무리·공유 (L2·M7·M8·L5·L8·L33) ---------- */
+/* 헤더 카드: 상태 select 를 이름 줄 옆으로(L2). 좁은 화면(320px)이나 긴 이름이면 아래 줄로 떨어진다 */
+.dh-top { flex-wrap: wrap; }
+.dh-head { flex: 1 1 180px; min-width: 0; }
+.dh-status { flex: 0 1 auto; display: grid; gap: 4px; min-width: 132px; }
+.dh-status label { font-weight: 700; font-size: 0.8235rem; color: var(--muted); }
+.dh-status .select { min-height: 44px; padding-top: 8px; padding-bottom: 8px; font-weight: 700; }
+.status-help { font-size: 0.8235rem; color: var(--muted); line-height: 1.45; }
+/* 제안 줄: 멈춤 신호를 모두 "없음"으로 답함 → [임장 예정으로 바꾸기] */
+.flow-hint-wrap:empty { display: none; }
+.flow-hint {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--green-soft); color: var(--green-ink);
+  font-size: 0.8824rem;
+}
+.flow-hint p { flex: 1 1 200px; }
+.flow-hint strong { font-weight: 800; }
+.flow-hint .btn { flex: 0 0 auto; background: var(--card); color: var(--green-ink); border: 1.5px solid var(--green-ink); }
+/* 헤더 카드 메모: 3줄로 접고 [더 보기]/[접기](M7) */
+.dh-memo-wrap { display: grid; gap: 2px; justify-items: start; }
+.dh-memo-wrap .dh-memo { width: 100%; }
+.dh-memo.is-clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.dh-memo-more { min-height: 44px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: var(--teal-ink); font: inherit; font-weight: 700; font-size: 0.8824rem; cursor: pointer; }
+.dh-memo-more:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.dh-memo-more[hidden] { display: none; }
+/* 가져오기 참고(앱 안내 문장): 접힌 목록 */
+.dh-import-notes { font-size: 0.8235rem; color: var(--muted); }
+.dh-import-notes > summary { min-height: 44px; display: flex; align-items: center; gap: 8px; font-weight: 700; cursor: pointer; list-style: none; }
+.dh-import-notes > summary::-webkit-details-marker { display: none; }
+.dh-import-notes > summary::before { content: ""; flex: none; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); }
+.dh-import-notes[open] > summary::before { transform: rotate(45deg); }
+.dh-import-list { padding-left: 1.2em; display: grid; gap: 4px; }
+/* 홈 "호수 입력 필요" 칩 = 수정 폼 호수 칸으로 가는 링크(M8) */
+a.need-ho-link { text-decoration: none; cursor: pointer; }
+a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.need-ho-arrow { font-weight: 800; }
+/* 추가 폼 맨 위 한 줄(L5) */
+.form-intro { font-size: 0.8824rem; color: var(--muted); padding: 10px 12px; border-radius: var(--radius-sm); background: var(--card-2); }
+/* 요약: 맨 위 한 줄(L8)과 빈 카드 한 줄 */
+.sum-intro {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--teal-soft); color: var(--text);
+  font-size: 0.8824rem;
+}
+.sum-intro p { flex: 1 1 200px; }
+.card.sum-card-empty { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 12px 16px; }
+.card.sum-card-empty > * + * { margin-top: 0; }
+.card.sum-card-empty .card-title { font-size: 0.9412rem; }
+/* 항목 세로 여백을 조금 줄인다(등기부 17항목이 한 화면에 더 들어오게). 색 막대(::before)도 같이 */
+.item { padding-top: 10px; padding-bottom: 9px; }
+.item::before { top: 12px; bottom: 11px; }
+.group-title { margin-top: 16px; }
+.seg { margin-top: 8px; }
+/* flag·rate 항목: [있음][없음] 줄 끝의 [메모·사진 열기](도구 줄이 숨어 있을 때만) */
+.item-ctl { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.item-ctl .seg { flex: 1; margin-top: 0; }
+.item-ctl .item-more { margin-right: -6px; }
+
+/* ---------- 1.5.0 integrate: 작업 묶음 연결 ---------- */
+/* flag "있음" 아래 [등기부 섹션 열기](data.js linkTo, C11). hidden 속성으로 숨긴다 */
+.item-link { margin-top: 8px; }
+.item-link[hidden] { display: none; }
+
+/* ---- 1.5.0 검토 지적 반영 ---- */
+/* 호수를 적은 뒤의 안내 배너: 성공 메시지가 주황 경고처럼 보이지 않게 초록 톤 */
+.notice-ho.is-filled { background: var(--green-soft); border-color: var(--green-ink); }
+.notice-ho.is-filled strong { color: var(--green-ink); }
+/* 버튼 있는 토스트도 글자 부분은 터치를 통과시킨다(버튼만 받음). 토스트가 다음 섹션 머리·[양호] 위에 떠도 그 자리를 누를 수 있게 */
+.toast.show.has-action { pointer-events: none; }
+.toast.show.has-action .toast-btn { pointer-events: auto; }
+/* [다음 멈춤 신호로]·요약에서 항목으로 왔을 때: 1.5초 동안 배경을 밝힌다(터치 뒤 프로그램 초점은 테두리가 안 그려짐).
+   스크롤 여백은 그룹 소제목(갑구 (소유권) 등)까지 보이도록 1.5.0 section 블록의 76px 보다 넓게 */
+.item { scroll-margin-top: calc(var(--topbar-h) + var(--safe-top) + 108px); }
+.item.is-target { animation: item-target 1.5s ease-out both; }
+@keyframes item-target {
+  0%, 55% { background-color: var(--orange-soft); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .item.is-target { background-color: var(--orange-soft); } /* 움직임 없이 색만(JS 가 1.6초 뒤 클래스를 뗌) */
+}
+/* 멈춤 신호에 답한 자리 바로 아래 "멈춤 신호 N개 남음 · [다음 멈춤 신호로]"(updateNextStopRow) */
+.next-stop-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap;
+  margin: 6px 0 4px; padding: 6px 10px 6px 12px;
+  border-radius: var(--radius-sm); background: var(--orange-soft); color: var(--orange-ink);
+  font-size: 0.8235rem; font-weight: 700;
+}
+.next-stop-row .btn { flex: none; }
+/* 비교표: 빠른 동작이 3번째 열(등기부 결과 옆)이 되어 오른쪽 정렬을 풀고, 등기부 결과 칸과의 사이 여백을 줄여 390px 첫 화면에
+   [임장 예정]의 앞부분이 걸치게(등기부 결과 라벨 "멈춤 신호 없음 · 확인 중 8/18"이 길어 전부 들어오지는 않음 — 한 번 살짝 밀면 보임) */
+.ctable .cmp-act { text-align: left; padding-left: 6px; }
+.ctable th:nth-child(2), .ctable td:nth-child(2) { padding-right: 6px; }
+/* 홈 맨 위 "체크리스트가 바뀌었어요" 안내(dataNoticeBar) */
+.data-notice .btn { margin-top: 8px; }

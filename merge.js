@@ -45,7 +45,8 @@
   // 진행 상태 묶음. statusAt 하나로 함께 움직인다(탈락 사유는 상태와 같이 정해지므로)
   var STATUS_FIELDS = ['status', 'dropReason'];
   // 가져오기 코드가 채우는 값. 사용자가 고치지 않으므로 시각 없이 "비어 있지 않은 쪽"
-  var OTHER_FIELDS = ['articleNo', 'confirmedAt', 'importedAt', 'source'];
+  // 1.5.0: importNotes(가져오기 참고, 문자열 배열) 추가. 빈 배열은 빈 값으로, 같은 내용의 배열은 같은 값으로 본다(blank·sameVal)
+  var OTHER_FIELDS = ['articleNo', 'confirmedAt', 'importedAt', 'source', 'importNotes'];
   // 항목 상태의 값 필드(t·ft 는 시각)
   var ITEM_FIELDS = ['status', 'memo', 'answer', 'date', 'done'];
   var KEEP_MS = 180 * 24 * 60 * 60 * 1000; // 삭제 표시·지운 매물 열쇠 보관 기간(app.js TOMBSTONE_KEEP_MS 와 같음)
@@ -73,9 +74,16 @@
     }
     return t;
   }
-  function blank(v) { return v === '' || v === null || v === undefined || v === false; }
-  /** 빈 값('' null undefined false)끼리는 같다고 본다 */
-  function sameVal(a, b) { return a === b || (blank(a) && blank(b)); }
+  function blank(v) { return v === '' || v === null || v === undefined || v === false || (Array.isArray(v) && !v.length); }
+  /** 빈 값('' null undefined false 빈 배열)끼리는 같다고 본다. 1.5.0: 문자열 배열(importNotes)은 내용이 같으면 같다 */
+  function sameVal(a, b) {
+    if (a === b || (blank(a) && blank(b))) return true;
+    if (Array.isArray(a) && Array.isArray(b) && a.length === b.length) {
+      for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+      return true;
+    }
+    return false;
+  }
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
   function clone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
   function set(o, k, v) { if (v === undefined) delete o[k]; else o[k] = v; }
