@@ -1583,3 +1583,131 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 .hf-foot[hidden] { display: none; }
 .hf-foot-text { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
 .hf-foot .btn { flex: none; }
+
+/* ---------- 1.6.0 docs: 서류함(매물별 첨부 서류)·매도인 이름·저장소 업그레이드 안내 ---------- */
+/* 등기부 섹션 맨 위 "서류" 카드: [서류 올리기] + 목록(종류 칩·이름·크기·올린 날, 등기부는 열람 일시) + 보기·종류·지우기 */
+.doc-card { margin-top: 14px; padding: 12px 12px 6px; border: 1.5px solid var(--line); border-radius: var(--radius-sm); background: var(--card-2); }
+.doc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.doc-title { font-size: 0.9412rem; font-weight: 800; }
+.doc-title .count { color: var(--muted); font-weight: 600; font-size: 0.8824rem; }
+.doc-add { position: relative; flex: none; } /* 투명한 파일 입력(.file-input)이 버튼 전체를 덮는다 */
+.doc-add:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+.no-photos .doc-add { display: none; } /* IndexedDB 를 못 쓰는 환경(파일로 열기 등): 사진 버튼처럼 숨김 */
+.doc-card.is-off .doc-add { display: none; } /* 서류함을 못 쓰는 동안(다른 탭이 막음·업그레이드 실패): 안내만 */
+.doc-desc { margin-top: 6px; }
+.doc-off { margin: 10px 0 6px; }
+.doc-off[hidden], .doc-empty[hidden] { display: none; }
+.doc-empty { margin: 10px 0 6px; }
+.doc-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.doc-list:empty { display: none; }
+.doc-row { padding: 10px 0; }
+.doc-row + .doc-row { border-top: 1px solid var(--line); }
+.doc-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.doc-chip { flex: none; display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 0.7647rem; font-weight: 800; line-height: 1.5; background: var(--chip); color: var(--muted); }
+.doc-chip-registry { background: var(--orange-soft); color: var(--orange-ink); }
+.doc-chip-building { background: var(--teal-soft); color: var(--teal-ink); }
+.doc-chip-contract { background: var(--green-soft); color: var(--green-ink); }
+.doc-name { min-width: 0; font-weight: 700; overflow-wrap: anywhere; }
+.doc-meta { margin-top: 2px; font-size: 0.8235rem; color: var(--muted); }
+.doc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.doc-actions .btn { flex: none; }
+.doc-actions .doc-kind { flex: 1 1 120px; width: auto; min-width: 0; min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+
+/* 홈 화면 앱(standalone)에서 서류 보기: 사진 크게 보기(.lightbox) 모양을 쓰고, PDF 는 iframe 으로 */
+.docv .docv-body { align-items: stretch; }
+.docv-frame { flex: 1; width: 100%; min-height: 0; border: 0; border-radius: 6px; background: #fff; }
+.btn-on-dark { background: rgba(255, 255, 255, 0.14); color: #fff; border: 1.5px solid rgba(255, 255, 255, 0.45); }
+
+/* 다른 탭이 예전 버전 앱으로 사진 DB 를 열어 두어 업그레이드(서류함 추가)가 막혔을 때의 안내 띠(저장 실패 띠 아래, 붙박이 아님) */
+.db-blocked {
+  padding: 10px calc(16px + var(--safe-right)) 10px calc(16px + var(--safe-left));
+  background: var(--yellow-soft);
+  color: var(--yellow-ink);
+  font-size: 0.8824rem;
+  border-bottom: 1.5px solid var(--yellow);
+}
+.db-blocked strong { font-weight: 800; }
+
+/* ---------- 1.6.0 integrate: 등기부 PDF 미리보기·재열람 비교·기록 보기·등기부 코드 ---------- */
+/* 미리보기 대화상자(registryPreview): 묶음마다 소제목 + 줄. 상태 색은 글자색이 아니라 왼쪽 막대·배지로(대비 유지) */
+.rp > * + * { margin-top: 12px; }
+.rp-sec { padding-top: 10px; border-top: 1px solid var(--line); }
+.rp-sec:first-child { padding-top: 0; border-top: 0; }
+.rp-h { font-size: 0.8824rem; font-weight: 800; color: var(--muted); margin-bottom: 4px; }
+.rp-sec.is-stop .rp-h { color: var(--red-ink); }
+.rp-line { font-size: 0.9412rem; overflow-wrap: anywhere; }
+.rp-line + .rp-line { margin-top: 3px; }
+.rp-line.is-ok, .rp-line.is-bad, .rp-line.is-warn { padding-left: 9px; border-left: 3px solid var(--green); font-weight: 700; }
+.rp-line.is-bad { border-left-color: var(--red); color: var(--red-ink); }
+.rp-line.is-warn { border-left-color: var(--orange); font-weight: 600; }
+.rp-line.is-muted { color: var(--muted); font-size: 0.8235rem; }
+.rp-warn p { margin-top: 2px; }
+.rp-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.rp-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 6px 0; }
+.rp-row + .rp-row { border-top: 1px dashed var(--line); }
+.rp-name { min-width: 0; font-size: 0.9412rem; font-weight: 600; overflow-wrap: anywhere; }
+.rp-note { grid-column: 1 / -1; font-size: 0.7647rem; color: var(--muted); }
+.rp-ans { justify-self: end; padding: 2px 9px; border-radius: 8px; font-size: 0.8235rem; font-weight: 800; white-space: nowrap; background: var(--chip); color: var(--text); }
+.rp-ans.rp-no { background: var(--green-soft); color: var(--green-ink); }
+.rp-ans.rp-yes { background: var(--yellow-soft); color: var(--yellow-ink); }
+.rp-ans.rp-yes.is-stop { background: var(--red-soft); color: var(--red-ink); box-shadow: inset 0 0 0 1.5px var(--red); }
+.rp-ans.rp-low { background: var(--orange-soft); color: var(--orange-ink); }
+.rp-stage { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--card-2); border: 1.5px solid var(--line); }
+.rp-check { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; font-size: 0.9412rem; cursor: pointer; }
+.rp-check input { flex: none; width: 22px; height: 22px; margin: 2px 0 0; accent-color: var(--teal); }
+.rp-stage-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.rp-stage-row .select { flex: 1; min-width: 0; min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+.rp-over { list-style: none; margin: 8px 0 0; padding: 0; }
+.rp-over li + li { border-top: 1px solid var(--line); }
+.rp-over .rp-check { padding: 8px 0; }
+
+/* 상세 등기부 섹션 머리 아래 "등기부 기록 N개 · 마지막 열람 …" + [기록 보기](접혀 있어도 보임) */
+.reg-snaps { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; padding: 0 10px 10px 16px; }
+.reg-snaps-text { min-width: 0; font-size: 0.8235rem; font-weight: 700; color: var(--teal-ink); }
+.reg-snaps-btn { flex: none; }
+/* [기록 보기] 목록 */
+.rh > * + * { margin-top: 10px; }
+.rh-list { list-style: none; margin: 0; padding: 0; }
+.rh-item { padding: 10px 0; }
+.rh-item + .rh-item { border-top: 1px solid var(--line); }
+.rh-item > * + * { margin-top: 4px; }
+.rh-src { color: var(--muted); font-size: 0.8235rem; }
+.rh-sum { font-size: 0.8824rem; }
+.rh-diff { font-size: 0.8235rem; color: var(--muted); overflow-wrap: anywhere; }
+.rh-diff.is-changed { padding-left: 9px; border-left: 3px solid var(--red); color: var(--red-ink); font-weight: 700; }
+
+/* 서류 카드: 사진은 앱이 읽지 못해요 안내, 등기부 PDF [읽기] */
+.doc-photo-tip { margin: 10px 0 4px; }
+.doc-photo-tip .btn-row { margin-top: 8px; }
+
+/* 가져오기 화면의 등기부 코드 상자 */
+.imp-reg { margin: 0 0 12px; padding: 14px; border-radius: var(--radius); border: 2px solid var(--teal); background: var(--card); box-shadow: var(--shadow); }
+.imp-reg > * + * { margin-top: 8px; }
+.imp-reg-title { font-size: 1rem; font-weight: 800; overflow-wrap: anywhere; }
+.imp-reg-sum { font-size: 0.8824rem; color: var(--muted); }
+.imp-reg-pick { margin-top: 12px; }
+.imp-reg-pick .select { width: 100%; }
+
+/* ---------- 1.6.0 검토 반영: 등기부 미리보기 한 줄 결론·버튼 붙이기·재열람 체크 두 개 ---------- */
+/* 맨 위 한 줄 결론(같은 집인지 · 멈춤 신호 · 확인 필요). 색만으로 뜻을 전하지 않게 글에도 상태를 적는다 */
+.rp-sum { padding: 8px 12px; border-radius: var(--radius-sm); font-size: 0.9412rem; font-weight: 800; overflow-wrap: anywhere; background: var(--green-soft); color: var(--green-ink); }
+.rp-sum.is-warn { background: var(--orange-soft); color: var(--orange-ink); }
+.rp-sum.is-bad { background: var(--red-soft); color: var(--red-ink); }
+/* 긴 미리보기(작은 화면에서 3~4 화면)에서도 [이대로 답하기]·[서류만 저장]·[취소]가 늘 화면 아래에 보이게.
+   대화상자 아래 안쪽 여백은 버튼 묶음이 가져가(그 여백으로 본문이 비쳐 보이지 않게) 바닥에 딱 붙인다 */
+.modal.rp-dialog { padding-bottom: 0; }
+.rp-dialog .modal-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  grid-template-columns: 1fr 1fr;
+  margin-left: -18px;
+  margin-right: -18px;
+  padding: 12px 18px calc(14px + var(--safe-bottom));
+  background: var(--card);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -8px 16px -8px rgba(0, 0, 0, 0.18);
+}
+.rp-dialog .modal-actions .btn:first-child,
+.rp-dialog .modal-actions .btn:last-child:nth-child(2) { grid-column: 1 / -1; }
+.rp-stage .rp-check + .rp-check { margin-top: 4px; }

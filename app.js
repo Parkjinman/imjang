@@ -7,7 +7,7 @@
  *   2. 작은 도구(숫자·날짜·환경)
  *   3. 체크리스트 데이터 정리 (data.js 의 window.CHECKLIST)
  *   4. 저장소: 매물·체크 상태 (localStorage 'imjang.v1')
- *   5. 사진 저장소 (IndexedDB 'imjang-photos')
+ *   5. 사진·서류 저장소 (IndexedDB 'imjang-photos'. 1.6.0: DB 버전 2 에 서류함 'docs')
  *   6. 계산: 진행률·위험 신호·요약
  *   7. 공통 UI: DOM 헬퍼, 아이콘, 진행 막대, 토스트, 대화상자, 사진 크게 보기
  *   8. 화면: 홈 / 매물 폼 / 상세 / 요약 / 비교 / 용어 / 설정 / 코드·글로 매물 추가(Claude 가져오기 코드, 네이버 매물 화면 글)
@@ -16,6 +16,8 @@
  * 보안: 사용자 입력은 항상 textContent(또는 value)로만 화면에 넣는다. innerHTML 은 고정 아이콘 SVG 에만 쓴다.
  * 가져오기 코드·네이버 매물 글 해석은 import-parser.js(window.ImjangImport)가 맡는다. data.js 다음, 이 파일 전에 로드된다.
  * 두 기록 합치기(백업 [합치기]·여러 탭)는 merge.js(window.ImjangMerge)가 맡는다. import-parser.js 다음, 이 파일 전에 로드된다.
+ * 1.6.0: 등기부 PDF 해석은 registry-parser.js(window.ImjangRegistry)가 맡는다(import-parser.js 다음, merge.js 전에 로드).
+ *   PDF 글자를 꺼내는 pdf.js(vendor/pdfjs)는 처음 PDF 를 올릴 때만 불러온다(loadPdfjs). 서류·해석 결과는 이 기기 밖으로 보내지 않는다.
  */
 (function () {
   'use strict';
@@ -23,12 +25,30 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.5.1';
+  var APP_VERSION = '1.6.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
+  // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
+  var REG_SIDE_KEY = 'imjang.v1.reg';
   var SCHEMA_VERSION = 1;
   var PHOTO_DB_NAME = 'imjang-photos';
   var PHOTO_STORE = 'photos';
+  // 1.6.0: 사진 DB 버전 2 — 서류함(매물별 첨부 서류) object store 'docs' 를 더한다(사진 'photos' 는 그대로).
+  // 예전 버전 탭이 v1 로 열어 둔 채 응답하지 않으면 업그레이드가 막힌다(onblocked → 안내 띠, IDB 묶음)
+  var PHOTO_DB_VERSION = 2;
+  var DOC_STORE = 'docs';
+  var DOC_KINDS = [
+    { id: 'registry', label: '등기부' },
+    { id: 'building', label: '건축물대장' },
+    { id: 'contract', label: '계약서' },
+    { id: 'other', label: '기타' }
+  ];
+  var DOC_KIND_LABEL = {};
+  DOC_KINDS.forEach(function (k) { DOC_KIND_LABEL[k.id] = k.label; });
+  var DOC_MAX_BYTES = 30 * 1024 * 1024; // 서류 하나의 최대 크기(등기부 PDF 는 보통 1MB 안팎)
+  var DOC_NAME_MAX = 120;               // 서류 이름 글자 수
+  var SELLER_NAME_MAX = 40;             // 1.6.0: 매도인 이름 글자 수
+  var SNAPSHOTS_MAX = 12;               // 1.6.0: 매물 하나의 등기부 해석 기록 최대 개수(넘치면 오래된 것부터 버림)
   var PHOTO_MAX_EDGE = 1600;
   var PHOTO_QUALITY = 0.8;
   var SAVE_DELAY_MS = 400;
@@ -45,6 +65,13 @@
   var GONE_KEYS_MAX = 600; // 지운 매물 열쇠(goneKeys) 최대 개수
   // 두 기록 합치기(merge.js). 파일이 없으면 null 이고, 그때는 탭끼리 매물 단위로 합치고(1.2.x 방식) 백업 [합치기]만 막는다
   var MG = window.ImjangMerge || null;
+  // 1.6.0: 등기부 PDF 해석기(registry-parser.js). 파일이 없으면 null 이고, 그때는 PDF 를 서류로만 저장한다(해석 안내만 바뀜)
+  var REG = window.ImjangRegistry || null;
+  // 1.6.0: PDF 읽기 도구(pdf.js 3.11, Apache-2.0). 처음 PDF 를 올릴 때 스크립트 태그로 불러온다(loadPdfjs).
+  // 일꾼(worker) 주소는 상대 경로(배포 위치가 바뀌어도 되게). 서비스 워커가 둘 다 미리 저장해 오프라인에서도 읽는다.
+  // 한글 cMap 은 넣지 않았다: 인터넷등기소 PDF 는 글꼴을 품고 글자 대응표(ToUnicode)가 있어 cMap 없이 같은 글자가 나옴(1.6.0 확인)
+  var PDFJS_SRC = 'vendor/pdfjs/pdf.min.js';
+  var PDFJS_WORKER_SRC = 'vendor/pdfjs/pdf.worker.min.js';
   var DEVICE_NAME_MAX = 20; // 기기 이름 최대 글자 수
   var UNDO_MS = 10000;      // 매물을 지운 뒤 [되돌리기]를 누를 수 있는 시간. 사진은 이 시간이 지난 뒤에 지운다
   // 1.4.1: [되돌리기] 토스트나 홈의 되돌리기 줄에 초점·손가락이 있으면 기다린다(VoiceOver·키보드로 닿을 시간). 최대 이만큼
@@ -124,6 +151,12 @@
   }
 
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
+  /** 1.6.0 검토 반영: 낱말 + 조사. 마지막 글자에 받침이 있으면 withB, 없으면(한글이 아니어도) noB. josa('동', '이', '가') → '동이' */
+  function josa(word, withB, noB) {
+    var s = str(word);
+    var c = s.charCodeAt(s.length - 1);
+    return s + (c >= 0xAC00 && c <= 0xD7A3 && (c - 0xAC00) % 28 ? withB : noB);
+  }
   function numOrNull(v) {
     if (v === null || v === undefined || v === '') return null;
     var n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, ''));
@@ -586,6 +619,176 @@
     return { memo: moved.length ? keep.join('\n').replace(/\n{3,}/g, '\n\n').trim() : str(memo), notes: noteList(out) };
   }
 
+  // ---- 1.6.0: 등기부 해석 기록(property.registrySnapshots) ----
+  // 등기부 PDF 해석(registry-parser.js)·가져오기 코드의 registry 블록(import-parser.js)·직접 입력이 모두 같은 모양으로 남긴다.
+  // 매물 JSON 에 들어가므로 작게: 글자 수·줄 수를 자르고, 매물 하나에 SNAPSHOTS_MAX 개까지(오래된 것부터 버림).
+  //   { id, docId|null(서류함 레코드 id), source: 'pdf'|'code'|'manual', viewedAt(열람 일시 ms|null),
+  //     docType(문서 구분 글자, 예: '열람용'·'제출용' 또는 문서 제목), includesCancelled(말소사항 포함 true, 현재 유효사항만 false, 모름 null),
+  //     uniqueNo(고유번호 글자), area(표제부 전용면적 ㎡|null),
+  //     owners: [{ name, share(지분 글자), since(취득 접수일 글자) }],
+  //     live: [{ kind(종류: trust·seizure·injunction·auction·provisional·lease·mortgage·jeonse·ownership·other|''),
+  //              part: 'title'|'gap'|'eul'|'', rank(순위번호), purpose(등기목적), date(접수일 글자), text(요약) }]  지금 살아 있는 기록
+  //     history: [ 같은 모양 ]  말소된(빨간 줄) 지난 기록
+  //       (live·history 는 registry-parser 모양 { 종류: [{ section, rank, purpose, receiptDate, maxAmount, holder… }] } 도 받아 위 모양으로 바꾼다)
+  //     mortgages: [{ rank, maxAmount(채권최고액, 원), holder(근저당권자), debtor(채무자) }]  말소되지 않은 근저당(없으면 live.mortgage 에서 만듦)
+  //     answers: { 항목id: 'yes'|'no'|'done' }  flag 는 yes/no, check 는 done(applyRegistrySnapshot 이 항목 답으로 반영)
+  //     addedAt(ms), t(이 기록을 마지막으로 바꾼 시각 — 합치기에서 같은 id 는 t 가 큰 쪽),
+  //     appliedAt(ms, 반영한 적 있을 때), applied: { 항목id: { v, t } }(반영해 바꾼 답과 그 값 시각 — 다음 반영 때 "앱이 넣은 답"인지 가림) }
+  // 지운 기록은 property.registrySnapshotsRemoved { 기록id: 지운 시각 } 으로 남겨 다른 탭·기기와 합칠 때 되살아나지 않게 한다(180일)
+  var SNAP_SOURCES = { pdf: 1, code: 1, manual: 1 };
+  var SNAP_PARTS = { title: 1, gap: 1, eul: 1 };
+  var SNAP_ANSWERS = { yes: 1, no: 1, done: 1 };
+  var SNAP_ENTRY_MAX = 30;
+  var SNAP_OWNER_MAX = 20;
+  var SNAP_MORTGAGE_MAX = 20;
+  var SNAP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,59}$/;
+
+  function snapText(v, max) { return str(v).replace(/\s+/g, ' ').trim().slice(0, max); }
+  /**
+   * 시각 값 → ms(못 읽으면 null). 숫자(ms), 'YYYY-MM-DD HH:MM(:SS)', 'YYYY.MM.DD HH:MM', '2026년 10월 10일 15시 30분',
+   * 시간대가 붙은 ISO 글자(그대로 Date.parse). 시간대 없는 글자는 이 기기 시각으로 본다
+   */
+  function snapTime(v) {
+    if (typeof v === 'number') return isFinite(v) && v > 0 ? Math.round(v) : null;
+    var s = str(v).trim();
+    if (!s) return null;
+    if (/T\d{1,2}:\d{2}.*(Z|[+-]\d{2}:?\d{2})$/.test(s)) {
+      var p = Date.parse(s);
+      return isFinite(p) && p > 0 ? p : null;
+    }
+    var m = /^(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\.?(?:\s*T?\s*(\d{1,2})\s*[:시]\s*(\d{1,2})\s*분?(?:\s*:?\s*(\d{1,2})\s*초?)?)?/.exec(s);
+    if (!m) return null;
+    var d = new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    var t = d.getTime();
+    return isFinite(t) && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3] ? t : null;
+  }
+  /** 금액(원) → 정수. 숫자, 또는 '금240,000,000원' 같은 글자(숫자만 모음). 없으면 null */
+  function snapAmount(v) {
+    if (typeof v === 'number') return isFinite(v) && v >= 0 ? Math.round(v) : null;
+    var d = str(v).replace(/[^\d]/g, '');
+    if (!d || d.length > 15) return null;
+    return parseInt(d, 10);
+  }
+  function snapOwners(v) {
+    var out = [];
+    (Array.isArray(v) ? v : []).forEach(function (o) {
+      var obj = o && typeof o === 'object';
+      var name = snapText(obj ? o.name : o, 40);
+      if (name && out.length < SNAP_OWNER_MAX) out.push({ name: name, share: snapText(obj ? o.share : '', 40), since: snapText(obj ? o.since : '', 20) });
+    });
+    return out;
+  }
+  // 기록 줄의 종류(registry-parser.js 의 분류와 같은 열쇠)
+  var SNAP_KINDS = { ownership: 1, trust: 1, seizure: 1, injunction: 1, auction: 1, provisional: 1, lease: 1, mortgage: 1, jeonse: 1, other: 1 };
+  function snapEntry(e, kind) {
+    if (!e || typeof e !== 'object') return { kind: SNAP_KINDS[kind] ? kind : '', part: '', rank: '', purpose: '', date: '', text: snapText(e, 160) };
+    var k = SNAP_KINDS[e.kind] ? e.kind : (SNAP_KINDS[kind] ? kind : '');
+    var part = e.part || e.section; // registry-parser 는 section('gap'|'eul')
+    var text = e.text;
+    if (!text) { // registry-parser 요약 줄(brief)에는 text 가 없다: 권리자·금액으로 짧게
+      var amt = snapAmount(e.maxAmount || e.deposit || e.amount);
+      text = [str(e.holder), amt ? (e.maxAmount ? '채권최고액 ' : e.deposit ? '보증금 ' : '금액 ') + formatManwon(amt / 10000) : ''].filter(Boolean).join(' · ');
+    }
+    return { kind: k, part: SNAP_PARTS[part] ? part : '', rank: snapText(e.rank, 12), purpose: snapText(e.purpose, 40), date: snapText(e.date || e.receiptDate, 20), text: snapText(text, 160) };
+  }
+  /** 기록 줄 목록. 배열, 또는 registry-parser 모양 { 종류: [줄…] } 도 받는다 */
+  function snapEntries(v) {
+    var src = [];
+    if (Array.isArray(v)) v.forEach(function (e) { src.push([e, '']); });
+    else if (v && typeof v === 'object') {
+      Object.keys(v).forEach(function (k) { if (!BAD_KEYS[k] && Array.isArray(v[k])) v[k].forEach(function (e) { src.push([e, k]); }); });
+    }
+    var out = [];
+    src.forEach(function (x) {
+      if (out.length >= SNAP_ENTRY_MAX) return;
+      var o = snapEntry(x[0], x[1]);
+      if (o.purpose || o.text) out.push(o);
+    });
+    return out;
+  }
+  function snapMortgages(v, live) {
+    var out = [];
+    // 따로 주지 않았으면 registry-parser 모양의 살아 있는 근저당 줄(live.mortgage)에서 만든다
+    if (!Array.isArray(v) && live && typeof live === 'object' && !Array.isArray(live) && Array.isArray(live.mortgage)) v = live.mortgage;
+    (Array.isArray(v) ? v : []).forEach(function (m) {
+      if (!m || typeof m !== 'object' || out.length >= SNAP_MORTGAGE_MAX) return;
+      var o = { rank: snapText(m.rank, 12), maxAmount: snapAmount(m.maxAmount), holder: snapText(m.holder, 60), debtor: snapText(m.debtor, 40) };
+      if (o.rank || o.maxAmount !== null || o.holder) out.push(o);
+    });
+    return out;
+  }
+  /** 답 정리: { 항목id: 'yes'|'no'|'done' }. true → 'done', { value } 모양도 받음. 모르는 값은 버림 */
+  function snapAnswers(v) {
+    var out = {};
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+    Object.keys(v).forEach(function (k) {
+      if (BAD_KEYS[k] || !SNAP_ID_RE.test(k)) return;
+      var a = v[k];
+      if (a && typeof a === 'object') a = a.value;
+      if (a === true) a = 'done';
+      a = str(a).trim().toLowerCase();
+      if (SNAP_ANSWERS[a]) out[k] = a;
+    });
+    return out;
+  }
+  function snapApplied(v) {
+    var out = {};
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+    Object.keys(v).forEach(function (k) {
+      var a = v[k];
+      if (BAD_KEYS[k] || !SNAP_ID_RE.test(k) || !a || typeof a !== 'object' || !SNAP_ANSWERS[a.v]) return;
+      out[k] = { v: a.v, t: numOrNull(a.t) > 0 ? numOrNull(a.t) : 0 };
+    });
+    return out;
+  }
+  /** 등기부 해석 기록 하나 정리(위 모양으로). 객체가 아니면 null. id 가 없거나 이상하면 새로 만든다 */
+  function normalizeSnapshot(s) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return null;
+    var id = str(s.id).trim();
+    if (!SNAP_ID_RE.test(id) || BAD_KEYS[id]) id = uid();
+    var addedAt = snapTime(s.addedAt) || Date.now();
+    var area = numOrNull(s.area);
+    var o = {
+      id: id,
+      docId: SNAP_ID_RE.test(str(s.docId).trim()) ? str(s.docId).trim() : null,
+      source: SNAP_SOURCES[s.source] ? s.source : 'manual',
+      viewedAt: snapTime(s.viewedAt),
+      docType: snapText(s.docType, 80),
+      includesCancelled: typeof s.includesCancelled === 'boolean' ? s.includesCancelled : null,
+      uniqueNo: snapText(s.uniqueNo, 40),
+      area: area > 0 && area < 100000 ? Math.round(area * 10000) / 10000 : null,
+      owners: snapOwners(s.owners),
+      live: snapEntries(s.live),
+      history: snapEntries(s.history),
+      mortgages: snapMortgages(s.mortgages, s.live),
+      answers: snapAnswers(s.answers),
+      addedAt: addedAt,
+      t: Math.max(snapTime(s.t) || 0, addedAt)
+    };
+    // 1.6.0 검토 반영: 소유자 계산이 불확실(registry-parser ownersUncertain) — 매도인 비교로 "없음"을 넣지 않는다. 참일 때만 둔다
+    if (s.ownersUncertain === true) o.ownersUncertain = true;
+    var at = snapTime(s.appliedAt);
+    if (at) { o.appliedAt = at; o.applied = snapApplied(s.applied); }
+    return o;
+  }
+  /**
+   * 매물의 기록 목록 정리: 같은 id 는 t 가 큰 것 하나, 지운 기록(removed)은 빼고, 만든 순서로 최근 SNAPSHOTS_MAX 개.
+   * 1.6.0 검토 반영: 열람 일시·고유번호·서류 종류가 같은 겹친 기록(두 기기에서 같은 PDF)은 하나로(merge.js dedupeSnapshots)
+   */
+  function normalizeSnapshots(list, removed) {
+    var byId = {};
+    (Array.isArray(list) ? list : []).forEach(function (raw) {
+      var s = normalizeSnapshot(raw);
+      if (!s) return;
+      if (removed && removed[s.id] && removed[s.id] >= s.t) return;
+      if (!hasOwn(byId, s.id) || s.t > byId[s.id].t) byId[s.id] = s;
+    });
+    var out = Object.keys(byId).map(function (k) { return byId[k]; });
+    if (MG && MG.dedupeSnapshots) out = MG.dedupeSnapshots(out);
+    out.sort(function (a, b) { return (a.addedAt - b.addedAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
+    return out.length > SNAPSHOTS_MAX ? out.slice(out.length - SNAPSHOTS_MAX) : out;
+  }
+
   /** legacy(1.5.0 검토 반영): 데이터 2026-10c 보다 오래된 저장본에서 온 매물이면 바뀐 항목을 한 번 옮긴다(normalizeItems·migrateInjunction) */
   function normalizeProperty(p, legacy) {
     var now = Date.now();
@@ -613,6 +816,10 @@
       importedAt: numOrNull(p.importedAt), // 가져오기 코드로 만든 시각(직접 입력이면 null)
       source: str(p.source),               // 'claude-code': 가져오기 코드로 만든 매물
       importNotes: noteList(p.importNotes), // 1.5.0: 가져오기 참고(앱 안내 문장). 상세에서 접힌 목록, 공유 글에는 안 넣음
+      // 1.6.0: 매도인(파는 사람) 이름. 등기부 소유자와 비교(applyRegistrySnapshot → reg-owner-diff). 합치기는 fieldsAt 대상
+      sellerName: str(p.sellerName).replace(/\s+/g, ' ').trim().slice(0, SELLER_NAME_MAX),
+      // 1.6.0: 등기부 해석 기록(작은 JSON). 서류 파일(Blob)은 매물에 넣지 않고 IndexedDB 서류함(Docs)에 둔다
+      registrySnapshots: [],
       items: normalizeItems(p.items, legacy),
       sectionMemos: normalizeMemos(p.sectionMemos),
       // 1.3.0 변경 시각(두 기기 합치기용). 검사와 빈 곳 채우기(예전 기록은 legacyAt)는 merge.js fillTimes
@@ -628,6 +835,10 @@
       np.importNotes = sp.notes;
     }
     if (!np.importNotes.length) delete np.importNotes; // 비면 키를 두지 않는다(합치기에서 "다른 정보"로 세지 않게)
+    // 1.6.0: 지운 등기부 해석 기록 표시(180일)와 기록 목록. 표시가 비면 키를 두지 않는다
+    var snapGone = normalizeDeleted(p.registrySnapshotsRemoved);
+    np.registrySnapshots = normalizeSnapshots(p.registrySnapshots, snapGone);
+    if (Object.keys(snapGone).length) np.registrySnapshotsRemoved = snapGone;
     if (legacy && migrateInjunction(np.items) && migrationStats) migrationStats.inj++; // 1.5.0 검토 반영
     if (MG) return MG.fillTimes(np);
     // merge.js 를 못 불러왔을 때: 저장된 시각은 검사만 하고 그대로 둔다(버리면 다음 합치기에서 예전 값이 새 값을 이길 수 있음).
@@ -726,6 +937,8 @@
     }
     var s = normalizeState(obj);
     knownRev = s.rev;
+    // 1.6.0 검토 반영: 예전(1.5.x) 탭이 1.6.0 필드를 빼고 저장해 두었으면 따로 둔 키에서 되살리고 다시 저장한다
+    if (restoreFromSide(s, obj)) migratedOnLoad = true;
     // 1.5.0 검토 반영: 옛 저장본(1.4.x)을 처음 읽었으면 옮긴 수를 홈 안내(ui.dataNotice)에 남기고, init 이 dataVersion 을 적어 다시 저장한다
     var m = migrationStats;
     if (m && m.legacy) {
@@ -751,7 +964,68 @@
 
   // 1.2.0 에서 늘어난 매물 필드. 업데이트 전에 열어 둔 1.1.0 탭(서비스 워커 캐시)은 이 키를 모른 채 저장한다
   var FIELDS_120 = ['sourceUrl', 'floor', 'direction', 'supplyArea', 'articleNo', 'confirmedAt', 'importedAt', 'source'];
+  // 1.6.0 에서 늘어난 매물 필드(매도인 이름, 등기부 해석 기록). 1.6.0 은 늘 이 키를 적으므로, 키가 없으면 예전(1.5.x) 탭이 쓴 매물이다.
+  // 합칠 때는 내 값이 이기지만(merge.js LATE_FIELDS·기록 합집합) 저장본에서는 빠진 채라, 다시 저장해 되돌린다(needResave)
+  var FIELDS_160 = ['sellerName', 'registrySnapshots'];
   var needResave = false; // 합치면서 예전 탭이 지운 필드를 되살렸으면 다시 저장해 저장본에도 되돌려 놓는다
+  /** 빈 값('' null undefined, 빈 배열) */
+  function blankVal(v) { return v === '' || v === null || v === undefined || (Array.isArray(v) && !v.length); }
+
+  /**
+   * 1.6.0 검토 반영: 1.6.0 필드 사본(REG_SIDE_KEY)을 쓴다 — { v: 1, props: { 매물id: { sellerName, sellerNameAt, registrySnapshots, registrySnapshotsRemoved } } }.
+   * 1.6.0 탭을 닫은 뒤 아직 새로고침하지 않은 1.5.x 탭이 저장하면 이 필드가 키째 빠지고, 합칠 1.6.0 탭이 없어 영구히 사라졌다.
+   * 1.5.x 는 이 키를 모르므로 남아 있다가 다음 1.6.0 시작(loadState → restoreFromSide) 때 되살린다. 본 저장이 된 뒤에만 부르고, 실패해도 조용히 넘어간다
+   */
+  function writeSide(s) {
+    try {
+      var props = {};
+      (s.properties || []).forEach(function (p) {
+        var o = {};
+        if (p.sellerName) {
+          o.sellerName = p.sellerName;
+          if (p.fieldsAt && numOrNull(p.fieldsAt.sellerName) > 0) o.sellerNameAt = p.fieldsAt.sellerName;
+        }
+        if (p.registrySnapshots && p.registrySnapshots.length) o.registrySnapshots = p.registrySnapshots;
+        if (p.registrySnapshotsRemoved && Object.keys(p.registrySnapshotsRemoved).length) o.registrySnapshotsRemoved = p.registrySnapshotsRemoved;
+        if (Object.keys(o).length) props[p.id] = o;
+      });
+      if (Object.keys(props).length) localStorage.setItem(REG_SIDE_KEY, JSON.stringify({ v: 1, props: props }));
+      else localStorage.removeItem(REG_SIDE_KEY);
+    } catch (e) { /* 저장 공간 부족 등: 본 저장은 됐다. 다음 저장 때 다시 */ }
+  }
+  /**
+   * 저장본 원문(raw)에서 1.6.0 필드 키가 아예 없는 매물(예전 탭이 씀)에 사본의 값을 되살린다. 되살렸으면 true(→ 다시 저장).
+   * 키가 있으면(1.6.0 이 쓴 저장본) 빈 값이어도 그대로 둔다(사용자가 지운 것)
+   */
+  function restoreFromSide(s, raw) {
+    var side = null;
+    try { side = parseStored(localStorage.getItem(REG_SIDE_KEY)); } catch (e) { return false; }
+    side = side && side.props && typeof side.props === 'object' && !Array.isArray(side.props) ? side.props : null;
+    if (!side) return false;
+    var rawById = {};
+    (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
+      if (p && typeof p === 'object' && p.id && !BAD_KEYS[p.id]) rawById[str(p.id)] = p;
+    });
+    var changed = false;
+    s.properties.forEach(function (p) {
+      var r = hasOwn(rawById, p.id) ? rawById[p.id] : null;
+      var d = hasOwn(side, p.id) && !BAD_KEYS[p.id] ? side[p.id] : null;
+      if (!r || !d || typeof d !== 'object') return;
+      if (!hasOwn(r, 'sellerName') && !p.sellerName && d.sellerName) {
+        p.sellerName = str(d.sellerName).replace(/\s+/g, ' ').trim().slice(0, SELLER_NAME_MAX);
+        if (!p.fieldsAt || typeof p.fieldsAt !== 'object') p.fieldsAt = {};
+        if (numOrNull(d.sellerNameAt) > 0 && !(numOrNull(p.fieldsAt.sellerName) > 0)) p.fieldsAt.sellerName = numOrNull(d.sellerNameAt);
+        changed = true;
+      }
+      if (!hasOwn(r, 'registrySnapshots') && !(p.registrySnapshots || []).length && Array.isArray(d.registrySnapshots) && d.registrySnapshots.length) {
+        var gone = normalizeDeleted(d.registrySnapshotsRemoved);
+        p.registrySnapshots = normalizeSnapshots(d.registrySnapshots, gone);
+        if (Object.keys(gone).length) p.registrySnapshotsRemoved = gone;
+        changed = true;
+      }
+    });
+    return changed;
+  }
 
   /**
    * 저장본 원문에서 1.3.0 시각(fieldsAt)이 아예 없는 매물 { id: true }.
@@ -767,12 +1041,12 @@
     return out;
   }
 
-  /** 저장본 원문에서 매물별로 아예 없는 1.2.0 필드 키 { id: [키…] } (빈 값과 구분: 키가 없을 때만) */
+  /** 저장본 원문에서 매물별로 아예 없는 1.2.0·1.6.0 필드 키 { id: [키…] } (빈 값과 구분: 키가 없을 때만) */
   function missingNewFields(raw) {
     var out = {};
     (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
       if (!p || typeof p !== 'object' || !p.id || BAD_KEYS[p.id]) return;
-      var miss = FIELDS_120.filter(function (k) { return !hasOwn(p, k); });
+      var miss = FIELDS_120.concat(FIELDS_160).filter(function (k) { return !hasOwn(p, k); });
       if (miss.length) out[str(p.id)] = miss;
     });
     return out;
@@ -831,13 +1105,16 @@
         var r = MG.mergeProperty(mine, p);
         Object.assign(mine, r.prop);
         if (r.changed) changed = true;
+        // 1.6.0: 예전(1.5.x) 탭이 새 필드를 모른 채 저장했으면 합친 결과(내 값)를 저장본에도 되돌린다
+        var miss = missing && hasOwn(missing, p.id) ? missing[p.id] : [];
+        if (FIELDS_160.some(function (k) { return miss.indexOf(k) >= 0 && !blankVal(mine[k]); })) needResave = true;
         return;
       }
       // 예전 버전 탭이 쓴 매물(또는 merge.js 를 못 불러옴): 매물 단위로 더 나중 것
       if ((p.updatedAt || 0) > (mine.updatedAt || 0)) {
         var keep = {};
         (missing && hasOwn(missing, p.id) ? missing[p.id] : []).forEach(function (k) {
-          if (mine[k] !== '' && mine[k] !== null && mine[k] !== undefined) keep[k] = mine[k];
+          if (!blankVal(mine[k])) keep[k] = mine[k];
         });
         Object.assign(mine, p, keep);
         if (Object.keys(keep).length) needResave = true;
@@ -883,6 +1160,7 @@
       state.rev = uid();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       knownRev = state.rev;
+      writeSide(state); // 1.6.0 검토 반영: 1.6.0 필드 사본(예전 탭이 지워도 되살리게)
       dirty = false;
       lastSavedAt = Date.now();
       if (saveFailed) { saveFailed = false; showSaveError(null); }
@@ -908,6 +1186,7 @@
       candidate.rev = uid();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(candidate));
       knownRev = candidate.rev;
+      writeSide(candidate);
       return true;
     } catch (e) {
       // 1.4.5: 실패 표시를 남겨야 다음 성공 저장(saveNow)이 빨간 띠를 지운다(전에는 새로고침할 때까지 남았음)
@@ -1019,16 +1298,297 @@
     touch(prop, next.t);
   }
 
+  // ---- 1.6.0: 등기부 해석 기록 다루기(통합 단계의 해석 화면·가져오기가 쓴다) ----
+  /** 매물의 등기부 해석 기록(사본 아님), 최근 열람(없으면 만든 때) 순 */
+  function registrySnapshotsOf(prop) {
+    return (prop.registrySnapshots || []).slice().sort(function (a, b) {
+      return ((b.viewedAt || b.addedAt) - (a.viewedAt || a.addedAt)) || (b.addedAt - a.addedAt);
+    });
+  }
+  function findSnapshot(prop, id) {
+    var list = prop.registrySnapshots || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  /** 서류함 레코드(docId)를 해석한 가장 최근 기록. 없으면 null */
+  function snapshotForDoc(prop, docId) {
+    var hit = null;
+    (prop.registrySnapshots || []).forEach(function (s) { if (s.docId === docId && (!hit || s.addedAt > hit.addedAt)) hit = s; });
+    return hit;
+  }
+  /**
+   * 기록을 매물에 넣는다(정리해서). 같은 id 가 있으면 바꾼다(t 를 올림). 지운 기록 표시가 있던 id 면 표시를 지운다.
+   * 결과: 넣은 기록(매물 안의 객체). 정리할 수 없는 값이면 null
+   */
+  function addRegistrySnapshot(prop, raw) {
+    var s = normalizeSnapshot(raw);
+    if (!s) return null;
+    var now = Date.now();
+    var old = findSnapshot(prop, s.id);
+    var gone = prop.registrySnapshotsRemoved && prop.registrySnapshotsRemoved[s.id];
+    s.t = stampAfter(Math.max(now, s.t), old && old.t, gone, prop.legacyAt);
+    if (!Array.isArray(prop.registrySnapshots)) prop.registrySnapshots = [];
+    if (old) prop.registrySnapshots.splice(prop.registrySnapshots.indexOf(old), 1, s);
+    else prop.registrySnapshots.push(s);
+    if (gone) {
+      delete prop.registrySnapshotsRemoved[s.id];
+      if (!Object.keys(prop.registrySnapshotsRemoved).length) delete prop.registrySnapshotsRemoved;
+    }
+    prop.registrySnapshots = normalizeSnapshots(prop.registrySnapshots);
+    touch(prop, s.t);
+    return findSnapshot(prop, s.id); // 넘쳐서 버려졌으면 null(가장 오래된 것이 아닌 한 남음)
+  }
+  /** 기록을 지운다. 다른 탭·기기와 합칠 때 되살아나지 않게 지운 시각을 남긴다(registrySnapshotsRemoved). 지웠으면 true */
+  function removeRegistrySnapshot(prop, id) {
+    var s = findSnapshot(prop, id);
+    if (!s || BAD_KEYS[id]) return false;
+    var t = stampAfter(Date.now(), s.t);
+    prop.registrySnapshots = prop.registrySnapshots.filter(function (x) { return x !== s; });
+    if (!prop.registrySnapshotsRemoved) prop.registrySnapshotsRemoved = {};
+    prop.registrySnapshotsRemoved[id] = t;
+    touch(prop, t);
+    return true;
+  }
+
+  /** 이름 비교용 열쇠: NFC, 소문자, 공백 제거. dropInner 면 괄호 안 글자까지 뺌("홍길동(洪吉童)" → "홍길동") */
+  function personKey(s, dropInner) {
+    s = str(s);
+    if (s.normalize) s = s.normalize('NFC');
+    if (dropInner) s = s.replace(/\([^)]*\)|（[^）]*）|\[[^\]]*\]/g, '');
+    return s.replace(/[\s()（）[\]]/g, '').toLowerCase();
+  }
+  /** 두 이름이 같은 사람인지(공백·괄호 무시. 괄호 안을 빼고 같거나, 괄호 기호만 빼고 같으면) */
+  function samePerson(a, b) {
+    var a1 = personKey(a, true);
+    var a2 = personKey(a, false);
+    return !!((a1 && a1 === personKey(b, true)) || (a2 && a2 === personKey(b, false)));
+  }
+  /** 매도인 이름 칸을 사람별로 나눈다(공동명의라 "홍길동, 김철수"처럼 여러 명을 적었을 때) */
+  function sellerNames(v) {
+    return str(v).split(/[,，、·\/&＆+＋]|\s및\s/).map(function (x) { return x.trim(); }).filter(Boolean);
+  }
+
+  // 근저당권자가 금융회사·법인인지(메모에 이름을 적어도 되는지). 아니면 "개인 근저당권자"로만 적는다
+  var LENDER_RE = /은행|금고|조합|캐피탈|보험|카드|저축|신협|농협|수협|새마을|공사|공단|기금|증권|투자|대부|금융|신탁|주식회사|유한회사|\(주\)|㈜/;
+  // 항목 메모 안의 "앱이 적은 묶음"(등기부 해석 요약). 이 머리말 줄부터 "· "로 시작하는 줄까지를 통째로 바꾼다(사용자가 쓴 글은 그대로)
+  var SNAP_MEMO_HEAD = '[등기부 해석';
+  function snapMemoBlock(memo, lines) {
+    var src = str(memo).split('\n');
+    var at = -1;
+    for (var i = 0; i < src.length; i++) if (src[i].indexOf(SNAP_MEMO_HEAD) === 0) { at = i; break; }
+    if (at >= 0) {
+      var end = at + 1;
+      while (end < src.length && src[end].indexOf('· ') === 0) end++;
+      src.splice.apply(src, [at, end - at].concat(lines));
+    } else if (lines.length) {
+      while (src.length && !src[src.length - 1].trim()) src.pop();
+      src = src.concat(src.length ? [''] : [], lines);
+    }
+    return src.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  /** 항목 값의 시각(앱이 넣은 답인지 가릴 때): ft[값] → t */
+  function itemValueTime(st, field) { return (st.ft && st.ft[field]) || st.t || 0; }
+
+  /**
+   * 1.6.0: 등기부 해석 기록(snapshot)을 등기부 항목 답으로 반영한다(setItemState 경유 → 시각·합치기 규칙 그대로).
+   * snapshot: 위 모양(registry-parser 결과·가져오기 코드 registry 블록을 같은 모양으로 넘김). 매물에 없는 기록이면 넣는다(dryRun 이 아니면).
+   * opts: { overwrite: true | { 항목id: true }(사용자가 이미 다르게 답한 항목도 바꿈), dryRun(바꾸지 않고 결과만), noRefresh(화면 다시 그리지 않음),
+   *         titleMismatch(1.6.0 통합: '동·호' 같은 글. 등기부의 동·호가 매물과 다르면 reg-title 을 답하지 않고 메모로 알림) }
+   * 규칙:
+   *  - snapshot.answers 의 flag(yes/no)·check(done) 답. 사용자가 이미 다르게 답한 flag 는 overwrite 가 아니면 건너뛰고 skipped 로 돌려준다.
+   *    앞서 이 함수가 넣은 답이고 그 뒤 손대지 않았으면(기록의 applied 와 값·시각이 같음) 사용자 답으로 치지 않고 새 기록으로 바꾼다.
+   *    1.6.0 검토 반영: 단 그 답을 넣은 기록이 이 기록보다 열람 일시가 나중이면(더 새 등기부) 사용자 답처럼 skipped 로 돌려 묻는다
+   *  - reg-view·reg-date 는 done(열람했고 서류를 남김). reg-date 메모에 열람 일시
+   *  - reg-title: 표제부 전용면적이 매물 전용면적과 0.05㎡ 안이면 done. 다르거나 비교할 수 없으면 답하지 않고 메모·결과로 알림
+   *  - 매도인 이름(sellerName)이 있고 소유자를 읽었으면 reg-owner-diff 답(공백·괄호 무시 비교. 여러 명을 적었으면 모두 소유자여야 "없음").
+   *    1.6.0 검토 반영: 기록의 ownersUncertain(소유자 계산 불확실)이면 "없음"은 넣지 않고(메모로 알림) reg-joint done 도 넣지 않는다
+   *  - 소유자를 읽었으면 reg-joint done + 메모에 소유자 수(공동명의 안내). 이름은 메모에 적지 않는다(공유 글에 실리므로)
+   *  - 근저당이 있으면 reg-mortgage 메모에 근저당 요약(답이 없으면 "있음")
+   *  - 메모는 사용자가 쓴 글을 지우지 않고 "[등기부 해석 …]" 묶음만 넣거나 바꾼다
+   * 결과: { ok, snapshotId, dryRun, applied:[{ id, value, prev }], skipped:[{ id, value, current }], same:[id], ignored:[id],
+   *         memos:[id], title: { match: true|false|null, snapArea, propArea, diff }, owner: { match: true|false|null, owners, sellers }, notes:[문장] }
+   */
+  function applyRegistrySnapshot(prop, snapshot, opts) {
+    opts = opts || {};
+    var dry = !!opts.dryRun;
+    var res = {
+      ok: false, snapshotId: null, dryRun: dry, applied: [], skipped: [], same: [], ignored: [], memos: [],
+      title: { match: null, snapArea: null, propArea: null, diff: null }, owner: { match: null, owners: 0, sellers: 0 }, notes: []
+    };
+    if (!prop || !snapshot) return res;
+    var snap = normalizeSnapshot(snapshot);
+    if (!snap) return res;
+    var stored = findSnapshot(prop, snap.id);
+    if (!dry && !stored) stored = addRegistrySnapshot(prop, snap);
+    var src = stored || snap;
+    res.ok = true;
+    res.snapshotId = src.id;
+    var now = Date.now();
+    var viewed = regViewedText(src.viewedAt, src.docType); // 1.6.0 통합: 제출용은 발행일만 있어 "2026.10.10 발행"
+    var head = SNAP_MEMO_HEAD + ' · ' + viewed + ']';
+
+    // 1) 넣을 답: 기록의 answers + 앱이 셈한 것
+    var want = {};
+    Object.keys(src.answers).forEach(function (k) { want[k] = src.answers[k]; });
+    var memoOf = {}; // 항목id → 메모 묶음 줄(머리말 포함). 빈 배열이면 예전 묶음을 지움
+    want['reg-view'] = 'done';
+    want['reg-date'] = 'done';
+    var kindLine = [src.docType, src.includesCancelled === true && src.docType.indexOf('말소') < 0 ? '말소사항 포함'
+      : src.includesCancelled === false ? '현재 유효사항만(지난 기록은 안 보임)' : ''].filter(Boolean).join(' · ');
+    memoOf['reg-date'] = [head].concat(kindLine ? ['· ' + kindLine] : []);
+    // 표제부 전용면적 ↔ 매물 전용면적
+    var pa = numOrNull(prop.area);
+    res.title.snapArea = src.area;
+    res.title.propArea = pa;
+    delete want['reg-title']; // 면적으로만 정한다
+    if (src.area && pa) {
+      var diff = Math.round(Math.abs(src.area - pa) * 10000) / 10000;
+      res.title.diff = diff;
+      res.title.match = diff <= 0.05;
+      if (res.title.match) {
+        want['reg-title'] = 'done';
+        memoOf['reg-title'] = [head, '· 표제부 전용면적 ' + src.area + '㎡ = 매물 정보와 같아요'];
+      } else {
+        memoOf['reg-title'] = [head, '· 표제부 전용면적 ' + src.area + '㎡ ≠ 매물 정보 ' + pa + '㎡ — 다른 호수의 서류인지 확인하세요'];
+        res.notes.push('표제부 전용면적(' + src.area + '㎡)이 매물 정보(' + pa + '㎡)와 달라요. 다른 호수의 등기부인지 확인하세요.');
+      }
+    } else if (src.area) {
+      memoOf['reg-title'] = [head, '· 표제부 전용면적 ' + src.area + '㎡ (매물 정보에 전용면적이 없어 비교하지 못했어요)'];
+      res.notes.push('매물 정보에 전용면적이 없어 표제부와 비교하지 못했어요.');
+    }
+    // 1.6.0 통합: 등기부의 동·호가 매물과 다르면(registryUnitCheck) 면적이 같아도 표제부 일치로 답하지 않는다
+    if (opts.titleMismatch) {
+      delete want['reg-title'];
+      res.title.match = false;
+      memoOf['reg-title'] = [head, '· 등기부의 ' + josa(opts.titleMismatch, '이', '가') + ' 매물 정보와 달라요 — 다른 집 서류인지 확인하세요'];
+      res.notes.push('등기부의 ' + josa(opts.titleMismatch, '이', '가') + ' 매물 정보와 달라요.');
+    }
+    // 소유자 ↔ 매도인 이름
+    var owners = src.owners;
+    var sellers = sellerNames(prop.sellerName);
+    // 1.6.0 검토 반영: 소유자 계산이 불확실하면(지분 계산·이름을 못 읽음·모르는 소유권 말소) 공동명의 확인 체크와 매도인 비교 "없음"을 넣지 않는다
+    var ownersUnsure = !!src.ownersUncertain;
+    res.owner.owners = owners.length;
+    res.owner.sellers = sellers.length;
+    if (owners.length && !ownersUnsure) {
+      if (!want['reg-joint']) want['reg-joint'] = 'done';
+      memoOf['reg-joint'] = [head, owners.length > 1
+        ? '· 소유자 ' + owners.length + '명(공동명의) — 팔려면 소유자 모두가 동의해야 해요'
+        : '· 소유자 1명'];
+    } else if (owners.length) {
+      delete want['reg-joint'];
+      delete want['reg-period'];
+      memoOf['reg-joint'] = [head, '· 소유자 ' + owners.length + '명으로 읽었지만 소유자 계산이 확실하지 않아요 — 원본 갑구를 직접 보세요'];
+    }
+    if (owners.length && sellers.length) {
+      var allIn = sellers.every(function (n) { return owners.some(function (o) { return samePerson(o.name, n); }); });
+      if (allIn && ownersUnsure) {
+        delete want['reg-owner-diff'];
+        memoOf['reg-owner-diff'] = [head, '· 매도인 이름이 등기부 소유자와 같아 보이지만 소유자 계산이 확실하지 않아 답하지 않았어요 — 원본 갑구를 직접 보세요'];
+        res.notes.push('소유자 계산이 확실하지 않아 "소유자 ≠ 매도인"은 답하지 않았어요.');
+      } else {
+        res.owner.match = allIn;
+        want['reg-owner-diff'] = allIn ? 'no' : 'yes';
+        memoOf['reg-owner-diff'] = [head, allIn
+          ? '· 매도인 이름이 등기부 소유자와 같아요(앱이 비교, 공백·괄호 무시)'
+          : '· 매도인 이름과 같은 소유자가 등기부에 없어요(앱이 비교, 공백·괄호 무시) — 이유가 풀리기 전에는 진행하지 마세요'];
+        if (!allIn) res.notes.push('매도인 이름이 등기부 소유자와 달라요.');
+      }
+    } else if (owners.length) {
+      res.notes.push('매물 정보에 매도인 이름을 적으면 등기부 소유자와 비교해 드려요.');
+    }
+    // 근저당 요약
+    var mg = src.mortgages;
+    if (mg.length) {
+      if (!want['reg-mortgage']) want['reg-mortgage'] = 'yes';
+      var sum = 0;
+      var known = 0;
+      mg.forEach(function (m) { if (m.maxAmount !== null) { sum += m.maxAmount; known++; } });
+      var lines = [head, '· 말소되지 않은 근저당 ' + mg.length + '건' + (known ? ' · 채권최고액 합계 ' + formatManwon(sum / 10000) + (known < mg.length ? '(금액을 읽은 ' + known + '건)' : '') : '')];
+      // 메모는 공유 글에 실리므로 사람 이름은 적지 않는다: 근저당권자는 금융회사 이름만(사람이면 "개인"),
+      // 채무자는 소유자와 같은지만(소유자가 아닌 사람의 빚이면 따로 알림)
+      mg.forEach(function (m) {
+        var debtor = !m.debtor ? '' : owners.some(function (o) { return samePerson(o.name, m.debtor); }) ? '채무자 = 소유자' : '채무자는 소유자가 아님';
+        lines.push('· ' + [m.rank ? '을구 ' + m.rank + '번' : '', m.maxAmount !== null ? '채권최고액 ' + formatManwon(m.maxAmount / 10000) : '',
+          m.holder ? (LENDER_RE.test(m.holder) ? m.holder : '개인 근저당권자') : '', debtor].filter(Boolean).join(' · '));
+      });
+      memoOf['reg-mortgage'] = lines;
+    } else if (want['reg-mortgage'] === 'no') {
+      memoOf['reg-mortgage'] = []; // 예전 기록이 남긴 근저당 요약을 지운다
+    }
+
+    // 2) 항목 답 반영
+    var applied = {};
+    Object.keys(want).forEach(function (id) {
+      var it = CL.itemById[id];
+      var v = want[id];
+      if (!it || !((it.type === 'flag' && (v === 'yes' || v === 'no')) || (it.type === 'check' && v === 'done'))) { res.ignored.push(id); return; }
+      var field = it.type === 'flag' ? 'status' : 'done';
+      var cur = getItemState(prop, id);
+      var curV = it.type === 'flag' ? (cur.status === 'yes' || cur.status === 'no' ? cur.status : '') : (cur.done ? 'done' : '');
+      if (curV === v) { res.same.push(id); return; }
+      if (curV) {
+        // 앞서 이 함수가 넣고 그 뒤 손대지 않은 답이면 사용자 답이 아니다.
+        // 1.6.0 검토 반영: 단, 이 기록보다 열람 일시가 나중인(더 새) 등기부가 넣은 답은 사용자 답처럼 묻는다
+        // (옛 서류를 다시 읽거나 나중에 올려 새 등기부의 "있음"이 말없이 "없음"으로 돌아가지 않게)
+        var inV = src.viewedAt || 0;
+        var mine = (prop.registrySnapshots || []).some(function (s) {
+          var a = s.applied && s.applied[id];
+          if (!a || a.v !== curV || a.t !== itemValueTime(cur, field)) return false;
+          return s.id === src.id || !inV || !s.viewedAt || s.viewedAt <= inV;
+        });
+        var force = opts.overwrite === true || (opts.overwrite && typeof opts.overwrite === 'object' && opts.overwrite[id] === true);
+        if (!mine && !force) { res.skipped.push({ id: id, value: v, current: curV }); return; }
+      }
+      res.applied.push({ id: id, value: v, prev: curV || null });
+      if (dry) return;
+      setItemState(prop, id, it.type === 'flag' ? { status: v } : { done: true });
+      applied[id] = { v: v, t: itemValueTime(getItemState(prop, id), field) };
+    });
+
+    // 3) 메모 묶음(사용자 글은 그대로)
+    Object.keys(memoOf).forEach(function (id) {
+      var it = CL.itemById[id];
+      if (!it || it.type === 'ask') return;
+      var cur = getItemState(prop, id);
+      var next = snapMemoBlock(cur.memo, memoOf[id]);
+      if (next === str(cur.memo).trim() || (!next && !cur.memo)) return;
+      res.memos.push(id);
+      if (!dry) setItemState(prop, id, { memo: next });
+    });
+    // 메모를 고치면 항목 시각이 바뀌지만 값 시각(ft.status·ft.done)은 그대로라 "앱이 넣은 답" 판단은 유지된다
+
+    if (res.skipped.length) res.notes.push('이미 다르게 답한 항목 ' + res.skipped.length + '개는 그대로 두었어요.');
+    if (!dry && stored) {
+      // 반영한 기록: 이번에 바꾼 답과 그 시각을 남긴다(다음 기록을 반영할 때 "앱이 넣은 답"인지 가림)
+      stored.applied = Object.assign({}, stored.applied || {}, applied);
+      stored.appliedAt = stampAfter(now, stored.appliedAt);
+      stored.t = stampAfter(now, stored.t);
+      touch(prop, stored.t);
+    }
+    // 상세 화면을 보고 있으면 다시 그린다(입력 중·대화상자가 열려 있으면 refreshViewSoon 이 기다렸다 그림)
+    if (!dry && !opts.noRefresh && (res.applied.length || res.memos.length) && view.prop === prop && view.name === 'detail') refreshViewSoon();
+    return res;
+  }
+
   // =====================================================
-  // 5. 사진 저장소 (IndexedDB)
-  //    레코드: { id, propertyId, itemId|null, sectionId|null, blob, createdAt }
+  // 5. 사진·서류 저장소 (IndexedDB 'imjang-photos')
+  //    사진 레코드(object store 'photos'): { id, propertyId, itemId|null, sectionId|null, blob, createdAt }
+  //    1.6.0 서류 레코드(object store 'docs'): { id, propertyId, kind: 'registry'|'building'|'contract'|'other', name, mime, size, addedAt, blob }
+  //    DB 버전 2(1.6.0)에서 'docs' 를 더했다. 업그레이드는 없는 저장소만 만들고 사진은 건드리지 않는다
   // =====================================================
-  var Photos = (function () {
+
+  /** 1.6.0: 사진·서류가 함께 쓰는 DB 연결(업그레이드·막힘·연결 끊김 처리) */
+  var IDB = (function () {
     var dbPromise = null;
     var currentDb = null;
+    var waitingReq = null; // 다른 탭이 예전 버전으로 열어 두어 업그레이드를 기다리는 요청(onblocked 뒤 success 를 기다림)
+    var blocked = false;
+    var listeners = [];
 
     function forget() {
-      // iOS 에서 앱을 오래 내려 두면 IndexedDB 연결이 끊길 수 있다 → 다음 요청 때 새로 연다
+      // iOS 에서 앱을 오래 내려 두면 IndexedDB 연결이 끊길 수 있다 → 다음 요청 때 새로 연다.
+      // 다른 탭이 더 새 버전으로 열려고 할 때(versionchange)도 닫아 그 탭의 업그레이드를 막지 않는다
       if (currentDb) { try { currentDb.close(); } catch (e) { /* 무시 */ } }
       currentDb = null;
       dbPromise = null;
@@ -1040,60 +1600,144 @@
         /connection|closing|closed/i.test(String(err.message || ''));
     }
 
-    function open() {
-      if (dbPromise) return dbPromise;
-      dbPromise = new Promise(function (resolve, reject) {
-        if (!window.indexedDB) { reject(new Error('이 브라우저는 IndexedDB 를 지원하지 않아요')); return; }
-        var req;
-        try { req = indexedDB.open(PHOTO_DB_NAME, 1); } catch (e) { reject(e); return; }
-        req.onupgradeneeded = function () {
-          var db = req.result;
-          if (!db.objectStoreNames.contains(PHOTO_STORE)) {
-            var st = db.createObjectStore(PHOTO_STORE, { keyPath: 'id' });
-            st.createIndex('propertyId', 'propertyId', { unique: false });
-          }
-        };
-        req.onsuccess = function () {
-          var db = req.result;
-          currentDb = db;
-          db.onversionchange = function () { forget(); };
-          db.onclose = function () { if (currentDb === db) { currentDb = null; dbPromise = null; } };
-          resolve(db);
-        };
-        req.onerror = function () { reject(req.error); };
-        req.onblocked = function () { reject(new Error('사진 저장소가 다른 창에서 사용 중이에요')); };
-      });
-      dbPromise.catch(function () { dbPromise = null; });
-      return dbPromise;
+    function setBlocked(on) {
+      if (blocked === on) return;
+      blocked = on;
+      listeners.forEach(function (fn) { try { fn(on); } catch (e) { console.error(e); } });
+    }
+    function blockedError() {
+      var e = new Error('다른 탭(창)에 예전 버전 앱이 열려 있어 사진·서류 저장소를 새로 맞추지 못하고 있어요');
+      e.name = 'BlockedError';
+      return e;
     }
 
-    /** 트랜잭션 하나를 열어 fn(store, setResult) 을 실행하고, 완료되면 결과를 돌려준다 */
-    function runOnce(mode, fn) {
+    /** 없는 저장소만 만든다(있는 것·사진 레코드는 그대로) */
+    function upgrade(db) {
+      if (!db.objectStoreNames.contains(PHOTO_STORE)) {
+        db.createObjectStore(PHOTO_STORE, { keyPath: 'id' }).createIndex('propertyId', 'propertyId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(DOC_STORE)) {
+        db.createObjectStore(DOC_STORE, { keyPath: 'id' }).createIndex('propertyId', 'propertyId', { unique: false });
+      }
+    }
+
+    function watch(db) {
+      currentDb = db;
+      db.onversionchange = function () { forget(); };
+      db.onclose = function () { if (currentDb === db) { currentDb = null; dbPromise = null; } };
+    }
+
+    /**
+     * 버전 없이 지금 있는 그대로 연다(업그레이드가 실패했거나, 더 새 앱이 버전을 올려 둔 경우).
+     * 사진은 그대로 쓰고, 서류 저장소가 없으면 서류함만 못 쓴다(Docs 가 NotFoundError 로 알림)
+     */
+    function openAsIs() {
+      return new Promise(function (resolve, reject) {
+        var req;
+        try { req = indexedDB.open(PHOTO_DB_NAME); } catch (e) { reject(e); return; }
+        req.onupgradeneeded = function () { upgrade(req.result); }; // DB 가 아예 없을 때만(버전 1 로 새로 만듦)
+        req.onsuccess = function () { watch(req.result); resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+    }
+
+    function open() {
+      if (dbPromise) return dbPromise;
+      if (waitingReq) return Promise.reject(blockedError()); // 아직 다른 탭을 기다리는 중
+      var p = new Promise(function (resolve, reject) {
+        if (!window.indexedDB) { reject(new Error('이 브라우저는 IndexedDB 를 지원하지 않아요')); return; }
+        var req;
+        try { req = indexedDB.open(PHOTO_DB_NAME, PHOTO_DB_VERSION); } catch (e) { reject(e); return; }
+        var settled = false;
+        req.onupgradeneeded = function () { upgrade(req.result); };
+        req.onsuccess = function () {
+          var db = req.result;
+          waitingReq = null;
+          watch(db);
+          if (!settled) { settled = true; resolve(db); }
+          else dbPromise = Promise.resolve(db); // 막혔다가 풀림: 다음 요청부터 이 연결을 쓴다
+          setBlocked(false);
+        };
+        req.onerror = function (ev) {
+          var err = req.error;
+          if (ev && ev.preventDefault) ev.preventDefault();
+          waitingReq = null;
+          setBlocked(false);
+          if (settled) return;
+          settled = true;
+          // 업그레이드 실패(AbortError 등)나 더 새 버전(VersionError: 더 새 앱 탭이 올려 둠)이면 지금 있는 그대로 연다(사진을 잃지 않게)
+          console.warn('사진·서류 저장소 업그레이드 실패, 지금 있는 그대로 열어요', err);
+          openAsIs().then(resolve, function () { reject(err); });
+        };
+        req.onblocked = function () {
+          // 예전 버전 탭이 v1 연결을 닫지 않고 있다. 요청은 살려 두고(그 탭이 닫히면 success), 지금 기다리는 쪽에는 바로 알린다
+          if (settled) return;
+          settled = true;
+          waitingReq = req;
+          setBlocked(true);
+          reject(blockedError());
+        };
+      });
+      dbPromise = p;
+      p.catch(function () { if (dbPromise === p) dbPromise = null; });
+      return p;
+    }
+
+    /** 트랜잭션 하나를 열어 fn(store, setResult) 을 실행하고, 완료되면 결과를 돌려준다. 저장소가 없으면 NotFoundError */
+    function runOnce(storeName, mode, fn) {
       return open().then(function (db) {
         return new Promise(function (resolve, reject) {
           var tx;
           var store;
           try {
-            tx = db.transaction(PHOTO_STORE, mode);
-            store = tx.objectStore(PHOTO_STORE);
+            if (!db.objectStoreNames.contains(storeName)) {
+              var nf = new Error('저장소가 없어요: ' + storeName);
+              nf.name = 'NotFoundError';
+              throw nf;
+            }
+            tx = db.transaction(storeName, mode);
+            store = tx.objectStore(storeName);
           } catch (e) { reject(e); return; }
           var result;
           tx.oncomplete = function () { resolve(result); };
           tx.onerror = function () { reject(tx.error); };
-          tx.onabort = function () { reject(tx.error || new Error('사진 저장이 취소됐어요')); };
+          tx.onabort = function () { reject(tx.error || new Error('저장이 취소됐어요')); };
           try { fn(store, function (v) { result = v; }); } catch (e) { try { tx.abort(); } catch (_) { /* 무시 */ } reject(e); }
         });
       });
     }
 
     /** 연결이 끊겨 실패하면 연결을 새로 열어 한 번 더 시도한다 */
-    function run(mode, fn) {
-      return runOnce(mode, fn).catch(function (err) {
+    function run(storeName, mode, fn) {
+      return runOnce(storeName, mode, fn).catch(function (err) {
         if (!isConnectionError(err)) throw err;
         forget();
-        return runOnce(mode, fn);
+        return runOnce(storeName, mode, fn);
       });
     }
+
+    return {
+      open: open,
+      run: run,
+      /** 저장소를 쓸 수 있는지. 다른 탭 때문에 업그레이드를 기다리는 중이면 true(곧 풀림, 안내 띠가 알림) */
+      probe: function () {
+        return open().then(function () { return true; }, function (err) { return !!err && err.name === 'BlockedError'; });
+      },
+      /** 서류 저장소('docs')가 있는지(업그레이드 실패면 false). 열지 못하면(막힘 등) 그 오류로 거절 */
+      hasDocs: function () {
+        return open().then(function (db) { return db.objectStoreNames.contains(DOC_STORE); });
+      },
+      isBlocked: function () { return blocked; },
+      /** 막힘 상태가 바뀔 때 fn(true|false) */
+      onBlockedChange: function (fn) { listeners.push(fn); }
+    };
+  })();
+
+  /** 1.6.0: 다른 탭 때문에 저장소를 기다리는 중인 오류(조용히 넘기고 안내 띠로만 알림) */
+  function dbBlockedErr(err) { return !!err && err.name === 'BlockedError'; }
+
+  var Photos = (function () {
+    function run(mode, fn) { return IDB.run(PHOTO_STORE, mode, fn); }
 
     function onResult(req, set) { req.onsuccess = function () { set(req.result); }; }
 
@@ -1104,13 +1748,11 @@
     }
 
     return {
-      /** 사진 저장소를 쓸 수 있는지 (파일로 열었거나 막혀 있으면 false) */
-      probe: function () {
-        return open().then(function () { return true; }, function () { return false; });
-      },
+      /** 사진 저장소를 쓸 수 있는지 (파일로 열었거나 IndexedDB 가 막혀 있으면 false. 1.6.0: 다른 탭을 기다리는 중이면 true) */
+      probe: function () { return IDB.probe(); },
       put: function (rec) {
         return run('readwrite', function (st) { st.put(rec); }).catch(function (err) {
-          if (!rec.blob) throw err;
+          if (!rec.blob || dbBlockedErr(err)) throw err;
           // 오래된 Safari 처럼 Blob 을 그대로 저장하지 못하면(UnknownError 등) ArrayBuffer 로 바꿔 저장.
           // run() 이 끊긴 연결을 새로 열기 때문에 같은 끊긴 연결을 다시 쓰지 않는다.
           console.warn('사진 Blob 저장 실패, 다른 방식으로 다시 시도', err);
@@ -1163,6 +1805,67 @@
       },
       clear: function () {
         return run('readwrite', function (st) { st.clear(); });
+      }
+    };
+  })();
+
+  /**
+   * 1.6.0: 서류함(매물별 첨부 서류: 등기부 PDF, 건축물대장·계약서 사진 등). object store 'docs'.
+   * 레코드 { id, propertyId, kind, name, mime, size, addedAt, blob }. 서류 목록은 매물 JSON 이 아니라 여기서 읽는다.
+   * 저장소가 없으면(업그레이드 실패) 읽기(list·all·count)는 빈 값, 쓰기(put)는 NotFoundError
+   */
+  var Docs = (function () {
+    function run(mode, fn) { return IDB.run(DOC_STORE, mode, fn); }
+    function onResult(req, set) { req.onsuccess = function () { set(req.result); }; }
+    function missing(err) { return !!err && err.name === 'NotFoundError'; }
+    /** 서류 저장소가 없을 때(업그레이드 실패) 읽기는 빈 값으로 */
+    function soft(p, empty) { return p.catch(function (err) { if (missing(err)) return empty; throw err; }); }
+    // Blob 저장이 안 되는 Safari 에서는 ArrayBuffer 로 저장한 레코드를 다시 Blob 으로
+    function fromStored(rec) {
+      if (rec && !rec.blob && rec.data) rec.blob = new Blob([rec.data], { type: rec.mime || 'application/octet-stream' });
+      return rec;
+    }
+    function byAdded(list) {
+      return (list || []).map(fromStored).sort(function (a, b) { return (a.addedAt || 0) - (b.addedAt || 0); });
+    }
+    return {
+      put: function (rec) {
+        return run('readwrite', function (st) { st.put(rec); }).catch(function (err) {
+          if (!rec.blob || dbBlockedErr(err) || missing(err)) throw err;
+          console.warn('서류 Blob 저장 실패, 다른 방식으로 다시 시도', err);
+          return blobToArrayBuffer(rec.blob).then(function (buf) {
+            var alt = Object.assign({}, rec, { blob: null, data: buf });
+            return run('readwrite', function (st) { st.put(alt); });
+          });
+        });
+      },
+      get: function (id) {
+        return soft(run('readonly', function (st, set) { onResult(st.get(id), set); }), null).then(function (r) { return r ? fromStored(r) : null; });
+      },
+      /** 매물의 서류(올린 순서) */
+      list: function (pid) {
+        return soft(run('readonly', function (st, set) { onResult(st.index('propertyId').getAll(pid), set); }), []).then(byAdded);
+      },
+      all: function () {
+        return soft(run('readonly', function (st, set) { onResult(st.getAll(), set); }), []).then(byAdded);
+      },
+      count: function () {
+        return soft(run('readonly', function (st, set) { onResult(st.count(), set); }), 0);
+      },
+      remove: function (id) {
+        return run('readwrite', function (st) { st.delete(id); });
+      },
+      removeByProperty: function (pid) {
+        return soft(run('readwrite', function (st) {
+          var req = st.index('propertyId').openCursor(pid);
+          req.onsuccess = function () {
+            var c = req.result;
+            if (c) { c.delete(); c.continue(); }
+          };
+        }), undefined);
+      },
+      clear: function () {
+        return soft(run('readwrite', function (st) { st.clear(); }), undefined);
       }
     };
   })();
@@ -1494,7 +2197,7 @@
 
   /**
    * 하단 시트 형태의 대화상자. 결과: Promise<{ value, text }>
-   * opts: { title, message, content(Node), input: { placeholder, value, label, match, multiline },
+   * opts: { title, message, content(Node), className(1.6.0 검토 반영: .modal 에 더할 클래스), input: { placeholder, value, label, match, multiline },
    *         buttons: [{ label, value, kind: 'primary'|'danger'|'danger-ghost'|'secondary'|'accent', needsMatch, action, keepOpen }] }
    *   'danger-ghost' 은 위험하지만 주 버튼이 아닌 동작(테두리만 빨강). 첫 초점은 'danger' 일 때만 취소로 간다
    * 1.4.1: 연 뒤 DIALOG_GUARD_MS(0.4초) 동안은 버튼·바탕 누름을 무시한다. 폭이 좁으면 하단 시트의 [지우기]가 방금 누른
@@ -1513,7 +2216,7 @@
       // 설명: 메시지와 내용(content) 모두. 내용만 있는 대화상자(합치기 결과 등)도 VoiceOver 가 열 때 읽게
       if (opts.content && !opts.content.id) opts.content.id = titleId + '-body';
       var describedBy = [opts.message ? msgId : '', opts.content ? opts.content.id : ''].filter(Boolean).join(' ');
-      var card = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, 'aria-describedby': describedBy || null },
+      var card = h('div', { class: 'modal' + (opts.className ? ' ' + opts.className : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, 'aria-describedby': describedBy || null },
         h('h2', { class: 'modal-title', id: titleId, text: opts.title }),
         opts.message ? h('p', { class: 'modal-msg', id: msgId, text: opts.message }) : null,
         opts.content || null
@@ -2530,7 +3233,7 @@
         homePhotoCounts = next;
         if (!same) drawList();
       }, function (err) {
-        console.warn('사진 수 읽기 실패(사진 있음 칩은 0으로)', err);
+        if (!dbBlockedErr(err)) console.warn('사진 수 읽기 실패(사진 있음 칩은 0으로)', err);
         if (view === v && !homePhotoCounts) { homePhotoCounts = {}; drawList(); }
       });
     }
@@ -2544,7 +3247,7 @@
   // ---------------- 매물 추가·수정 폼 ----------------
   // 새 매물 폼은 제출 전까지 매물이 없으므로, 입력을 임시 저장(DRAFT_KEY)해 둔다.
   // 전화 걸기·실거래가 찾기로 다른 앱에 다녀오는 사이 iOS 가 앱을 내려도 입력이 남는다.
-  var DRAFT_FIELDS = ['name', 'dong', 'ho', 'area', 'floor', 'direction', 'ask', 'real', 'agentName', 'agentPhone', 'sourceUrl', 'memo', 'dropReason'];
+  var DRAFT_FIELDS = ['name', 'dong', 'ho', 'area', 'floor', 'direction', 'ask', 'real', 'agentName', 'agentPhone', 'sellerName', 'sourceUrl', 'memo', 'dropReason'];
   var pendingFocus = null; // 다음에 그릴 수정 폼에서 초점을 줄 칸('ho'). 가져오기 직후·상세의 [입력하기]
   // 1.5.0: 다음에 그릴 상세 화면에서 열고 스크롤할 섹션 id. 수정 폼의 [저장하고 등기부 보기], 요약의 [등기부 보기]
   var pendingSection = null;
@@ -2606,7 +3309,7 @@
     var restored = !editing && draftHasContent(draft);
     var src = editing || (restored ? {
       name: draft.name, dong: draft.dong, ho: draft.ho, area: draft.area, floor: draft.floor, direction: draft.direction,
-      askPrice: draft.ask, realPrice: draft.real, agentName: draft.agentName, agentPhone: draft.agentPhone,
+      askPrice: draft.ask, realPrice: draft.real, agentName: draft.agentName, agentPhone: draft.agentPhone, sellerName: draft.sellerName,
       sourceUrl: draft.sourceUrl, memo: draft.memo, status: draft.status, dropReason: draft.dropReason
     } : { status: 'review' });
     // 호수 칸 강조: 가져오기 코드로 만든 매물(호수가 늘 비어 있음)이거나 [입력하기]로 들어왔을 때
@@ -2617,6 +3320,8 @@
     var needHo = !!editing && !editing.ho && (!!editing.importedAt || focusHo || focusDong);
     // 1.5.0(M8): 호수(동·호수)만 채우러 온 폼에서는 호 칸의 Return 이 "완료"(저장하고 상세로)
     var hoDone = needHo || focusDong;
+    // 1.6.0 통합: 폼을 열 때의 매도인 이름. [완료] 때 바뀌었으면 최근 등기부 기록의 소유자와 비교한다(ownerDiffAfterSellerEdit)
+    var sellerAtOpen = editing ? str(editing.sellerName) : '';
 
     function field(labelText, inputEl, opts) {
       opts = opts || {};
@@ -2641,11 +3346,13 @@
     f.real = h('input', { class: 'input', id: 'f-real', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'next', value: val(src.realPrice), placeholder: '예: 82000', autocomplete: 'off', 'aria-describedby': 'f-real-live f-real-hint' });
     f.agentName = h('input', { class: 'input', id: 'f-agent', type: 'text', value: val(src.agentName), placeholder: '예: 행복공인중개사 김OO', autocomplete: 'off', enterkeyhint: 'next', maxlength: 60 });
     f.agentPhone = h('input', { class: 'input', id: 'f-phone', type: 'tel', inputmode: 'tel', enterkeyhint: 'next', value: val(src.agentPhone), placeholder: '예: 010-1234-5678', autocomplete: 'off', maxlength: 30 });
+    // 1.6.0: 매도인 이름(선택). 등기부 소유자와 같은지 비교하는 데 쓴다(applyRegistrySnapshot)
+    f.sellerName = h('input', { class: 'input', id: 'f-seller', type: 'text', value: val(src.sellerName), placeholder: '예: 홍길동', autocomplete: 'off', enterkeyhint: 'next', maxlength: SELLER_NAME_MAX, 'aria-describedby': 'f-seller-hint' });
     f.sourceUrl = h('input', { class: 'input', id: 'f-url', type: 'url', inputmode: 'url', enterkeyhint: 'next', value: val(src.sourceUrl), placeholder: '예: https://new.land.naver.com/…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', maxlength: 2000, 'aria-describedby': 'f-url-err f-url-hint' });
     f.memo = h('textarea', { class: 'input', id: 'f-memo', rows: 3, value: val(src.memo), placeholder: '예: 남향, 2026년 12월 입주 가능하다고 함' });
     f.dropReason = h('textarea', { class: 'input', id: 'f-drop', rows: 2, value: val(src.dropReason), placeholder: '예: 등기부에 신탁 기록' });
     // Return(다음) 키를 눌렀을 때 옮겨 갈 순서
-    var order = [f.name, f.dong, f.ho, f.area, f.floor, f.direction, f.ask, f.real, f.agentName, f.agentPhone, f.sourceUrl, f.memo];
+    var order = [f.name, f.dong, f.ho, f.area, f.floor, f.direction, f.ask, f.real, f.agentName, f.agentPhone, f.sellerName, f.sourceUrl, f.memo];
 
     var nameErr = h('p', { class: 'field-error', id: 'f-name-err', hidden: true, text: '단지명을 입력해 주세요.' });
     var urlErr = h('p', { class: 'field-error', id: 'f-url-err', hidden: true, text: 'http:// 또는 https:// 로 시작하는 주소만 저장돼요.' });
@@ -2731,6 +3438,7 @@
         realPrice: parseIntInput(f.real.value),
         agentName: f.agentName.value.trim(),
         agentPhone: f.agentPhone.value.trim(),
+        sellerName: f.sellerName.value.replace(/\s+/g, ' ').trim().slice(0, SELLER_NAME_MAX), // 1.6.0
         sourceUrl: formUrl(f.sourceUrl.value), // 주소가 아니면 빈 값(아래에 안내)
         memo: f.memo.value,
         status: currentStatus(),
@@ -2751,7 +3459,7 @@
       if (!editing) {
         writeDraft({
           name: f.name.value, dong: f.dong.value, ho: f.ho.value, area: f.area.value, floor: f.floor.value, direction: f.direction.value,
-          ask: f.ask.value, real: f.real.value, agentName: f.agentName.value, agentPhone: f.agentPhone.value,
+          ask: f.ask.value, real: f.real.value, agentName: f.agentName.value, agentPhone: f.agentPhone.value, sellerName: f.sellerName.value,
           sourceUrl: f.sourceUrl.value, memo: f.memo.value,
           status: currentStatus(), dropReason: f.dropReason.value, savedAt: Date.now()
         });
@@ -2781,6 +3489,8 @@
       if (!validateName(true)) { f.name.focus(); return; }
       if (editing) {
         applyChange();
+        // 1.6.0 통합: 매도인 이름을 고쳤으면 최근 등기부 기록의 소유자와 비교해 "소유자 ≠ 매도인"을 채우거나(비어 있을 때) 바꿀지 묻는다(토스트)
+        if (str(editing.sellerName) !== sellerAtOpen) ownerDiffAfterSellerEdit(editing);
         saveNow();
         goBack('/p/' + editing.id, true);
         return;
@@ -2834,6 +3544,7 @@
       diffBox,
       field('중개사 이름', f.agentName),
       h('div', { class: 'field' }, h('label', { for: f.agentPhone.id, text: '중개사 연락처' }), f.agentPhone, telLink),
+      field('매도인 이름 (선택)', f.sellerName, { hint: '집을 파는 사람(지금 집주인) 이름이에요. 등기부를 해석할 때 등기부의 소유자와 같은 사람인지 비교하는 데 써요. 공동명의면 쉼표로 함께 적어요. (예: 홍길동, 김철수)' }),
       field('매물 링크', f.sourceUrl, { error: urlErr, hint: '네이버 부동산 등 매물 페이지 주소. 상세 화면에서 바로 열 수 있어요.' }),
       field('메모', f.memo),
       statusSet,
@@ -2934,7 +3645,7 @@
       title: title || '매물 ' + list.length + '개를 지울까요?',
       content: h('div', { class: 'del-confirm' },
         nameList(list, 5, true),
-        h('p', { text: '체크 기록, 메모, 사진도 함께 지워져요.' })),
+        h('p', { text: '체크 기록, 메모, 사진·서류도 함께 지워져요.' })),
       buttons: [
         { label: '지우기', value: 'delete', kind: 'danger' },
         { label: '취소', value: null, kind: 'secondary' }
@@ -3010,8 +3721,9 @@
       var id = e.prop.id;
       if (findProp(id)) return; // 그사이 되살아났다(다른 탭에서 고침 등): 사진을 남긴다
       sessionRemove('imjang.open.' + id);
-      // 실패해도(연결 끊김 등) 다음에 앱을 열 때 남은 사진 정리(cleanDeletedPhotos)가 다시 지운다
-      Photos.removeByProperty(id).catch(function (err) { console.warn('사진 정리 실패(다음에 다시 시도)', err); });
+      // 실패해도(연결 끊김 등) 다음에 앱을 열 때 남은 사진 정리(cleanDeletedPhotos)가 다시 지운다. 1.6.0: 서류도 같이
+      Photos.removeByProperty(id).catch(function (err) { if (!dbBlockedErr(err)) console.warn('사진 정리 실패(다음에 다시 시도)', err); });
+      Docs.removeByProperty(id).catch(function (err) { if (!dbBlockedErr(err)) console.warn('서류 정리 실패(다음에 다시 시도)', err); });
     });
   }
 
@@ -3556,7 +4268,9 @@
       : sec.id === 'prep' ? [extLink('실거래가', '실거래가 조회'), extLink('건축물대장', '건축물대장')] : [];
     links = links.filter(Boolean);
     var wrap = h('section', { class: 'sec' + (sec.gate ? ' sec-gate' : ''), id: 'sec-' + domId(sec.id) },
-      head, links.length ? h('div', { class: 'sec-links' }, links) : null, body);
+      head, links.length ? h('div', { class: 'sec-links' }, links) : null,
+      sec.gate ? registrySnapLine(prop) : null, // 1.6.0 통합: "등기부 기록 N개 · 마지막 열람 …" + [기록 보기](접혀 있어도 보임)
+      body);
     head.addEventListener('click', function () { toggleSection(sec.id); });
     view.refs.secs[sec.id] = { wrap: wrap, head: head, body: body, countEl: countEl, bar: bar, rendered: false };
     return wrap;
@@ -3700,6 +4414,7 @@
       body.append(stopLine, hint);
       refreshHints(prop);
     }
+    if (sec.gate) body.append(docsCard(prop)); // 1.6.0: 등기부 섹션 맨 위 서류함(등기부 PDF·건축물대장·계약서)
     body.append(miniProgress(prop, sec)); // 1.5.0: 미니 진행(등기부는 멈춤 신호 기준 + [다음 멈춤 신호로])
     if (sec.desc) body.append(h('p', { class: 'sec-desc', text: sec.desc }));
 
@@ -4220,10 +4935,1338 @@
       v.photos = map;
       if (view === v) Object.keys(v.refs.strips).forEach(renderStrip);
     }).catch(function (err) {
-      console.warn('사진 불러오기 실패', err);
+      if (!dbBlockedErr(err)) console.warn('사진 불러오기 실패', err); // 다른 탭을 기다리는 중이면 안내 띠가 알린다
       v.photos = {};
     });
     return v.photosReady;
+  }
+
+  // ---- 1.6.0 서류함 UI (매물 상세 · 등기부 섹션 맨 위 "서류" 카드) ----
+  // 올리기(PDF·사진 여러 개) → 목록(종류 칩·이름·크기·올린 날, 등기부는 열람 일시) → 보기(새 창) · 종류 바꾸기 · 지우기.
+  // 해석 화면(등기부 PDF 읽기)은 통합 단계에서 이 카드에 붙인다
+  var docUrls = {}; // 서류 보기 임시 주소(object URL). 화면을 옮기면 해제
+  function docUrl(rec) {
+    if (!docUrls[rec.id]) docUrls[rec.id] = URL.createObjectURL(rec.blob);
+    return docUrls[rec.id];
+  }
+  function revokeDocUrl(id) {
+    if (docUrls[id]) { URL.revokeObjectURL(docUrls[id]); delete docUrls[id]; }
+  }
+  function revokeAllDocUrls() { Object.keys(docUrls).forEach(revokeDocUrl); }
+
+  /** 올린 파일의 형식: PDF 나 사진만(파일 앱에서 고르면 type 이 비어 있을 수 있어 확장자도 본다). 아니면 '' */
+  var DOC_EXT_MIME = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', webp: 'image/webp', gif: 'image/gif' };
+  function docMime(file) {
+    var t = str(file.type).toLowerCase();
+    if (DOC_MIME_RE.test(t)) return t;
+    var m = /\.([a-z0-9]+)$/i.exec(str(file.name));
+    return m && DOC_EXT_MIME[m[1].toLowerCase()] ? DOC_EXT_MIME[m[1].toLowerCase()] : '';
+  }
+  /** 서류 이름: 제어 문자 빼고 앞뒤 공백 정리, DOC_NAME_MAX 글자. 비면 형식에 맞는 기본 이름 */
+  function cleanDocName(name, mime) {
+    var s = str(name).replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (s.normalize) s = s.normalize('NFC'); // macOS·iOS 파일 이름은 한글이 풀려(NFD) 올 수 있다
+    return s.slice(0, DOC_NAME_MAX) || (mime === 'application/pdf' ? '서류.pdf' : '사진');
+  }
+  /** 파일 이름으로 종류 짐작(등기부 섹션에서 올리므로 PDF 는 기본 등기부). 목록에서 바꿀 수 있다 */
+  function guessDocKind(name, mime) {
+    var s = str(name);
+    if (s.normalize) s = s.normalize('NFC'); // "건축물대장"이 풀린 글자(NFD)로 오면 맞지 않으므로
+    if (/건축물|대장/.test(s)) return 'building';
+    if (/계약/.test(s)) return 'contract';
+    if (/등기/.test(s) || mime === 'application/pdf') return 'registry';
+    return 'other';
+  }
+  function shortDate(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + '.' + pad2(d.getMonth() + 1) + '.' + pad2(d.getDate());
+  }
+  /** 서류 저장소 오류를 사람 말로 */
+  function docErrText(err) {
+    if (dbBlockedErr(err)) return '다른 탭(창)에 예전 버전 앱이 열려 있어 서류를 쓸 수 없어요. 그 탭을 닫거나 새로고침해 주세요.';
+    if (err && err.name === 'NotFoundError') return '서류함을 준비하지 못했어요. 이 앱의 탭(창)을 모두 닫았다가 다시 열어 주세요.';
+    if (err && err.name === 'QuotaExceededError') return '저장 공간이 부족해 서류를 저장하지 못했어요. 필요 없는 사진·서류를 지워 주세요.';
+    if (document.documentElement.classList.contains('no-photos')) return '이 환경에서는 서류를 저장할 수 없어요. HTTPS 주소(또는 홈 화면 앱)로 열면 서류를 올릴 수 있어요.';
+    return '서류를 저장하거나 읽지 못했어요. 다시 해 보세요.';
+  }
+
+  /** 등기부 섹션 맨 위 "서류" 카드 */
+  function docsCard(prop) {
+    var v = view;
+    var countEl = h('span', { class: 'count' });
+    var list = h('ul', { class: 'doc-list', 'aria-label': '이 매물의 서류' });
+    var empty = h('p', { class: 'small muted doc-empty', text: '서류를 불러오는 중…' });
+    var off = h('p', { class: 'notice doc-off', role: 'note', hidden: true });
+    var input = h('input', { type: 'file', accept: 'application/pdf,image/*', multiple: true, class: 'file-input', 'aria-label': '서류 올리기 (PDF·사진, 여러 개)' });
+    input.addEventListener('change', function () {
+      var files = Array.prototype.slice.call(input.files || []);
+      input.value = '';
+      if (files.length) uploadDocs(prop, files); // 1.6.0 통합: 등기부 PDF 는 읽어서 미리보기, 그 밖은 서류로만(addDocs)
+    });
+    // 1.6.0 통합: 사진 서류가 있으면 "사진은 앱이 읽지 못해요 — Claude 로 등기부 코드" 안내(renderDocList 가 보이고 숨김)
+    var photoTip = registryPhotoTip(false);
+    photoTip.hidden = true;
+    var card = h('section', { class: 'doc-card', 'aria-labelledby': 'docs-title' },
+      h('div', { class: 'doc-head' },
+        h('h3', { class: 'doc-title', id: 'docs-title' }, '서류', countEl),
+        h('label', { class: 'btn btn-small btn-secondary doc-add' }, icon('plus', 'ic-sm'), h('span', { text: '서류 올리기' }), input)),
+      h('p', { class: 'small muted doc-desc', text: '인터넷등기소에서 "말소사항 포함"으로 열람한 등기부 PDF를 올리면 앱이 읽어 아래 항목의 답을 채워 줘요(답하기 전에 미리보기로 확인). 건축물대장·계약서 사진도 여기에 모아 둬요. 서류는 이 기기에만 저장돼요(다른 기기로는 백업할 때 "사진·서류도 함께 넣기").' }),
+      off, photoTip, list, empty);
+    v.refs.docs = { prop: prop, card: card, list: list, empty: empty, off: off, countEl: countEl, recs: [], photoTip: photoTip };
+    loadDocs(v);
+    return card;
+  }
+
+  /** 서류 목록을 다시 읽어 그린다 */
+  function loadDocs(v) {
+    var r = v.refs.docs;
+    if (!r) return Promise.resolve();
+    return IDB.hasDocs().then(function (has) {
+      if (!has) { // 업그레이드가 안 된 DB(더 새 앱이 버전을 올렸거나 업그레이드 실패): 읽기는 빈 값이라 따로 알린다
+        var nf = new Error('서류 저장소 없음');
+        nf.name = 'NotFoundError';
+        throw nf;
+      }
+      return Docs.list(r.prop.id);
+    }).then(function (recs) {
+      if (view !== v) return;
+      r.off.hidden = true;
+      r.card.classList.remove('is-off');
+      renderDocList(v, recs);
+    }, function (err) {
+      if (view !== v) return;
+      if (!dbBlockedErr(err) && err.name !== 'NotFoundError') console.warn('서류 불러오기 실패', err);
+      r.empty.hidden = true;
+      r.off.hidden = false;
+      r.off.textContent = docErrText(err);
+      r.card.classList.add('is-off'); // [서류 올리기] 숨김(풀리면 화면을 다시 그림)
+    });
+  }
+
+  function renderDocList(v, recs) {
+    var r = v.refs.docs;
+    // 목록에서 빠진 서류의 임시 주소는 해제
+    var keep = {};
+    recs.forEach(function (rec) { keep[rec.id] = true; });
+    r.recs.forEach(function (old) { if (!keep[old.id]) revokeDocUrl(old.id); });
+    r.recs = recs;
+    r.list.textContent = '';
+    r.countEl.textContent = recs.length ? ' ' + recs.length + '개' : '';
+    r.empty.hidden = !!recs.length;
+    r.empty.textContent = '아직 올린 서류가 없어요. 인터넷등기소에서 열람한 등기부를 PDF로 저장해 올려 두세요.';
+    // 1.6.0 통합: 등기부(또는 기타)로 올린 사진이 있으면 Claude 로 읽는 길을 알려 준다(앱은 사진 글자를 읽지 못함)
+    if (r.photoTip) {
+      r.photoTip.hidden = !recs.some(function (rec) {
+        return /^image\//.test(str(rec.mime)) && (rec.kind === 'registry' || rec.kind === 'other');
+      });
+    }
+    // 최근에 올린 것부터
+    recs.slice().reverse().forEach(function (rec) { r.list.append(docRow(v, rec)); });
+  }
+
+  function docRow(v, rec) {
+    var prop = v.refs.docs.prop;
+    var kind = DOC_KIND_LABEL[rec.kind] ? rec.kind : 'other';
+    var nameId = 'doc-n-' + domId(rec.id);
+    var meta = [];
+    if (kind === 'registry') {
+      var snap = snapshotForDoc(prop, rec.id);
+      // 1.6.0 통합: 열람용 "열람 2026.01.02 09:00", 제출용 "2026.01.02 발행"(발행일만 적혀 있음)
+      meta.push(snap && snap.viewedAt ? (snap.docType === '제출용' ? regViewedText(snap.viewedAt, snap.docType) : '열람 ' + regWhen(snap.viewedAt)) : '열람 일시 미확인');
+    }
+    meta.push(bytesText(rec.size || (rec.blob ? rec.blob.size : 0)), '올린 날 ' + shortDate(rec.addedAt));
+    // 보기: 새 창(탭)에서 연다. iOS Safari 는 PDF 를 미리보기로 보여 준다. 홈 화면 앱(standalone)은 새 창이 Blob 주소를 못 열어 앱 안에서 보여 준다
+    var viewBtn = rec.blob
+      ? h('a', { class: 'btn btn-small btn-secondary doc-view', href: docUrl(rec), target: '_blank', rel: 'noopener', 'aria-describedby': nameId },
+        '보기', h('span', { class: 'sr-only', text: '(새 창)' }))
+      : h('span', { class: 'small muted', text: '파일을 읽지 못했어요' });
+    if (rec.blob && isStandalone()) {
+      viewBtn.addEventListener('click', function (e) { e.preventDefault(); openDocViewer(rec); });
+    }
+    var sel = h('select', { class: 'select doc-kind', 'aria-label': '종류 바꾸기: ' + rec.name },
+      DOC_KINDS.map(function (k) { return h('option', { value: k.id, text: k.label }); }));
+    sel.value = kind;
+    sel.addEventListener('change', function () { changeDocKind(v, rec, sel); });
+    var del = h('button', { type: 'button', class: 'btn btn-small btn-danger-ghost doc-del', 'aria-describedby': nameId }, icon('trash', 'ic-sm'), '지우기');
+    del.addEventListener('click', function () { removeDoc(v, rec); });
+    // 1.6.0 통합: 등기부 PDF 는 [읽기]로 다시 해석할 수 있다([서류만 저장]으로 올렸거나, 해석 기록을 지웠을 때)
+    var readBtn = kind === 'registry' && rec.blob && rec.mime === 'application/pdf'
+      ? h('button', { type: 'button', class: 'btn btn-small btn-accent doc-read', 'aria-describedby': nameId, onclick: function () { readSavedRegistryDoc(prop, rec); } }, '읽기')
+      : null;
+    return h('li', { class: 'doc-row' },
+      h('div', { class: 'doc-main' },
+        h('span', { class: 'doc-chip doc-chip-' + kind, text: DOC_KIND_LABEL[kind] }),
+        h('span', { class: 'doc-name', id: nameId, text: rec.name })),
+      h('p', { class: 'doc-meta', text: meta.join(' · ') }),
+      h('div', { class: 'doc-actions' }, viewBtn, readBtn, sel, del));
+  }
+
+  /** 서류 올리기: 하나씩 차례로 저장(메모리에 한꺼번에 올리지 않음). PDF·사진만, 하나에 DOC_MAX_BYTES 까지 */
+  function addDocs(prop, files) {
+    var v = view;
+    var total = files.length;
+    var ok = 0;
+    var bad = 0;   // 형식이 아님
+    var big = 0;   // 너무 큼
+    var failed = []; // 저장 실패(다시 시도용 원본)
+    var lastErr = null;
+    function progress(i) { toast(total > 1 ? '서류 저장 중 ' + i + '/' + total + '…' : '서류 저장 중…', { duration: 0 }); }
+    var chain = Promise.resolve();
+    files.forEach(function (file, i) {
+      chain = chain.then(function () {
+        progress(i + 1);
+        var mime = docMime(file);
+        if (!mime) { bad++; return; }
+        if (file.size > DOC_MAX_BYTES) { big++; return; }
+        // 파일 앱에서 고른 File 을 그대로 넣지 않고 내용을 읽어 새 Blob 으로 저장한다(원본 파일 참조가 나중에 끊기지 않게)
+        return blobToArrayBuffer(file).then(function (buf) {
+          var rec = {
+            id: uid(), propertyId: prop.id, kind: guessDocKind(file.name, mime), name: cleanDocName(file.name, mime),
+            mime: mime, size: buf.byteLength, addedAt: Date.now(), blob: new Blob([buf], { type: mime })
+          };
+          return Docs.put(rec).then(function () { ok++; });
+        }).catch(function (err) {
+          lastErr = err;
+          if (!dbBlockedErr(err)) console.warn('서류 저장 실패', err);
+          failed.push(file);
+        });
+      });
+    });
+    return chain.then(function () {
+      if (ok) touch(prop); // 사진처럼 매물을 고친 것으로(최근에 고친 순)
+      if (view === v) loadDocs(v);
+      var parts = [];
+      if (ok) parts.push('서류 ' + ok + '개를 올렸어요.');
+      if (bad) parts.push(bad + '개는 PDF·사진이 아니라 넣지 않았어요.');
+      if (big) parts.push(big + '개는 ' + bytesText(DOC_MAX_BYTES) + '보다 커서 넣지 않았어요.');
+      if (failed.length) {
+        parts.push(failed.length + '개를 저장하지 못했어요. ' + docErrText(lastErr));
+        toast(parts.join(' '), { duration: 30000, action: { label: '다시 시도', fn: function () { addDocs(prop, failed); } } });
+      } else {
+        toast(parts.join(' ') || '올린 서류가 없어요', { duration: bad || big ? 6000 : 2800 });
+      }
+    });
+  }
+
+  function changeDocKind(v, rec, sel) {
+    var next = sel.value;
+    var prev = rec.kind;
+    if (next === prev || !DOC_KIND_LABEL[next]) return;
+    var upd = Object.assign({}, rec, { kind: next });
+    Docs.put(upd).then(function () {
+      rec.kind = next;
+      if (view === v) loadDocs(v);
+      toast('종류를 바꿨어요: ' + DOC_KIND_LABEL[next]);
+    }, function (err) {
+      if (!dbBlockedErr(err)) console.warn('서류 종류 바꾸기 실패', err);
+      sel.value = DOC_KIND_LABEL[prev] ? prev : 'other';
+      toast(docErrText(err), { duration: 5000 });
+    });
+  }
+
+  function removeDoc(v, rec) {
+    var prop = v.refs.docs.prop;
+    var snap = snapshotForDoc(prop, rec.id);
+    confirmDialog({
+      title: '이 서류를 지울까요?',
+      message: rec.name + '\n\n지운 서류는 되돌릴 수 없어요.' + (snap ? ' 이 서류로 남긴 등기부 해석 기록은 그대로 남아요.' : ''),
+      confirmText: '지우기', danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      return Docs.remove(rec.id).then(function () {
+        revokeDocUrl(rec.id);
+        if (view === v) loadDocs(v);
+        toast('서류를 지웠어요');
+      });
+    }).catch(function (err) {
+      if (!dbBlockedErr(err)) console.warn('서류 지우기 실패', err);
+      toast(docErrText(err), { duration: 5000 });
+    });
+  }
+
+  /**
+   * 홈 화면 앱(standalone)에서 서류 보기: 새 창은 Safari 로 열려 앱의 Blob 주소를 읽지 못하므로 앱 안에서 보여 준다.
+   * PDF 는 iframe(iOS 가 그려 줌), 사진은 img. [다른 앱으로 보내기]는 공유 시트(파일에 저장·다른 앱에서 열기)
+   */
+  function openDocViewer(rec) {
+    if (closeLightbox) closeLightbox();
+    var prevFocus = document.activeElement;
+    var url = docUrl(rec);
+    var closeBtn = h('button', { type: 'button', class: 'icon-btn', 'aria-label': '서류 닫기' }, icon('close'));
+    var isPdf = rec.mime === 'application/pdf';
+    var body = isPdf
+      ? h('iframe', { class: 'docv-frame', src: url, title: rec.name })
+      : h('img', { src: url, alt: rec.name });
+    var shareBtn = null;
+    try {
+      var f = new File([rec.blob], rec.name, { type: rec.mime });
+      if (navigator.canShare && navigator.canShare({ files: [f] })) {
+        shareBtn = h('button', { type: 'button', class: 'btn btn-small btn-on-dark' }, icon('share', 'ic-sm'), '다른 앱으로 보내기');
+        shareBtn.addEventListener('click', function () {
+          navigator.share({ files: [f], title: rec.name }).catch(function (err) { if (!err || err.name !== 'AbortError') toast('보내지 못했어요'); });
+        });
+      }
+    } catch (e) { shareBtn = null; }
+    var lb = h('div', { class: 'lightbox docv', role: 'dialog', 'aria-modal': 'true', 'aria-label': '서류 보기: ' + rec.name },
+      h('div', { class: 'lb-bar' }, closeBtn, h('p', { class: 'lb-caption', text: rec.name }), h('span', { style: 'width:44px;flex:none', 'aria-hidden': 'true' })),
+      h('div', { class: 'lb-img docv-body' }, body),
+      shareBtn ? h('div', { class: 'lb-foot' }, shareBtn) : null);
+    function onKey(e) {
+      if (e.key === 'Escape' && !openDialogs.length) close();
+      else if (e.key === 'Tab') trapTab(e, lb);
+    }
+    function close() {
+      document.removeEventListener('keydown', onKey, true);
+      lb.remove();
+      closeLightbox = null;
+      if (prevFocus && prevFocus.focus && document.contains(prevFocus)) {
+        try { prevFocus.focus({ preventScroll: true }); } catch (e) { /* 무시 */ }
+      }
+    }
+    closeBtn.addEventListener('click', close);
+    document.addEventListener('keydown', onKey, true);
+    $('#overlay-root').append(lb);
+    closeLightbox = close; // 사진 크게 보기와 같은 자리(화면을 옮기면 닫힘, 다른 탭 동기화가 기다림)
+    setTimeout(function () { closeBtn.focus(); }, 30);
+  }
+
+  // =====================================================
+  // 1.6.0 통합: 등기부 PDF 읽기 → 미리보기 → 답하기, 재열람 비교, 등기부 기록 보기
+  //   [서류 올리기]에서 PDF 를 고르면 pdf.js 로 쪽별 글자를 꺼내 ImjangRegistry.parsePdf(extractRows → parseRegistry)로 읽고,
+  //   미리보기(registryPreview)에서 [이대로 답하기] → 서류 저장(kind 'registry') + 해석 기록(snapshot) + 항목 답(applyRegistrySnapshot).
+  //   가져오기 화면의 등기부 코드(Claude 가 등기부 사진을 읽은 것, source 'code')도 같은 미리보기·답하기를 쓴다.
+  //   해석 결과(소유자 이름 등)는 이 기기 안에서만 쓰고, 항목 메모에는 사람 이름을 적지 않는다(공유 글에 실리므로)
+  // =====================================================
+
+  var REG_KIND_LABEL = {
+    trust: '신탁', seizure: '압류·가압류', injunction: '가처분', auction: '경매개시결정', provisional: '가등기',
+    lease: '임차권등기', mortgage: '근저당', jeonse: '전세권', other: '그 밖의 기록'
+  };
+  var REG_STOP_KINDS = ['trust', 'seizure', 'injunction', 'auction', 'provisional', 'lease'];
+  var REG_HISTORY_KINDS = ['seizure', 'injunction', 'auction', 'lease', 'provisional']; // reg-history 로 세는 지난 기록(registry-parser 와 같음)
+  // 재열람 단계: 다시 뗀 등기부를 앞 기록과 비교한 결과를 넣을 최종 확인 섹션 항목(data.js)
+  var RECHECK_STAGES = [
+    { id: 'now', label: '가계약금 보내기 전', check: 'fin-reg-now', flag: 'fin-reg-now-changed' },
+    { id: 'contract', label: '계약서 쓰는 날', check: 'fin-reg-contract', flag: 'fin-reg-contract-changed' },
+    { id: 'balance', label: '잔금일', check: 'fin-reg-balance', flag: 'fin-reg-balance-changed' }
+  ];
+
+  var pdfjsLoading = null;
+  /** pdf.js 를 처음 쓸 때 한 번만 스크립트 태그로 불러온다. 결과: Promise<pdfjsLib>(실패하면 reject, 다음에 다시 시도) */
+  function loadPdfjs() {
+    var lib = window.pdfjsLib;
+    if (lib && typeof lib.getDocument === 'function') return Promise.resolve(lib);
+    if (pdfjsLoading) return pdfjsLoading;
+    pdfjsLoading = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = PDFJS_SRC;
+      s.async = true;
+      s.onload = function () {
+        var l = window.pdfjsLib;
+        if (l && typeof l.getDocument === 'function') {
+          // 일꾼 주소는 상대 경로(배포 위치와 관계없이). 서비스 워커 캐시에서도 같은 주소로 찾는다
+          if (l.GlobalWorkerOptions && !l.GlobalWorkerOptions.workerSrc) l.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
+          resolve(l);
+        } else {
+          pdfjsLoading = null;
+          reject(new Error('pdfjsLib 없음'));
+        }
+      };
+      s.onerror = function () {
+        pdfjsLoading = null;
+        if (s.parentNode) s.parentNode.removeChild(s);
+        reject(new Error('pdf.js 를 불러오지 못함'));
+      };
+      document.head.appendChild(s);
+    });
+    return pdfjsLoading;
+  }
+
+  /** PDF 바이트 → registry-parser 결과. 실패도 { ok:false, error, message } 로 돌려준다(Promise 는 늘 resolve) */
+  function parseRegistryPdf(buf) {
+    if (!REG) return Promise.resolve({ ok: false, error: 'no-parser', message: '등기부 읽기 기능(registry-parser.js)을 불러오지 못했어요. 새로고침해 보세요.' });
+    return loadPdfjs().then(function (lib) {
+      // registry-parser 가 늘 isEvalSupported:false 로 연다(PDF 안 글꼴로 코드를 만들지 않게)
+      return REG.parsePdf(lib, buf, { workerSrc: PDFJS_WORKER_SRC, today: todayISO() });
+    }, function () {
+      return { ok: false, error: 'no-pdfjs', message: REG.MESSAGES['no-pdfjs'] };
+    }).then(null, function (err) {
+      console.warn('등기부 PDF 해석 실패', err);
+      return { ok: false, error: 'internal', message: REG.MESSAGES.internal };
+    });
+  }
+
+  function regAnsText(v) { return v === 'yes' ? '있음' : v === 'no' ? '없음' : v === 'done' ? '체크' : '답 없음'; }
+  /** 열람 일시 글. 시각이 00:00 이면(제출용은 발행일만 적혀 있음) 날짜만 */
+  function regWhen(ms) {
+    if (!ms) return '';
+    var d = new Date(ms);
+    return d.getHours() || d.getMinutes() ? formatDateTime(ms) : d.getFullYear() + '.' + pad2(d.getMonth() + 1) + '.' + pad2(d.getDate());
+  }
+  function regViewedText(ms, docType) { return ms ? regWhen(ms) + (docType === '제출용' ? ' 발행' : ' 열람') : '열람 일시 모름'; }
+  /** 이 기기 시각의 'YYYY-MM-DDTHH:MM'(registry-parser 의 비교 함수가 글자로 견줌) */
+  function isoLocal(ms) {
+    var d = new Date(ms);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+  /** 동·호 비교용 열쇠: 공백·앞의 "제"·끝의 "동/호"를 빼고 대문자 */
+  function unitKey(v) { return str(v).replace(/\s+/g, '').replace(/^제/, '').replace(/(동|호)$/, '').toUpperCase(); }
+  /** 단지명 비교용 열쇠: NFC, 공백·끝의 "아파트" 빼고 소문자 */
+  function nameKey(v) {
+    var s = str(v);
+    if (s.normalize) s = s.normalize('NFC');
+    return s.replace(/\s+/g, '').replace(/아파트$/, '').toLowerCase();
+  }
+  function kindCount(lists, k) { return lists && !Array.isArray(lists) && Array.isArray(lists[k]) ? lists[k].length : 0; }
+  /**
+   * 기록 한 줄 이름(등기목적 그대로): "갑구 13번 가압류(2026-10-20 접수)". 등기목적에 사람 이름이 들어갈 수 있어
+   * ("2번홍길동지분가압류") 이 기기 화면(미리보기)에서만 쓴다. 메모·공유 글·[기록 보기]는 regEntrySafeLabel
+   */
+  function regEntryLabel(b) {
+    var part = b.part || b.section;
+    return (part === 'gap' ? '갑구 ' : part === 'eul' ? '을구 ' : '') + (b.rank ? b.rank + '번 ' : '') + (b.purpose || '(부기)') +
+      ((b.receiptDate || b.date) ? '(' + (b.receiptDate || b.date) + ' 접수)' : '');
+  }
+  /** 1.6.0 검토 반영: 메모·[기록 보기]용 이름 — 종류 이름과 순위번호만(사람 이름 없이): "갑구 3번 압류·가압류(지분)(2026-10-22 접수)" */
+  function regEntrySafeLabel(b) {
+    var part = b.part || b.section;
+    return (part === 'gap' ? '갑구 ' : part === 'eul' ? '을구 ' : '') + (b.rank ? b.rank + '번 ' : '') + (REG_KIND_LABEL[b.kind] || '기록') +
+      (/지분/.test(str(b.purpose)) ? '(지분)' : '') + ((b.receiptDate || b.date) ? '(' + (b.receiptDate || b.date) + ' 접수)' : '');
+  }
+  // 재열람 비교에서 "없음"을 말하려면 새 등기부로 답하는 멈춤 신호가 모두 확실해야 한다(registry-parser STOP_IDS 와 같음)
+  var REG_STOP_IDS = ['reg-trust', 'reg-seizure', 'reg-injunction', 'reg-auction', 'reg-provisional', 'reg-lease'];
+  /** 1.6.0 검토 반영: 새 등기부가 비교에 쓰기에 불확실한지(PDF 를 끝까지 읽지 못함·멈춤 신호 중 확신 낮음·빈칸) */
+  function registryUnsure(model) {
+    if (model.source === 'pdf' && model.complete !== true) return true;
+    var a = (model.snap && model.snap.answers) || {};
+    return REG_STOP_IDS.some(function (id) { return a[id] !== 'yes' && a[id] !== 'no'; });
+  }
+  /** 같은 날(이 기기 날짜)인지 */
+  function sameLocalDay(a, b) {
+    var x = new Date(a);
+    var y = new Date(b);
+    return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
+  }
+
+  /**
+   * 등기부의 동·호 ↔ 매물 동·호. 결과: { state: 'match'|'mismatch'|'unknown', diffs: ['동(매물 101 / 등기부 102)'], label: '동·호' }
+   * 양쪽에 다 있는 것만 견준다(가져온 매물은 호수가 비어 있을 수 있음)
+   */
+  function registryUnitCheck(prop, dong, ho) {
+    var diffs = [];
+    var parts = [];
+    var known = 0;
+    [['동', prop.dong, dong], ['호', prop.ho, ho]].forEach(function (x) {
+      if (!str(x[1]).trim() || !str(x[2]).trim()) return;
+      known++;
+      if (unitKey(x[1]) !== unitKey(x[2])) {
+        diffs.push(x[0] + '(매물 ' + x[1] + ' / 등기부 ' + x[2] + ')');
+        parts.push(x[0]);
+      }
+    });
+    return { state: diffs.length ? 'mismatch' : known ? 'match' : 'unknown', diffs: diffs, label: parts.join('·') };
+  }
+
+  // 미리보기·답하기가 함께 쓰는 모양(model):
+  //   { source: 'pdf'|'code', snap(기록 원본 — normalizeSnapshot 이 받는 모양), parsed(registry-parser 결과|null),
+  //     address, dong, ho, area, uniqueNo, viewedAt(ms|null), docType, includesCancelled, complete(true|false|null),
+  //     owners: [{ name, share, since }], low: { 항목id: 값 }(확신이 낮아 답하지 않음), mortgages, live, history(종류별 목록),
+  //     warnings: [글], notes: [글], match(코드의 건물 정보|null), dupOf(같은 열람 일시의 기록|null), diff({ prev, res }|null) }
+  /** registry-parser 결과 → model. 확신이 낮은(confidence 'low') 답은 넣지 않고 "확인 필요"로만 보여 준다 */
+  function registryModelFromPdf(R) {
+    var answers = {};
+    var low = {};
+    Object.keys(R.answers || {}).forEach(function (k) {
+      var v = R.answers[k] === true ? 'done' : R.answers[k];
+      if (R.confidence && R.confidence[k] === 'low') low[k] = v;
+      else answers[k] = v;
+    });
+    // 근저당 요약은 을구 기록에서(부기로 바뀐 채권최고액·채무자가 반영된 값). 말소된 것과 부기 행은 뺀다
+    var mortgages = (R.eul || []).filter(function (e) { return e.kind === 'mortgage' && !e.cancelled && !e.parent; })
+      .map(function (e) { return { rank: e.rank, maxAmount: e.maxAmount || null, holder: e.holder || '', debtor: e.debtor || '' }; });
+    var owners = (R.owners || []).map(function (o) { return { name: o.name, share: o.share, since: o.since }; });
+    var snap = {
+      id: uid(), docId: null, source: 'pdf', viewedAt: R.viewedAt, docType: R.docType || '', includesCancelled: R.includesCancelled,
+      uniqueNo: R.uniqueNo || '', area: R.area, owners: owners, live: R.live, history: R.history, mortgages: mortgages, answers: answers,
+      ownersUncertain: !!R.ownersUncertain, // 1.6.0 검토 반영: 소유자 계산이 불확실하면 매도인 비교로 "없음"을 넣지 않음
+      addedAt: Date.now()
+    };
+    return {
+      source: 'pdf', snap: snap, parsed: R, address: R.address || '', dong: R.dong || '', ho: R.ho || '', area: R.area,
+      uniqueNo: R.uniqueNo || '', viewedAt: snapTime(R.viewedAt), docType: R.docType || '', includesCancelled: R.includesCancelled,
+      complete: !!R.complete, owners: owners, low: low, mortgages: mortgages, live: R.live || {}, history: R.history || {},
+      warnings: (R.warnings || []).slice(), notes: [], match: null, dupOf: null, diff: null
+    };
+  }
+  /** 가져오기 코드의 등기부 기록(import-parser parseRegistryBlock 의 snapshot) → model */
+  function registryModelFromCode(s, notes, warnings) {
+    var m = s.match || {};
+    return {
+      source: 'code', snap: Object.assign({}, s, { addedAt: Date.now() }), parsed: null, address: '', dong: m.dong || '', ho: m.ho || '',
+      area: s.area, uniqueNo: s.uniqueNo || '', viewedAt: snapTime(s.viewedAt), docType: s.docType || '', includesCancelled: s.includesCancelled,
+      complete: null, owners: s.owners || [], low: {}, mortgages: s.mortgages || [], live: s.live || {}, history: s.history || {},
+      warnings: (warnings || []).map(function (w) { return str(w && w.text ? w.text : w); }),
+      notes: (notes || []).concat(s.notes || []).map(str), match: m, dupOf: null, diff: null
+    };
+  }
+
+  /**
+   * 기록(정리된 snapshot) → registry-parser diffRegistry 가 받는 모양(갑구·을구 기록을 순위번호로).
+   * 1.6.0 검토 반영: 순위번호·구가 없는 기록도 버리지 않는다(구는 종류로 짐작. 비교는 종류·접수일·목적으로). unsure: 새 등기부가 불확실
+   */
+  function diffInputOf(s, unsure) {
+    var o = {
+      ok: true, uniqueNo: s.uniqueNo || '', viewedAt: s.viewedAt ? isoLocal(s.viewedAt) : null,
+      includesCancelled: s.includesCancelled, owners: s.owners || [], gap: [], eul: [], unsure: !!unsure
+    };
+    [[s.live, false], [s.history, true]].forEach(function (x) {
+      (x[0] || []).forEach(function (e) {
+        var part = e.part === 'gap' || e.part === 'eul' ? e.part : /^(mortgage|jeonse|lease)$/.test(e.kind) ? 'eul' : 'gap';
+        o[part].push({ rank: e.rank || '', purpose: e.purpose, kind: e.kind, receiptDate: e.date, receiptNo: '', cancelled: x[1], text: e.text });
+      });
+    });
+    return o;
+  }
+  /** 고유번호가 맞는지(한쪽이 없으면 맞는 것으로) */
+  function snapSameHouse(s, uniqueNo) { return !s.uniqueNo || !uniqueNo || s.uniqueNo === uniqueNo; }
+  /** 두 비교 결과(처음 기록과, 바로 앞 기록과)를 합친다: 새 기록·그 사이 말소는 합집합, 소유자 변경·불확실은 하나라도 */
+  function combineDiff(a, b) {
+    if (!b || !a || !a.ok || !b.ok) return a;
+    function uniq(list) {
+      var seen = {};
+      return list.filter(function (e) {
+        var k = e.section + ':' + (e.rank || '') + ':' + (e.receiptDate || '') + ':' + (e.purpose || '');
+        if (seen[k]) return false;
+        seen[k] = true;
+        return true;
+      });
+    }
+    var newRisks = uniq(a.newRisks.concat(b.newRisks));
+    var ownerChanged = a.ownerChanged || b.ownerChanged;
+    var changed = newRisks.length > 0 || ownerChanged;
+    var unsure = !!(a.unsure || b.unsure);
+    return Object.assign({}, a, {
+      newEntries: uniq(a.newEntries.concat(b.newEntries)), newRisks: newRisks, cancelledSince: uniq(a.cancelledSince.concat(b.cancelledSince)),
+      ownerChanged: ownerChanged, changed: changed, unsure: unsure, answer: changed ? 'yes' : unsure ? null : 'no',
+      warnings: a.warnings.concat(b.warnings.filter(function (w) { return a.warnings.indexOf(w) < 0; }))
+    });
+  }
+
+  /**
+   * 미리보기 전에: 같은 열람 일시의 기록(dupOf, 같은 서류를 다시 올림)과, 다시 뗀 등기부면 이전 기록과의 비교(diff)를 찾는다.
+   * 1.6.0 검토 반영: 비교 기준은 새 서류보다 열람 일시가 앞선(같은 열람 일시는 빼고) 같은 집 기록 가운데 **처음 기록**(base)과
+   * **바로 앞 기록**(prev) 둘 다 — "처음과 달라진 기록"을 놓치지 않게(처음 → 새 가압류 → 같은 내용 다시 열람이 "없음"이 되지 않게).
+   * 새 서류보다 열람 일시가 나중인 기록이 있으면 newer(미리보기 경고, 기본은 기록만 남김). 고유번호가 다른 기록만 있으면 'different'
+   */
+  function prepareRegistryModel(prop, model) {
+    var list = registrySnapshotsOf(prop); // 최근 열람 순
+    var vt = model.viewedAt;
+    model.dupOf = null;
+    model.diff = null;
+    model.newer = null;
+    if (vt) {
+      list.forEach(function (s) {
+        if (!model.dupOf && s.viewedAt === vt && snapSameHouse(s, model.uniqueNo)) model.dupOf = s;
+        if (!model.newer && s.viewedAt && s.viewedAt > vt && snapSameHouse(s, model.uniqueNo)) model.newer = s;
+      });
+    }
+    var limit = vt || Date.now();
+    var older = list.filter(function (s) {
+      return s !== model.dupOf && !(vt && s.viewedAt === vt) && (s.viewedAt || s.addedAt) <= limit;
+    });
+    if (!older.length || !REG) return model;
+    var next = diffInputOf(normalizeSnapshot(model.snap), registryUnsure(model));
+    var same = older.filter(function (s) { return snapSameHouse(s, model.uniqueNo); });
+    if (!same.length) { // 고유번호가 다른 기록만 있음 → 'different'(미리보기 경고)
+      model.diff = { prev: older[0], base: older[0], res: REG.diffRegistry(diffInputOf(older[0]), next) };
+      return model;
+    }
+    var prev = same[0];
+    var base = same[same.length - 1];
+    var res = REG.diffRegistry(diffInputOf(base), next);
+    if (prev !== base) res = combineDiff(res, REG.diffRegistry(diffInputOf(prev), next));
+    model.diff = { prev: prev, base: base, res: res };
+    return model;
+  }
+
+  function rpSection(title, kids, cls) {
+    return h('section', { class: 'rp-sec' + (cls ? ' ' + cls : '') }, h('h3', { class: 'rp-h', text: title }), kids);
+  }
+  function rpLine(text, state) { return text ? h('p', { class: 'rp-line' + (state ? ' is-' + state : ''), text: text }) : null; }
+  function rpWarn(title, text) { return h('div', { class: 'dlg-warn rp-warn', role: 'note' }, h('strong', { text: title }), text ? h('p', { text: text }) : null); }
+  /** 근저당 한 줄 + 원금 짐작(채권최고액 ÷ 110·120·130%) */
+  function mortgageLine(m) {
+    var t = [m.rank ? '을구 ' + m.rank + '번' : '근저당', m.maxAmount ? '채권최고액 ' + formatManwon(m.maxAmount / 10000) : '채권최고액 못 읽음', m.holder]
+      .filter(Boolean).join(' · ');
+    var est = m.maxAmount && REG ? REG.estimatePrincipal(m.maxAmount) : null;
+    if (est && est.ok) {
+      if (est.likely) t += ' — ' + est.likely.percent + '%로 보면 원금 약 ' + formatManwon(est.likely.principal / 10000);
+      else t += ' — 원금 짐작 ' + est.rates.map(function (r) { return r.percent + '% 약 ' + formatManwon(Math.round(r.principal / 10000)); }).join(', ');
+    }
+    return t;
+  }
+
+  /**
+   * 등기부 미리보기 대화상자: 매물과 같은 집인지(주소·동·호), 열람 일시·종류, 소유자(매도인 비교), 멈춤 신호·주의 신호 각각,
+   * 근저당 목록과 원금 짐작, 지난 기록, 전유면적 ↔ 매물 면적, 직접 답할 항목(위반건축물·매도인 미입력·확인 필요), 해석 경고,
+   * (앞 기록이 있으면) 재열람 비교 + 재열람 항목에 넣을 단계 고르기.
+   * opts.withDoc: [서류만 저장] 버튼(PDF 를 새로 올렸을 때). 결과: Promise<{ action: 'apply'|'doc'|null, stage: 재열람 단계 id|null }>
+   */
+  function registryPreview(prop, model, opts) {
+    opts = opts || {};
+    var unit = registryUnitCheck(prop, model.dong, model.ho);
+    var answers = model.snap.answers || {};
+    var sellers = sellerNames(prop.sellerName);
+    var ownerMatch = model.owners.length && sellers.length
+      ? sellers.every(function (n) { return model.owners.some(function (o) { return samePerson(o.name, n); }); }) : null;
+    // 1.6.0 검토 반영: 소유자 계산이 불확실하면 매도인 이름이 같아 보여도 "없음"으로 답하지 않는다(확인 필요)
+    var ownerUnsure = !!model.snap.ownersUncertain;
+    var different = !!(model.diff && model.diff.res && !model.diff.res.ok && model.diff.res.error === 'different');
+    // 다른 집 등기부일 수 있음(동·호가 다르거나 앞 기록과 고유번호가 다름): 주 버튼은 답하기가 아니다
+    var suspect = unit.state === 'mismatch' || different;
+    var kids = [];
+
+    // 0) 이 서류보다 최근 등기부가 이미 있음(옛 서류를 다시 읽거나 나중에 올림): 기본은 기록만 남김
+    if (model.newer) {
+      kids.push(rpWarn('이 서류보다 최근 등기부(' + regViewedText(model.newer.viewedAt, model.newer.docType) + ')가 있어요',
+        '답은 최근 기록 기준으로 두는 것이 안전해요. [기록만 남기기]는 답을 바꾸지 않고 이 서류의 기록만 남겨요.'));
+    }
+    // 1) 다른 집일 수 있음
+    if (unit.state === 'mismatch') {
+      kids.push(rpWarn('이 매물과 ' + josa(unit.label, '이', '가') + ' 달라요', unit.diffs.join(', ') + '. 다른 집 등기부일 수 있어요. 답하면 이 매물의 멈춤 신호가 이 서류 값으로 바뀌어요("표제부 일치"는 체크하지 않아요).'));
+    }
+    if (different) {
+      kids.push(rpWarn('전에 넣은 등기부와 고유번호가 달라요', '다른 집의 등기부일 수 있어요. 매물을 잘못 고르지 않았는지 보세요.'));
+    }
+    var sumAt = kids.length; // 한 줄 결론은 경고 바로 아래에(멈춤 신호를 센 뒤 넣음)
+
+    // 2) 서류
+    var place = model.address || (model.match ? [model.match.name, model.match.dong ? model.match.dong + '동' : '', model.match.ho ? model.match.ho + '호' : ''].filter(Boolean).join(' ') : '');
+    var mine = [prop.dong ? prop.dong + '동' : '', prop.ho ? prop.ho + '호' : ''].filter(Boolean).join(' ');
+    kids.push(rpSection('서류', [
+      rpLine([regViewedText(model.viewedAt, model.docType), model.docType,
+        model.includesCancelled === true ? '말소사항 포함' : model.includesCancelled === false ? '현재 유효사항만' : ''].filter(Boolean).join(' · ')),
+      model.source === 'code' ? rpLine('Claude가 등기부를 읽고 만든 코드예요. 숫자·이름이 원본과 같은지 보세요.', 'muted') : null,
+      place ? rpLine((model.address ? '주소 ' : '건물 ') + place) : null,
+      rpLine('이 매물 ' + (mine || '(동·호수 없음)') + ' — ' + (unit.state === 'match' ? '등기부와 같아요' : unit.state === 'mismatch' ? '등기부와 달라요' : '비교하지 못했어요'),
+        unit.state === 'match' ? 'ok' : unit.state === 'mismatch' ? 'bad' : ''),
+      model.uniqueNo ? rpLine('고유번호 ' + model.uniqueNo, 'muted') : null,
+      model.dupOf ? rpLine('같은 열람 일시의 기록이 이미 있어요. 답하면 그 기록을 이번에 읽은 것으로 바꿔요.', 'muted') : null
+    ]));
+
+    // 3) 소유자
+    var ownerKids = model.owners.length
+      ? model.owners.map(function (o) { return rpLine(o.name + (o.share ? ' · 지분 ' + o.share : '') + (o.since ? ' · ' + o.since + ' 접수' : '')); })
+      : [rpLine('소유자를 읽지 못했어요. 원본 갑구의 마지막 소유권 기록을 직접 보세요.', 'warn')];
+    if (model.owners.length > 1) ownerKids.push(rpLine('공동명의 ' + model.owners.length + '명 — 팔려면 소유자 모두가 동의해야 해요.', 'warn'));
+    if (model.owners.length && ownerUnsure) ownerKids.push(rpLine('소유자 계산이 확실하지 않아요(지분·이름을 다 읽지 못했거나 무엇을 지웠는지 모르는 말소가 있음). 원본 갑구를 직접 보세요.', 'warn'));
+    if (ownerMatch === true && ownerUnsure) ownerKids.push(rpLine('매도인 이름(매물 정보)과 같아 보여요 — 소유자 계산이 확실하지 않아 "없음"으로 답하지 않아요', 'warn'));
+    else if (ownerMatch === true) ownerKids.push(rpLine('매도인 이름(매물 정보)과 같아요', 'ok'));
+    else if (ownerMatch === false) ownerKids.push(rpLine('매도인 이름(매물 정보)과 달라요 — "소유자 ≠ 매도인"을 "있음"으로 답해요', 'bad'));
+    kids.push(rpSection('소유자', ownerKids));
+
+    // 4) 멈춤 신호·주의 신호(등기부 섹션의 flag 항목 순서 그대로)
+    var gate = gateSections()[0];
+    var flags = gate ? gate.items.filter(function (it) { return it.type === 'flag'; }) : [];
+    var stopYes = 0;
+    var stopUnknown = 0;
+    var stopUnread = 0; // 1.6.0 검토 반영: 위반건축물(늘 답 못 함)·매도인 이름 미입력 말고 앱이 확실히 읽지 못한 멈춤 신호
+    function flagState(it) {
+      if (it.id === 'reg-building') return { v: 'skip', note: '건축물대장에서 확인', expected: true };
+      if (it.id === 'reg-owner-diff') {
+        if (ownerMatch === null) return { v: 'skip', note: sellers.length ? '소유자를 못 읽어 비교 못 함' : '매도인 이름 미입력', expected: !sellers.length };
+        if (ownerMatch && ownerUnsure) return { v: 'low', note: '매도인 이름과 같아 보이지만 소유자 계산이 확실하지 않아요' };
+        return { v: ownerMatch ? 'no' : 'yes', note: '매도인 이름과 비교' };
+      }
+      var a = answers[it.id];
+      if (it.id === 'reg-mortgage' && !a && (model.mortgages || []).length) a = 'yes';
+      if (a === 'yes' || a === 'no') return { v: a };
+      if (hasOwn(model.low, it.id)) return { v: 'low', note: '"' + regAnsText(model.low[it.id]) + '"으로 읽었지만 확실하지 않아요' };
+      return { v: 'skip', note: '읽지 못함 — 직접 확인' };
+    }
+    function flagRow(it) {
+      var s = flagState(it);
+      var stop = it.severity === 'stop';
+      if (stop && s.v === 'yes') stopYes++;
+      if (stop && s.v !== 'yes' && s.v !== 'no') stopUnknown++;
+      if (stop && s.v !== 'yes' && s.v !== 'no' && !s.expected) stopUnread++;
+      return h('li', { class: 'rp-row' },
+        h('span', { class: 'rp-name', text: it.shortTitle || it.text }),
+        h('span', { class: 'rp-ans rp-' + s.v + (stop ? ' is-stop' : ''), text: { yes: '있음', no: '없음', low: '확인 필요', skip: '답 못 함' }[s.v] }),
+        s.note ? h('span', { class: 'rp-note', text: s.note }) : null);
+    }
+    var stopRows = flags.filter(function (it) { return it.severity === 'stop'; }).map(flagRow);
+    var cautionRows = flags.filter(function (it) { return it.severity !== 'stop'; }).map(flagRow);
+    // 1.6.0 검토 반영: 확실히 읽지 못한 멈춤 신호가 있으면 초록 "모두 없어요"가 아니라 주황으로 먼저 알린다
+    var stopHead = stopYes ? '멈춤 신호 ' + stopYes + '개가 있어요. 이 집은 진행하지 않는 것이 안전해요.'
+      : stopUnread ? '멈춤 신호 ' + stopUnread + '개는 앱이 확실히 읽지 못했어요 — 원본에서 직접 확인하세요.'
+        : '읽은 멈춤 신호는 모두 없어요' + (stopUnknown ? '(직접 답할 항목 ' + stopUnknown + '개)' : '');
+    var stopTone = stopYes ? 'bad' : stopUnread ? 'warn' : 'ok';
+    kids.push(rpSection('멈춤 신호', [rpLine(stopHead, stopTone), h('ul', { class: 'rp-list' }, stopRows)], stopYes ? 'is-stop' : ''));
+    kids.push(rpSection('주의 신호', [h('ul', { class: 'rp-list' }, cautionRows)]));
+    // 한 줄 결론(맨 위): 같은 집인지 · 멈춤 신호 · 확인 필요. 대화상자가 길어도 첫 화면에서 보이게
+    var sumParts = [unit.state === 'match' ? '같은 집(동·호)' : unit.state === 'mismatch' ? '다른 집일 수 있음' : '동·호 비교 못 함',
+      stopYes ? '멈춤 신호 있음 ' + stopYes + '개' : stopUnread ? '멈춤 신호 확인 필요 ' + stopUnread + '개' : '읽은 멈춤 신호 없음'];
+    if (model.newer) sumParts.push('더 최근 등기부가 있음');
+    kids.splice(sumAt, 0, h('p', { class: 'rp-sum is-' + (suspect || stopYes ? 'bad' : stopUnread || model.newer ? 'warn' : 'ok'), text: sumParts.join(' · ') }));
+
+    // 5) 근저당
+    var mg = model.mortgages || [];
+    if (mg.length) {
+      kids.push(rpSection('근저당 ' + mg.length + '건', mg.map(function (m) { return rpLine(mortgageLine(m)); }).concat([
+        rpLine('채권최고액은 보통 빌린 돈의 110~130%로 적혀요. 실제 남은 빚은 매도인의 대출 잔액 증명서로 확인하세요.', 'muted')])));
+    }
+
+    // 6) 지난 기록
+    var hist = REG_HISTORY_KINDS.filter(function (k) { return kindCount(model.history, k); })
+      .map(function (k) { return REG_KIND_LABEL[k] + ' ' + kindCount(model.history, k) + '건'; });
+    var common = kindCount(model.history, 'mortgage') + kindCount(model.history, 'trust') + kindCount(model.history, 'jeonse');
+    kids.push(rpSection('지난 기록(말소됨)', [
+      model.includesCancelled === false
+        ? rpLine('현재 유효사항으로 열람해 지워진 지난 기록이 보이지 않아요. "말소사항 포함"으로 열람하면 볼 수 있어요.', 'warn')
+        : rpLine(hist.length ? hist.join(', ') + ' — 지금은 풀렸지만 언제 왜 생겼는지 물어보세요.' : '압류·가압류·가처분·경매·가등기·임차권 지난 기록 없음', hist.length ? 'warn' : ''),
+      common ? rpLine('말소된 근저당·신탁·전세권 ' + common + '건은 흔한 기록이라 "지난 기록"으로 세지 않아요.', 'muted') : null
+    ]));
+
+    // 7) 전유면적 ↔ 매물 면적
+    var pa = numOrNull(prop.area);
+    var ra = numOrNull(model.area);
+    var areaSame = ra && pa ? Math.abs(ra - pa) <= 0.05 : null;
+    kids.push(rpSection('전유면적', [
+      rpLine(ra ? '등기부 ' + ra + '㎡ · 매물 ' + (pa ? pa + '㎡' : '없음') + (areaSame === true ? ' — 같아요' : areaSame === false ? ' — 달라요' : '')
+        : '등기부에서 전유면적을 읽지 못했어요', areaSame === true ? 'ok' : areaSame === false ? 'bad' : ''),
+      ra && pa !== ra && unit.state !== 'mismatch' ? rpLine('답한 뒤 매물 면적을 등기부 값으로 ' + (pa ? '바꿀지' : '채울지') + ' 물어볼게요.', 'muted') : null
+    ]));
+
+    // 8) 직접 답할 항목
+    var cant = ['위반건축물 — 등기부에 나오지 않아요. 건축물대장(정부24·세움터)에서 보고 직접 답하세요.'];
+    if (ownerMatch === null) {
+      cant.push('소유자 ≠ 매도인 — ' + (sellers.length ? '소유자를 읽지 못해 비교하지 못했어요.' : '매물 정보에 매도인 이름이 없어요. [매물 정보 수정]에서 적으면 비교해 답해요.'));
+    } else if (ownerMatch && ownerUnsure) {
+      cant.push('소유자 ≠ 매도인 — 소유자 계산이 확실하지 않아 답하지 않았어요. 원본 갑구의 마지막 소유자와 매도인 이름을 직접 비교하세요.');
+    }
+    Object.keys(model.low).forEach(function (id) {
+      var it = CL.itemById[id];
+      if (it) cant.push((it.shortTitle || it.text) + ' — 앱이 확실히 읽지 못했어요. 원본을 직접 보고 답하세요.');
+    });
+    kids.push(rpSection('직접 답할 항목', cant.map(function (t) { return rpLine(t); })));
+
+    // 9) 해석하며 알게 된 것(경고·참고)
+    var warns = model.warnings.concat(model.notes).filter(Boolean);
+    if (warns.length) kids.push(rpSection('확인할 점', warns.slice(0, 12).map(function (w) { return rpLine(w, 'warn'); })));
+
+    // 10) 재열람 비교(이전 기록이 있을 때). 1.6.0 검토 반영:
+    //  - 처음 기록·바로 앞 기록과 함께 비교(prepareRegistryModel). 새 등기부가 불확실하면 "없음"을 제안하지 않음
+    //  - 재열람 체크("오늘 날짜로 다시 열람했다")는 오늘 열람한 서류일 때만, 기본 켬은 계약 검토 상태일 때만
+    //  - "달라진 기록" 있음 제안은 기본 켬(안전한 쪽), 없음은 계약 검토 + 오늘 서류일 때만 기본 켬,
+    //    지금 "있음"인 것을 "없음"으로 바꾸는 것은 늘 기본 끔(글로 따로 알림)
+    var stagePick = null;
+    var d = model.diff && model.diff.res;
+    if (d && d.ok) {
+      var baseS = model.diff.base || model.diff.prev;
+      var prevS = model.diff.prev;
+      var two = prevS && prevS !== baseS;
+      var dl = [rpLine('처음 기록: ' + regViewedText(baseS.viewedAt, baseS.docType) + ' (' + snapSourceLabel(baseS) + ')', 'muted')];
+      if (two) dl.push(rpLine('바로 앞 기록: ' + regViewedText(prevS.viewedAt, prevS.docType) + ' (' + snapSourceLabel(prevS) + ')', 'muted'));
+      var cmpName = two ? '처음·앞 기록과' : '처음 기록과';
+      dl.push(rpLine(d.changed ? cmpName + ' 달라진 기록이 있어요'
+        : d.unsure ? '비교가 확실하지 않아요 — 새 등기부를 다 읽지 못했어요(빠진 쪽·확인 필요 항목). 전체 PDF로 다시 열람해 비교하세요.'
+          : cmpName + ' 달라진 기록이 없어요', d.changed ? 'bad' : d.unsure ? 'warn' : 'ok'));
+      d.newRisks.forEach(function (b) { dl.push(rpLine('새 기록: ' + regEntryLabel(b), 'bad')); });
+      if (d.ownerChanged) dl.push(rpLine('소유자가 바뀌었어요', 'bad'));
+      d.cancelledSince.forEach(function (b) { dl.push(rpLine('그 사이 말소: ' + regEntryLabel(b), 'muted')); });
+      (d.warnings || []).forEach(function (w) { dl.push(rpLine(w, 'warn')); });
+      var stages = recheckStages();
+      var propose = d.changed ? 'yes' : d.unsure ? '' : 'no';
+      var fresh = !!(model.viewedAt && sameLocalDay(model.viewedAt, Date.now()));
+      if (stages.length && (propose || fresh)) {
+        var contract = prop.status === 'contract';
+        var sel = h('select', { class: 'select rp-stage-sel', 'aria-label': '재열람 단계' },
+          stages.map(function (s) { return h('option', { value: s.id, text: s.label }); }));
+        sel.value = defaultRecheckStage(prop);
+        var checkCb = fresh ? h('input', { type: 'checkbox', id: 'rp-stage-c-' + uid() }) : null;
+        var flagCb = propose ? h('input', { type: 'checkbox', id: 'rp-stage-f-' + uid() }) : null;
+        var flagText = h('span');
+        var pick = { sel: sel, checkCb: checkCb, flagCb: flagCb, lower: false };
+        var syncStage = function (first) {
+          var st = RECHECK_STAGES.filter(function (s) { return s.id === sel.value; })[0] || stages[0];
+          var cur = getItemState(prop, st.flag).status;
+          pick.lower = propose === 'no' && cur === 'yes';
+          flagText.textContent = propose === 'yes' ? '"달라진 기록"을 "있음"으로 표시'
+            : pick.lower ? '"달라진 기록"을 지금 "있음" → "없음"으로 바꾸기' : '"달라진 기록"을 "없음"으로 표시';
+          if (flagCb && pick.lower) flagCb.checked = false;
+          else if (flagCb && first) flagCb.checked = propose === 'yes' || (contract && fresh);
+          if (checkCb && first) checkCb.checked = contract;
+        };
+        sel.addEventListener('change', function () { syncStage(false); });
+        syncStage(true);
+        dl.push(h('div', { class: 'rp-stage' },
+          checkCb ? h('label', { class: 'rp-check', for: checkCb.id }, checkCb, h('span', { text: '이 단계의 재열람 항목("등기부를 다시 열람했다")을 체크' })) : null,
+          flagCb ? h('label', { class: 'rp-check', for: flagCb.id }, flagCb, flagText) : null,
+          fresh ? null : rpLine('오늘 열람한 서류가 아니라 재열람 항목은 체크하지 않아요.', 'muted'),
+          h('div', { class: 'rp-stage-row' }, h('span', { class: 'small', text: '단계(최종 확인 섹션)' }), sel)));
+        stagePick = pick;
+      }
+      kids.push(rpSection('다시 뗀 등기부 비교', dl, d.changed ? 'is-stop' : ''));
+    }
+
+    // 버튼: 더 최근 등기부가 있으면 [기록만 남기기], 다른 집일 수 있으면 [서류만 저장]·[취소]가 먼저. [그래도 답하기]는 한 번 더 묻는다
+    var buttons;
+    var message = '원본과 같은지 보고 [이대로 답하기]를 누르세요. 이미 답한 항목을 바꿀 때는 한 번 더 물어요.';
+    if (model.newer) {
+      buttons = [{ label: '기록만 남기기', value: 'record' }, { label: '그래도 답하기', value: 'force', kind: 'secondary' }];
+      message = '이 서류보다 최근 등기부가 있어요. 답은 그대로 두고 기록만 남기는 것을 권해요.';
+    } else if (suspect) {
+      buttons = opts.withDoc ? [{ label: '서류만 저장', value: 'doc' }] : [];
+      message = '다른 집 등기부일 수 있어요. 매물과 서류를 확인한 뒤에만 답하세요.';
+    } else {
+      buttons = [{ label: '이대로 답하기', value: 'apply' }];
+      if (opts.withDoc) buttons.push({ label: '서류만 저장', value: 'doc', kind: 'secondary' });
+    }
+    if (suspect && !model.newer) {
+      if (!opts.withDoc) buttons.push({ label: '취소', value: null, kind: 'secondary' });
+      buttons.push({ label: '그래도 답하기', value: 'force', kind: 'danger-ghost' });
+      if (opts.withDoc) buttons.push({ label: '취소', value: null, kind: 'secondary' });
+    } else buttons.push({ label: '취소', value: null, kind: 'secondary' });
+    return openDialog({
+      title: model.source === 'pdf' ? '등기부를 읽었어요' : '등기부 코드를 읽었어요',
+      message: message,
+      content: h('div', { class: 'rp' }, kids),
+      className: 'rp-dialog', // 1.6.0 검토 반영: 긴 미리보기에서도 버튼이 화면 아래에 붙어 보이게(styles.css)
+      buttons: buttons
+    }).then(function (r) {
+      var out = {
+        action: r.value === 'apply' || r.value === 'doc' || r.value === 'record' ? r.value : null,
+        stage: null, setCheck: false, setFlag: false, lowerOk: false
+      };
+      if (stagePick) {
+        out.setCheck = !!(stagePick.checkCb && stagePick.checkCb.checked);
+        out.setFlag = !!(stagePick.flagCb && stagePick.flagCb.checked);
+        out.lowerOk = out.setFlag && stagePick.lower;
+        if (out.setCheck || out.setFlag) out.stage = stagePick.sel.value;
+      }
+      if (r.value !== 'force') return out;
+      return confirmDialog({
+        title: '그래도 이 서류로 답할까요?',
+        message: [suspect ? '다른 집 등기부일 수 있어요. 답하면 이 매물의 멈춤 신호·주의 신호가 이 서류 값으로 바뀌어요.' : '',
+          model.newer ? '더 최근 등기부가 넣은 답은 바꾸기 전에 항목마다 한 번 더 물어요.' : ''].filter(Boolean).join('\n'),
+        confirmText: '그래도 답하기', danger: suspect
+      }).then(function (ok) {
+        out.action = ok ? 'apply' : null;
+        return out;
+      });
+    });
+  }
+
+  function recheckStages() { return RECHECK_STAGES.filter(function (s) { return CL.itemById[s.check] || CL.itemById[s.flag]; }); }
+  /** 재열람 단계 기본값: 계약 검토 중이면 "계약서 쓰는 날", 그 밖(검토 중·임장 예정·임장 완료)은 "가계약금 보내기 전" */
+  function defaultRecheckStage(prop) { return prop.status === 'contract' ? 'contract' : 'now'; }
+  function snapSourceLabel(s) { return s.source === 'pdf' ? 'PDF' : s.source === 'code' ? '등기부 코드' : '직접 입력'; }
+
+  /** 이미 답한 항목을 등기부 값으로 덮어쓸지 목록으로 묻는다. 결과: Promise<{ 항목id: true }>(고른 것만) */
+  function confirmOverwrite(skipped) {
+    var boxes = [];
+    var list = h('ul', { class: 'rp-over' }, skipped.map(function (s) {
+      var it = CL.itemById[s.id];
+      var cbId = 'rp-over-' + domId(s.id);
+      // 지금 "있음"인 것을 "없음"으로 바꾸는 것은 기본으로 고르지 않는다(사용자가 아는 사정이 있을 수 있음)
+      var cb = h('input', { type: 'checkbox', id: cbId, checked: !(s.current === 'yes' && s.value === 'no') });
+      boxes.push({ id: s.id, cb: cb });
+      return h('li', {}, h('label', { class: 'rp-check', for: cbId }, cb,
+        h('span', { text: (it ? it.shortTitle || it.text : s.id) + ': 지금 "' + regAnsText(s.current) + '" → 등기부 "' + regAnsText(s.value) + '"' })));
+    }));
+    return openDialog({
+      title: '이미 답한 항목이 있어요. 덮어쓸까요?',
+      content: h('div', { class: 'rp-over-box' },
+        h('p', { class: 'small muted', text: '고른 항목만 등기부 값으로 바꿔요. 다른 항목은 그대로 답해요.' }), list),
+      buttons: [
+        { label: '고른 항목 덮어쓰기', value: 'go' },
+        { label: '모두 그대로 두기', value: 'keep', kind: 'secondary' }
+      ]
+    }).then(function (r) {
+      var over = {};
+      if (r.value === 'go') boxes.forEach(function (b) { if (b.cb.checked) over[b.id] = true; });
+      return over;
+    });
+  }
+
+  /**
+   * 등기부 전유면적이 매물 면적과 다르거나 매물에 면적이 없으면 바꿀지(채울지) 묻는다.
+   * 결과: Promise<{ changed, near(반올림 차이 0.05㎡ 안 또는 비어 있던 칸을 채움), from(바꾸기 전 매물 면적) }>
+   * 1.6.0 검토 반영: 차이가 크면(다른 호수일 수 있음) 주 버튼은 [그대로 두기]. [바꾸기]를 눌러도 "표제부 일치"는 체크하지 않는다(부른 쪽)
+   */
+  function askAreaChange(prop, model, unit) {
+    var ra = numOrNull(model.area);
+    var pa = numOrNull(prop.area);
+    var none = { changed: false, near: false, from: pa };
+    if (!ra || unit.state === 'mismatch' || (pa !== null && Math.abs(ra - pa) < 0.0005)) return Promise.resolve(none);
+    var near = pa === null || Math.abs(ra - pa) <= 0.05;
+    var go = { label: pa !== null ? '바꾸기' : '채우기', value: true };
+    var keep = { label: '그대로 두기', value: false, kind: 'secondary' };
+    return openDialog({
+      title: pa !== null ? '매물 면적을 등기부 값으로 바꿀까요?' : '매물 면적을 등기부 값으로 채울까요?',
+      message: pa !== null
+        ? '매물 정보 전용 ' + pa + '㎡ → 등기부 전유부분 ' + ra + '㎡\n' + (near ? '반올림 차이예요. 등기부 값이 정확해요.'
+          : '차이가 커요. 다른 호수의 등기부가 아닌지 먼저 확인하세요. 바꿔도 "표제부 일치"는 체크하지 않아요.')
+        : '매물 정보에 전용면적이 비어 있어요. 등기부 전유부분 ' + ra + '㎡로 채우면 "표제부 일치"도 체크해요.',
+      buttons: near ? [go, keep] : [{ label: '그대로 두기', value: false }, { label: go.label, value: true, kind: 'secondary' }]
+    }).then(function (r) {
+      if (r.value !== true) return none;
+      if (!prop.fieldsAt || typeof prop.fieldsAt !== 'object') prop.fieldsAt = {};
+      prop.area = ra;
+      var t = prop.fieldsAt.area = stampAfter(Date.now(), prop.fieldsAt.area, prop.legacyAt);
+      touch(prop, t);
+      return { changed: true, near: near, from: pa };
+    });
+  }
+
+  /**
+   * 재열람 비교 결과를 최종 확인 섹션에 넣는다: (pick.setCheck) 재열람 체크(fin-reg-…) 완료 + 메모(열람 일시),
+   * (pick.setFlag) "달라진 기록"(…-changed) 있음/없음 + 메모(사람 이름 없이: 종류 이름과 순위번호만).
+   * model: 미리보기 model(diff = { base: 처음 기록, prev: 바로 앞 기록, res: 비교 결과 }).
+   * 1.6.0 검토 반영: 비교가 불확실(res.unsure)하고 바뀐 것이 없으면 "없음"을 넣지 않는다. 지금 "있음"을 "없음"으로는
+   *   pick.lowerOk(미리보기에서 따로 고름)일 때만 바꾼다.
+   * 결과: { stage, changed, flag: 'yes'|'no'|null(넣지 않음), kept(있음을 그대로 둠), checked, items:[바꾼 항목 id] } | null
+   */
+  function applyRecheck(prop, stageId, model, pick) {
+    pick = pick || {};
+    var st = RECHECK_STAGES.filter(function (s) { return s.id === stageId; })[0];
+    var d = model.diff && model.diff.res;
+    var base = model.diff && (model.diff.base || model.diff.prev);
+    var prev = model.diff && model.diff.prev;
+    if (!st || !d || !d.ok) return null;
+    var out = [];
+    var head = SNAP_MEMO_HEAD + ' · ' + regViewedText(model.viewedAt, model.docType) + ']';
+    var res = { stage: st, changed: d.changed, flag: null, kept: false, checked: false, items: out };
+    if (pick.setCheck && CL.itemById[st.check]) {
+      if (!getItemState(prop, st.check).done) {
+        setItemState(prop, st.check, { done: true });
+        out.push(st.check);
+      }
+      res.checked = true;
+      var cmemo = snapMemoBlock(getItemState(prop, st.check).memo, [head, '· 이 등기부로 앱이 재열람을 체크했어요']);
+      if (cmemo !== str(getItemState(prop, st.check).memo).trim()) setItemState(prop, st.check, { memo: cmemo });
+    }
+    if (pick.setFlag && CL.itemById[st.flag]) {
+      var v = d.changed ? 'yes' : d.unsure ? null : 'no';
+      var cur = getItemState(prop, st.flag).status;
+      if (v === 'no' && cur === 'yes' && !pick.lowerOk) { v = null; res.kept = true; }
+      if (v) {
+        res.flag = v;
+        if (cur !== v) {
+          setItemState(prop, st.flag, { status: v });
+          out.push(st.flag);
+        }
+        var since = '처음 기록(' + regViewedText(base && base.viewedAt, base && base.docType) + ')' +
+          (prev && prev !== base ? '·앞 기록(' + regViewedText(prev.viewedAt, prev.docType) + ')' : '');
+        var lines = [head, '· ' + since + '과 ' + (d.changed ? '달라진 기록이 있어요' : '달라진 기록 없음')];
+        // 메모는 공유 글에 실린다: 등기목적("2번홍길동지분가압류") 대신 종류 이름과 순위번호만
+        d.newRisks.forEach(function (b) { lines.push('· 새 기록: ' + regEntrySafeLabel(b)); });
+        if (d.ownerChanged) lines.push('· 소유자가 바뀌었어요');
+        if (d.cancelledSince.length) lines.push('· 그 사이 말소 ' + d.cancelledSince.length + '건');
+        var memo = snapMemoBlock(getItemState(prop, st.flag).memo, lines);
+        if (memo !== str(getItemState(prop, st.flag).memo).trim()) setItemState(prop, st.flag, { memo: memo });
+      }
+    }
+    return res;
+  }
+
+  /** 등기부 PDF 를 서류함에 넣는다(kind 'registry'). 결과: Promise<서류 id | null(저장 실패 — 이유는 pdf.docFailed, 알림은 부른 쪽이)> */
+  function saveRegistryDoc(prop, pdf) {
+    var rec = {
+      id: uid(), propertyId: prop.id, kind: 'registry', name: cleanDocName(pdf.name, 'application/pdf'),
+      mime: 'application/pdf', size: pdf.buf.byteLength, addedAt: Date.now(), blob: new Blob([pdf.buf], { type: 'application/pdf' })
+    };
+    return Docs.put(rec).then(function () {
+      pdf.docId = rec.id;
+      pdf.docFailed = '';
+      touch(prop); // 사진처럼 매물을 고친 것으로(최근에 고친 순)
+      if (view.prop === prop && view.refs.docs) loadDocs(view);
+      return rec.id;
+    }, function (err) {
+      if (!dbBlockedErr(err)) console.warn('서류 저장 실패', err);
+      pdf.docFailed = docErrText(err);
+      return null;
+    });
+  }
+  /** [서류만 저장]. 실패하면 [다시 시도] 토스트(addDocs 와 같은 모양). model 이 있으면 같은 서류가 이미 있을 때 다시 저장하지 않음 */
+  function saveRegistryDocOnly(prop, pdf, model) {
+    return (model ? registryDocStep(prop, model, pdf) : saveRegistryDoc(prop, pdf)).then(function (id) {
+      if (!id) {
+        toast('서류를 저장하지 못했어요. ' + pdf.docFailed, { duration: 30000, action: { label: '다시 시도', fn: function () { saveRegistryDocOnly(prop, pdf); } } });
+        return;
+      }
+      toast(pdf.reused ? '같은 서류가 이미 서류함에 있어요.' : '서류만 저장했어요. 나중에 서류 목록의 [읽기]로 답할 수 있어요.', { duration: 4500 });
+    });
+  }
+  /** 답은 넣었는데 서류 저장만 실패했을 때 [서류 다시 저장]: 저장되면 그 해석 기록에 서류를 잇는다 */
+  function retryRegistryDoc(prop, pdf, snapId) {
+    saveRegistryDoc(prop, pdf).then(function (id) {
+      if (!id) {
+        toast('서류를 저장하지 못했어요. ' + pdf.docFailed, { duration: 30000, action: { label: '다시 시도', fn: function () { retryRegistryDoc(prop, pdf, snapId); } } });
+        return;
+      }
+      var s = findSnapshot(prop, snapId);
+      if (s && !s.docId) {
+        s.docId = id;
+        s.t = stampAfter(Date.now(), s.t);
+        touch(prop, s.t);
+        dirty = true;
+        saveNow();
+      }
+      toast('서류를 저장했어요');
+      if (view.name === 'detail' && view.prop === prop) refreshViewSoon();
+    });
+  }
+
+  /**
+   * [이대로 답하기]: (새 PDF 면) 서류 저장 → 기록 넣기 → 이미 답한 항목 덮어쓰기 확인 → 항목 답(applyRegistrySnapshot)
+   * → 전유면적 바꾸기 제안 → (골랐으면) 재열람 항목 → 저장·다시 그리기·토스트.
+   * pdf: { buf, name, docId(이미 저장된 서류면) } 또는 null(등기부 코드). 결과: Promise<applyRegistrySnapshot 결과>
+   */
+  /**
+   * 1.6.0 검토 반영: 새 PDF 를 서류함에 넣는다. 같은 열람 일시의 기록(dupOf)이 이미 서류를 갖고 있고 그 서류가 남아 있으면
+   * 새로 저장하지 않고 그 서류를 쓴다(같은 PDF 를 두 번 올려 서류가 겹치지 않게). 결과: Promise<서류 id | null>
+   */
+  function registryDocStep(prop, model, pdf) {
+    if (!pdf) return Promise.resolve(null);
+    if (pdf.docId) return Promise.resolve(pdf.docId);
+    var old = model.dupOf && model.dupOf.docId;
+    var reuse = old ? Docs.get(old).then(function (rec) { return rec && rec.propertyId === prop.id ? rec.id : null; }, function () { return null; }) : Promise.resolve(null);
+    return reuse.then(function (id) {
+      if (!id) return saveRegistryDoc(prop, pdf);
+      pdf.docId = id;
+      pdf.reused = true;
+      return id;
+    });
+  }
+
+  function answerFromRegistry(prop, model, choice, pdf) {
+    var unit = registryUnitCheck(prop, model.dong, model.ho);
+    var o = { noRefresh: true, titleMismatch: unit.state === 'mismatch' ? unit.label : '' };
+    var res = null;
+    var area = null;
+    var step = registryDocStep(prop, model, pdf);
+    return step.then(function (docId) {
+      model.snap.docId = docId || (model.dupOf && model.dupOf.docId) || null;
+      if (model.dupOf) {
+        // 같은 서류를 다시 읽음: 그 기록을 이번에 읽은 것으로 바꿔 넣는다(앞서 넣은 답 표시는 이어받음)
+        model.snap.id = model.dupOf.id;
+        if (model.dupOf.appliedAt) { model.snap.appliedAt = model.dupOf.appliedAt; model.snap.applied = model.dupOf.applied; }
+      }
+      if (choice && choice.action === 'record') return null;
+      var dry = applyRegistrySnapshot(prop, model.snap, Object.assign({ dryRun: true }, o));
+      return dry.skipped.length ? confirmOverwrite(dry.skipped) : {};
+    }).then(function (over) {
+      // 대화상자를 보는 사이 다른 탭에서 이 매물을 지웠으면 답하지 않는다(탭 병합은 같은 객체를 고치므로 그 밖에는 그대로)
+      if (!findProp(prop.id)) throw new Error('매물 없음');
+      if (choice && choice.action === 'record') {
+        // 1.6.0 검토 반영: 더 최근 등기부가 있을 때 기본 — 답은 그대로 두고 이 서류의 기록만 남긴다
+        addRegistrySnapshot(prop, model.snap);
+        dirty = true;
+        saveNow();
+        toast('이 서류의 기록만 남겼어요. 항목 답은 그대로예요.' + (pdf && pdf.docFailed ? ' 서류는 저장하지 못했어요. ' + pdf.docFailed : ''), { duration: 5000 });
+        if (view.name === 'detail' && view.prop === prop) refreshViewSoon();
+        return 'record';
+      }
+      if (model.dupOf) addRegistrySnapshot(prop, model.snap);
+      res = applyRegistrySnapshot(prop, model.snap, Object.assign({ overwrite: over }, o));
+      dirty = true;
+      saveNow();
+      return askAreaChange(prop, model, unit);
+    }).then(function (ac) {
+      if (ac === 'record') return { ok: true, recordOnly: true, applied: [], skipped: [] };
+      area = ac;
+      if (ac.changed && ac.near) { // 반올림 차이로 면적을 맞췄으니 "표제부 일치"를 다시 본다(이미 넣은 답은 같으면 그대로)
+        var res2 = applyRegistrySnapshot(prop, findSnapshot(prop, res.snapshotId) || model.snap, o);
+        res2.applied.forEach(function (a) { res.applied.push(a); });
+      } else if (ac.changed && CL.itemById['reg-title']) {
+        // 1.6.0 검토 반영: 차이가 큰데 바꿈 — "표제부 일치"는 체크하지 않고, 바꾼 사실(원래 면적)을 메모에 남긴다
+        var snapNow = findSnapshot(prop, res.snapshotId) || normalizeSnapshot(model.snap);
+        var tmemo = snapMemoBlock(getItemState(prop, 'reg-title').memo, [SNAP_MEMO_HEAD + ' · ' + regViewedText(snapNow.viewedAt, snapNow.docType) + ']',
+          '· 매물 정보 ' + ac.from + '㎡를 등기부 ' + numOrNull(model.area) + '㎡로 바꿈(차이 큼) — 다른 호수의 서류가 아닌지 확인한 뒤 직접 체크하세요']);
+        if (tmemo !== str(getItemState(prop, 'reg-title').memo).trim()) setItemState(prop, 'reg-title', { memo: tmemo });
+      }
+      var re = choice && choice.stage && model.diff && model.diff.res && model.diff.res.ok
+        ? applyRecheck(prop, choice.stage, model, choice) : null;
+      dirty = true;
+      saveNow();
+      var msg = [res.applied.length ? '등기부로 항목 ' + res.applied.length + '개에 답했어요.' : '새로 답한 항목은 없어요(이미 같은 답).'];
+      if (res.skipped.length) msg.push('이미 다르게 답한 ' + res.skipped.length + '개는 그대로 뒀어요.');
+      if (area.changed) msg.push('매물 면적을 등기부 값으로 바꿨어요' + (area.near ? '.' : '("표제부 일치"는 직접 확인).'));
+      if (re) {
+        var rp = [];
+        if (re.checked) rp.push('재열람 항목을 체크했어요');
+        if (re.flag === 'yes') rp.push('"달라진 기록 있음"으로 표시했어요');
+        else if (re.flag === 'no') rp.push('달라진 기록 없음');
+        else if (re.kept) rp.push('"달라진 기록"은 지금 답(있음)을 그대로 뒀어요');
+        if (rp.length) msg.push(re.stage.label + ' 재열람: ' + rp.join(', ') + '.');
+      }
+      if (pdf && pdf.docFailed) {
+        msg.push('서류는 저장하지 못했어요. ' + pdf.docFailed);
+        toast(msg.join(' '), { duration: 30000, action: { label: '서류 다시 저장', fn: function () { retryRegistryDoc(prop, pdf, res.snapshotId); } } });
+      } else toast(msg.join(' '), { duration: 6000 });
+      if (view.name === 'detail' && view.prop === prop) refreshViewSoon();
+      return res;
+    }).catch(function (err) {
+      if (err && err.message === '매물 없음') toast('그사이 이 매물이 지워져서 등기부로 답하지 못했어요.', { duration: 5000 });
+      else { console.warn('등기부 답하기 실패', err); toast('등기부로 답하다 문제가 생겼어요. 다시 해 보세요.', { duration: 5000 }); }
+      return null;
+    });
+  }
+
+  /** 등기부 해석 결과(R) → (실패면 서류만 저장할지 묻고) 미리보기 → 답하기/서류만 저장. pdf: { buf, name, docId|null } */
+  function handleRegistryParse(prop, R, pdf) {
+    var saved = !!pdf.docId;
+    if (!R || !R.ok) {
+      var photoLike = !!R && (R.error === 'no-text' || R.error === 'not-registry');
+      var buttons = saved ? [] : [{ label: '서류만 저장', value: 'doc' }];
+      if (photoLike && IMP && IMP.REGISTRY_PROMPT) buttons.push({ label: '등기부 요청문 복사', value: null, kind: 'secondary', keepOpen: true, action: copyRegistryPrompt });
+      buttons.push({ label: saved ? '닫기' : '취소', value: null, kind: 'secondary' });
+      return openDialog({
+        title: '등기부로 읽지 못했어요',
+        message: ((R && R.message) || '읽다가 문제가 생겼어요.') +
+          (photoLike ? '\n\n등기부를 사진으로 찍었거나 스캔했다면 [등기부 요청문 복사] → Claude 채팅에 함께 보내고, 받은 등기부 코드를 [글·코드로 추가]에 붙여 넣으세요.' : ''),
+        buttons: buttons
+      }).then(function (r) { if (r.value === 'doc') return saveRegistryDocOnly(prop, pdf); });
+    }
+    var model = prepareRegistryModel(prop, registryModelFromPdf(R));
+    return registryPreview(prop, model, { withDoc: !saved }).then(function (choice) {
+      if (choice.action === 'apply' || choice.action === 'record') return answerFromRegistry(prop, model, choice, pdf);
+      if (choice.action === 'doc') return saveRegistryDocOnly(prop, pdf, model);
+    });
+  }
+
+  /** 올린 PDF 한 개를 읽어 미리보기까지(읽는 동안 토스트) */
+  function readRegistryUpload(prop, file) {
+    var seq = toast('등기부 PDF를 읽는 중…', { duration: 0 });
+    function done() { if (shownToast() === seq) hideToast(); }
+    return blobToArrayBuffer(file).then(function (buf) {
+      return parseRegistryPdf(buf).then(function (R) {
+        done();
+        return handleRegistryParse(prop, R, { buf: buf, name: file.name, docId: null });
+      });
+    }, function (err) {
+      done();
+      console.warn('파일 읽기 실패', err);
+      toast('파일을 읽지 못했어요. 다시 골라 주세요.', { duration: 5000 });
+    });
+  }
+  /** 서류 목록의 [읽기]: 이미 저장한 등기부 PDF 를 다시 읽는다(서류는 그대로) */
+  function readSavedRegistryDoc(prop, rec) {
+    if (!rec.blob) return;
+    var seq = toast('등기부 PDF를 읽는 중…', { duration: 0 });
+    blobToArrayBuffer(rec.blob).then(function (buf) {
+      return parseRegistryPdf(buf).then(function (R) {
+        if (shownToast() === seq) hideToast();
+        return handleRegistryParse(prop, R, { buf: buf, name: rec.name, docId: rec.id });
+      });
+    }).catch(function (err) {
+      if (shownToast() === seq) hideToast();
+      console.warn('서류 읽기 실패', err);
+      toast('서류를 읽지 못했어요. 다시 해 보세요.', { duration: 5000 });
+    });
+  }
+
+  /**
+   * [서류 올리기]: 등기부 PDF(파일 이름이 건축물대장·계약서가 아닌 PDF)는 하나씩 읽어 미리보기, 그 밖(사진 등)은 서류로만 저장(addDocs).
+   * 사진은 앱이 읽지 못한다 → 서류 카드에 "Claude 로 등기부 코드" 안내가 보인다(renderDocList)
+   */
+  function uploadDocs(prop, files) {
+    var pdfs = [];
+    var rest = [];
+    files.forEach(function (f) {
+      var mime = docMime(f);
+      if (mime === 'application/pdf' && guessDocKind(f.name, mime) === 'registry' && f.size <= DOC_MAX_BYTES) pdfs.push(f);
+      else rest.push(f);
+    });
+    var chain = Promise.resolve();
+    pdfs.forEach(function (f) { chain = chain.then(function () { return readRegistryUpload(prop, f); }); });
+    if (rest.length) chain = chain.then(function () { return addDocs(prop, rest); });
+    return chain.catch(function (err) { console.warn('서류 올리기 실패', err); });
+  }
+
+  function copyRegistryPrompt() {
+    if (!IMP || !IMP.REGISTRY_PROMPT) return;
+    copyText(IMP.REGISTRY_PROMPT, { ok: '등기부 요청문을 복사했어요. Claude 채팅에 붙여 넣고 등기부 사진을 함께 보내세요.', title: '등기부 요청문' });
+  }
+  /** "사진은 앱이 읽지 못해요" 안내(서류 카드). Claude 로 등기부 코드를 받아 [글·코드로 추가]에 붙여 넣는 길 */
+  function registryPhotoTip() {
+    return h('div', { class: 'notice notice-info doc-photo-tip', role: 'note' },
+      h('strong', { text: '사진은 앱이 읽지 못해요' }),
+      h('p', { text: '등기부 사진이면 [등기부 요청문 복사]를 눌러 Claude 채팅에 사진과 함께 보내고, Claude가 준 등기부 코드를 [글·코드로 추가]에 붙여 넣으세요. 인터넷등기소 PDF를 올리면 앱이 바로 읽어요.' }),
+      h('div', { class: 'btn-row' },
+        IMP && IMP.REGISTRY_PROMPT ? h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: copyRegistryPrompt }, icon('copy', 'ic-sm'), '등기부 요청문 복사') : null,
+        h('a', { class: 'btn btn-small btn-ghost', href: '#/import' }, '글·코드로 추가')));
+  }
+
+  /**
+   * 매물 정보 [완료] 때 매도인 이름이 바뀌었으면: 가장 최근 등기부 기록의 소유자와 비교해
+   * "소유자 ≠ 매도인"이 비어 있으면 답하고(메모에 앱이 비교했다고 남김, 이름은 적지 않음), 이미 다른 답이면 바꿀지 토스트로 묻는다.
+   * 1.6.0 검토 반영: 가장 최근 기록 하나만 본다(그 기록에서 소유자를 못 읽었다고 예전 기록의 옛 소유자와 비교하지 않음).
+   * 그 기록의 소유자가 비었거나 계산이 불확실(ownersUncertain)하면 "없음"은 답하지 않고 알린다
+   */
+  function ownerDiffAfterSellerEdit(prop) {
+    var it = CL.itemById['reg-owner-diff'];
+    var sellers = sellerNames(prop.sellerName);
+    if (!it || !sellers.length) return;
+    var snap = registrySnapshotsOf(prop)[0];
+    if (!snap) return;
+    var owners = snap.owners || [];
+    var match = owners.length > 0 && sellers.every(function (n) { return owners.some(function (o) { return samePerson(o.name, n); }); });
+    if (!owners.length || (match && snap.ownersUncertain)) {
+      toast('최근 등기부(' + regViewedText(snap.viewedAt, snap.docType) + ')에서 소유자를 확실히 읽지 못해 매도인 이름과 비교하지 않았어요. 원본 갑구를 직접 보세요.', { duration: 6000 });
+      return;
+    }
+    var v = match ? 'no' : 'yes';
+    var cur = getItemState(prop, it.id).status;
+    if (cur === v) return;
+    var name = '"' + (it.shortTitle || it.text) + '"';
+    function put() {
+      setItemState(prop, it.id, { status: v });
+      var lines = [SNAP_MEMO_HEAD + ' · ' + regViewedText(snap.viewedAt, snap.docType) + ']', match
+        ? '· 매도인 이름이 등기부 소유자와 같아요(앱이 비교, 공백·괄호 무시)'
+        : '· 매도인 이름과 같은 소유자가 등기부에 없어요(앱이 비교, 공백·괄호 무시) — 이유가 풀리기 전에는 진행하지 마세요'];
+      var memo = snapMemoBlock(getItemState(prop, it.id).memo, lines);
+      if (memo !== str(getItemState(prop, it.id).memo).trim()) setItemState(prop, it.id, { memo: memo });
+      dirty = true;
+      saveNow();
+    }
+    var head = match ? '매도인 이름이 등기부 소유자와 같아요. ' : '매도인 이름이 등기부 소유자와 달라요. ';
+    if (cur !== 'yes' && cur !== 'no') {
+      put();
+      toast(head + name + '을 "' + regAnsText(v) + '"으로 답했어요.', { duration: 5000 });
+      return;
+    }
+    toast(head + name + ' 답을 "' + regAnsText(v) + '"으로 바꿀까요?', {
+      duration: 10000,
+      action: { label: '바꾸기', fn: function () {
+        put();
+        toast(name + '을 "' + regAnsText(v) + '"으로 바꿨어요.');
+        if (view.name === 'detail' && view.prop === prop) refreshViewSoon();
+      } }
+    });
+  }
+
+  /** 상세 등기부 섹션 머리 아래 "등기부 기록 N개 · 마지막 열람 …" + [기록 보기]. 기록이 없으면 null */
+  function registrySnapLine(prop) {
+    var list = registrySnapshotsOf(prop);
+    if (!list.length) return null;
+    var last = list[0];
+    return h('div', { class: 'reg-snaps' },
+      h('span', { class: 'reg-snaps-text', text: '등기부 기록 ' + list.length + '개 · 마지막 ' + (last.viewedAt ? regViewedText(last.viewedAt, last.docType) : '기록 ' + formatDateTime(last.addedAt)) }),
+      h('button', { type: 'button', class: 'btn btn-small btn-ghost reg-snaps-btn', onclick: function () { showRegistryHistory(prop); } }, '기록 보기'));
+  }
+  /** 기록 한 개의 요약(사람 이름 없이): 살아 있는 멈춤 기록·근저당·전세권·소유자 수 */
+  function snapRiskSummary(s) {
+    var count = {};
+    (s.live || []).forEach(function (e) { if (e.kind) count[e.kind] = (count[e.kind] || 0) + 1; });
+    var stops = REG_STOP_KINDS.filter(function (k) { return count[k]; }).map(function (k) { return REG_KIND_LABEL[k] + ' ' + count[k] + '건'; });
+    var parts = [stops.length ? '살아 있는 멈춤 기록: ' + stops.join(', ') : '살아 있는 멈춤 기록 없음'];
+    if (count.mortgage) parts.push('근저당 ' + count.mortgage + '건');
+    if (count.jeonse) parts.push('전세권 ' + count.jeonse + '건');
+    if (s.owners && s.owners.length) parts.push('소유자 ' + s.owners.length + '명');
+    return parts.join(' · ');
+  }
+  /** [기록 보기]: 해석 기록 목록(최근 열람 순)과 앞 기록과의 차이, 기록 지우기 */
+  function showRegistryHistory(prop) {
+    var list = registrySnapshotsOf(prop);
+    if (!list.length) return;
+    var toDelete = null;
+    var items = list.map(function (s, i) {
+      var older = list[i + 1] || null;
+      var d = older && REG ? REG.diffRegistry(diffInputOf(older), diffInputOf(s)) : null;
+      var dText = !older ? '처음 기록'
+        : !d ? ''
+          : !d.ok ? (d.error === 'different' ? '앞 기록과 고유번호가 달라요(다른 집 등기부일 수 있어요)' : '앞 기록과 비교하지 못했어요')
+            // 1.6.0 검토 반영: 기록 이름은 종류와 순위번호만(등기목적의 사람 이름을 보이지 않게)
+            : d.changed ? '앞 기록과 달라요 — ' + [d.newRisks.length ? '새 기록 ' + d.newRisks.map(regEntrySafeLabel).join(', ') : '', d.ownerChanged ? '소유자가 바뀜' : ''].filter(Boolean).join(' · ')
+              : '앞 기록과 달라진 기록 없음' + (d.cancelledSince.length ? '(그 사이 말소 ' + d.cancelledSince.length + '건)' : '');
+      return h('li', { class: 'rh-item' },
+        h('p', { class: 'rh-when' },
+          h('strong', { text: regViewedText(s.viewedAt, s.docType) }),
+          h('span', { class: 'rh-src', text: ' · ' + [snapSourceLabel(s), s.docType, s.includesCancelled === true ? '말소사항 포함' : s.includesCancelled === false ? '현재 유효사항' : ''].filter(Boolean).join(' · ') })),
+        h('p', { class: 'rh-sum', text: snapRiskSummary(s) }),
+        dText ? h('p', { class: 'rh-diff' + (d && d.ok && d.changed ? ' is-changed' : ''), text: dText }) : null,
+        h('button', { type: 'button', class: 'btn btn-small btn-danger-ghost', onclick: function () { toDelete = s; closeAllDialogs(); } },
+          icon('trash', 'ic-sm'), '이 기록 지우기'));
+    });
+    openDialog({
+      title: '등기부 기록 ' + list.length + '개',
+      content: h('div', { class: 'rh' },
+        h('p', { class: 'small muted', text: '최근 열람 순이에요. 앞 기록과 순위번호로 비교해요. 기록을 지워도 항목 답·메모와 서류는 그대로예요.' }),
+        h('ol', { class: 'rh-list' }, items)),
+      buttons: [{ label: '닫기', value: null, kind: 'secondary' }]
+    }).then(function () {
+      if (!toDelete) return null;
+      var s = toDelete;
+      return confirmDialog({
+        title: '이 등기부 기록을 지울까요?',
+        message: regViewedText(s.viewedAt, s.docType) + ' · ' + snapSourceLabel(s) + '\n\n항목 답·메모와 서류는 그대로 남아요.',
+        confirmText: '지우기', danger: true
+      }).then(function (ok) {
+        if (!ok || !removeRegistrySnapshot(prop, s.id)) return;
+        dirty = true;
+        saveNow();
+        toast('등기부 기록을 지웠어요');
+        if (view.name === 'detail' && view.prop === prop) refreshViewSoon();
+      });
+    });
+  }
+
+  /**
+   * 등기부 코드(가져오기)를 넣을 매물 고르기: 고유번호(그 매물의 지난 기록) > 동·호 > 단지명.
+   * 동이나 호가 양쪽에 있는데 다르면 후보에서 뺀다. 가장 잘 맞는 매물이 하나뿐일 때만 { prop, why }, 아무것도 맞지 않으면 null.
+   * 1.6.0 검토 반영: 가장 잘 맞는 매물이 여럿이면(동점) { prop: null, tie: [매물…], why } — "맞는 매물이 여러 개예요"로 알린다
+   */
+  function matchRegistryTarget(s, props) {
+    var m = s.match || {};
+    var nk = nameKey(m.name);
+    var best = null;
+    var tied = [];
+    props.forEach(function (p) {
+      var score = 0;
+      var why = '';
+      var dKnown = !!(m.dong && p.dong);
+      var hKnown = !!(m.ho && p.ho);
+      var dOk = dKnown && unitKey(m.dong) === unitKey(p.dong);
+      var hOk = hKnown && unitKey(m.ho) === unitKey(p.ho);
+      var pk = nameKey(p.name);
+      var nOk = !!(nk && pk && (pk.indexOf(nk) >= 0 || nk.indexOf(pk) >= 0));
+      if (s.uniqueNo && registrySnapshotsOf(p).some(function (x) { return x.uniqueNo === s.uniqueNo; })) { score = 100; why = '고유번호가 같은 등기부 기록이 있어요'; }
+      else if ((dKnown && !dOk) || (hKnown && !hOk)) score = 0;
+      else if (dOk && hOk) { score = 50 + (nOk ? 5 : 0); why = '동·호가 같아요'; }
+      else if (nOk) { score = 10 + (dOk ? 5 : 0); why = '단지명이 같아요' + (dOk ? '(동도 같음)' : ''); }
+      if (!score) return;
+      if (!best || score > best.score) { best = { prop: p, why: why, score: score }; tied = [p]; }
+      else if (score === best.score) tied.push(p);
+    });
+    if (!best) return null;
+    return tied.length > 1 ? { prop: null, tie: tied, why: best.why, score: best.score } : best;
+  }
+
+  /**
+   * 1.6.0: 다른 탭이 예전 버전 앱으로 사진 DB 를 열어 두어 업그레이드(서류함 추가)가 막혔을 때의 안내 띠.
+   * 그 탭이 닫히면 저절로 풀리고(IDB onsuccess) 지금 화면을 다시 그려 사진·서류를 불러온다
+   */
+  function showDbBlocked(on) {
+    var el = document.getElementById('db-blocked');
+    if (on) {
+      if (el) return;
+      el = h('div', { class: 'db-blocked', id: 'db-blocked', role: 'alert' },
+        h('strong', { text: '다른 탭(창)에 예전 버전 앱이 열려 있어요' }),
+        h('span', { text: ' 사진·서류 저장소를 새 버전으로 바꾸려면 그 탭을 닫거나 새로고침해 주세요. 그동안 사진·서류는 보거나 저장할 수 없어요(체크 기록은 그대로 저장돼요).' }));
+      var se = $('#save-error');
+      if (se && se.parentNode) se.parentNode.insertBefore(el, se.nextSibling);
+      else document.body.insertBefore(el, document.body.firstChild);
+      return;
+    }
+    if (!el) return;
+    el.remove();
+    document.documentElement.classList.remove('no-photos');
+    toast('사진·서류 저장소를 새 버전으로 맞췄어요');
+    refreshViewSoon(); // 막혀 있는 동안 못 읽은 사진·서류를 다시 읽는다
+    setTimeout(cleanDeletedPhotos, 2500); // 막혀 있는 동안 못 한 남은 사진·서류 정리
   }
 
   // ---------------- 요약 ----------------
@@ -4834,7 +6877,7 @@
   }
 
   // ---------------- 설정 ----------------
-  var photoBytesCache = null; // 1.4.5: { count, bytes } 설정을 열 때 센 사진 크기 합(이 세션 안에서만, 사진 수가 같으면 다시 읽지 않음)
+  var photoBytesCache = null; // 1.4.5: { count, docs(1.6.0 서류 수), bytes } 설정을 열 때 센 사진·서류 크기 합(이 세션 안에서만, 수가 같으면 다시 읽지 않음)
   function renderSettings() {
     newView('settings');
     setTopbar({ title: '설정' });
@@ -4850,33 +6893,36 @@
 
     // 1) 백업 내보내기
     var withPhotos = h('input', { type: 'checkbox', id: 'bk-photos' });
-    var withPhotosLabel = h('span', { text: '사진도 함께 넣기 (파일이 커져요)' });
+    // 1.6.0: 서류함(매물별 첨부 서류)도 같은 선택으로 넣는다("사진도 함께 넣기" → "사진·서류도 함께 넣기")
+    var withPhotosLabel = h('span', { text: '사진·서류도 함께 넣기 (파일이 커져요)' });
     // 1.4.5: 마지막 선택을 기억한다(전에는 매번 꺼져 시작해 iPad 사진이 Mac 으로 안 넘어갔음).
-    // 아직 고른 적이 없으면 사진이 1장 이상이고 예상 크기가 80MB(BIG_BACKUP_BYTES) 미만일 때 켜 둔다
+    // 아직 고른 적이 없으면 사진·서류가 1개 이상이고 예상 크기가 80MB(BIG_BACKUP_BYTES) 미만일 때 켜 둔다
     if (typeof state.ui.backupWithPhotos === 'boolean') withPhotos.checked = state.ui.backupWithPhotos;
     withPhotos.addEventListener('change', function () {
       state.ui.backupWithPhotos = withPhotos.checked;
       scheduleSave();
     });
     var baseLabel = withPhotosLabel.textContent;
-    Photos.count().then(function (n) {
-      if (!n) {
-        // 사진이 0장이면 기억값이 켜짐이어도 꺼진 채 보인다(변경 이벤트는 내지 않아 기억값은 그대로). 전에는 켜진 채 "사진 0장 포함"으로 만들어졌음
+    Promise.all([Photos.count(), Docs.count()]).then(function (c) {
+      var n = c[0] || 0;
+      var m = c[1] || 0;
+      if (!n && !m) {
+        // 사진·서류가 없으면 기억값이 켜짐이어도 꺼진 채 보인다(변경 이벤트는 내지 않아 기억값은 그대로). 전에는 켜진 채 "사진 0장 포함"으로 만들어졌음
         withPhotos.checked = false;
         return null;
       }
-      baseLabel = '사진 ' + n + '장도 함께 넣기 (파일이 커져요)';
+      baseLabel = filesCountText(n, m) + '도 함께 넣기 (파일이 커져요)';
       withPhotosLabel.textContent = baseLabel;
       if (typeof state.ui.backupWithPhotos === 'boolean') return null;
       function applyDefault(bytes) {
         if (typeof state.ui.backupWithPhotos !== 'boolean' && withPhotos.isConnected) withPhotos.checked = bytes * 1.37 < BIG_BACKUP_BYTES;
       }
-      // 사진 크기 합은 이 세션 안에서 사진 수가 같으면 다시 읽지 않는다(사진이 많으면 Photos.all 이 느림, SPEC 16.1 #57)
-      if (photoBytesCache && photoBytesCache.count === n) { applyDefault(photoBytesCache.bytes); return null; }
-      withPhotosLabel.textContent = '사진 ' + n + '장도 함께 넣기 (사진 크기 확인 중…)';
-      return Photos.all().then(function (all) {
-        var bytes = all.reduce(function (sum, r) { return sum + (r.blob ? r.blob.size : 0); }, 0);
-        photoBytesCache = { count: n, bytes: bytes };
+      // 크기 합은 이 세션 안에서 사진·서류 수가 같으면 다시 읽지 않는다(사진이 많으면 Photos.all 이 느림, SPEC 16.1 #57)
+      if (photoBytesCache && photoBytesCache.count === n && photoBytesCache.docs === m) { applyDefault(photoBytesCache.bytes); return null; }
+      withPhotosLabel.textContent = filesCountText(n, m) + '도 함께 넣기 (크기 확인 중…)';
+      return Promise.all([n ? Photos.all() : [], m ? Docs.all() : []]).then(function (r) {
+        var bytes = r[0].concat(r[1]).reduce(function (sum, x) { return sum + (x.blob ? x.blob.size : 0); }, 0);
+        photoBytesCache = { count: n, docs: m, bytes: bytes };
         withPhotosLabel.textContent = baseLabel;
         applyDefault(bytes);
       });
@@ -4930,7 +6976,7 @@
         h('ol', { class: 'sync-steps' },
           h('li', { text: 'A(예: iPad)에서 백업 파일 만들기 → B(예: Mac)에서 불러오기 → [합치기]' }),
           h('li', { text: 'B에서 백업 파일 만들기 → A에서 불러오기 → [합치기]' })),
-        h('p', { class: 'small muted', text: '사진도 옮기려면 백업할 때 "사진도 함께 넣기"를 켜세요(이미 있는 사진은 다시 넣지 않아요).' }),
+        h('p', { class: 'small muted', text: '사진·서류도 옮기려면 백업할 때 "사진·서류도 함께 넣기"를 켜세요(이미 있는 사진·서류는 다시 넣지 않아요).' }),
         h('p', { class: 'small muted', text: '같은 매물을 양쪽에서 고쳐도 항목마다 더 최근에 고친 쪽이 남아요. 한쪽에서 지운 매물은 다른 쪽에서도 지워져요(지워지기 전에 이름을 보여 주고 물어봐요).' }))
     ));
 
@@ -4989,7 +7035,7 @@
     // 5) 전체 삭제
     main.append(h('section', { class: 'card', 'aria-labelledby': 'set-wipe' },
       h('h2', { class: 'card-title', id: 'set-wipe', text: '전체 삭제' }),
-      h('p', { class: 'small muted', text: '이 기기에 저장된 매물·체크 기록·사진을 모두 지워요. 다른 기기의 기록은 그대로예요. 되돌릴 수 없으니 먼저 백업하세요.' }),
+      h('p', { class: 'small muted', text: '이 기기에 저장된 매물·체크 기록·사진·서류를 모두 지워요. 다른 기기의 기록은 그대로예요. 되돌릴 수 없으니 먼저 백업하세요.' }),
       h('button', { type: 'button', class: 'btn btn-danger-ghost btn-block', onclick: wipeAll }, icon('trash', 'ic-sm'), '모든 기록 지우기')
     ));
 
@@ -5024,9 +7070,14 @@
       try { size = (localStorage.getItem(STORAGE_KEY) || '').length * 2; } catch (e) { size = 0; }
       usageEl.textContent = '기록 약 ' + bytesText(size) + ' (사진 제외)';
     }
-    Photos.count().then(function (n) {
-      countEl.textContent = '매물 ' + state.properties.length + '개 · 사진 ' + n + '장';
+    Promise.all([Photos.count(), Docs.count().catch(function () { return 0; })]).then(function (c) {
+      countEl.textContent = '매물 ' + state.properties.length + '개 · 사진 ' + c[0] + '장' + (c[1] ? ' · 서류 ' + c[1] + '개' : '');
     }, function () { /* 사진 저장소 없음 */ });
+  }
+
+  /** 1.6.0: "사진 N장·서류 M개"(0 인 쪽은 뺌) */
+  function filesCountText(n, m) {
+    return [n ? '사진 ' + n + '장' : '', m ? '서류 ' + m + '개' : ''].filter(Boolean).join('·');
   }
 
   function downloadBlob(blob, filename) {
@@ -5078,10 +7129,19 @@
     var headJson = JSON.stringify(header); // 사진이 없는 부분이라 작다
     var TYPE = { type: 'application/json' };
     var photoCount = 0;
-    var skipped = 0; // 1.4.5: 사진을 넣지 않아 빠지는 사진 수(대화상자에서 알린다. 전에는 "크기 7KB"만 보였음)
+    var docCount = 0;    // 1.6.0: 넣은 서류 수
+    var skipped = 0;     // 1.4.5: 사진을 넣지 않아 빠지는 사진 수(대화상자에서 알린다. 전에는 "크기 7KB"만 보였음)
+    var skippedDocs = 0; // 1.6.0: 넣지 않아 빠지는 서류 수
+    var photoReadFail = false;
 
-    function buildWithPhotos(records) {
+    /** 사진·서류(1.6.0)를 하나씩 data URL 로 바꿔 Blob 에 이어 붙인다(큰 문자열 하나를 만들지 않음) */
+    function buildWithFiles(records, docs) {
       var acc = new Blob([headJson.slice(0, -1), ',"photos":['], TYPE);
+      var total = records.length + docs.length;
+      function progress() {
+        var n = photoCount + docCount;
+        if (n % 5 === 0) toast('백업 만드는 중… ' + n + '/' + total, { duration: 0 });
+      }
       var chain = Promise.resolve();
       records.forEach(function (rec) {
         if (!rec.blob) return;
@@ -5091,7 +7151,20 @@
             // dataUrl 은 base64 글자뿐이라 JSON 이스케이프가 필요 없다
             acc = new Blob([acc, photoCount ? ',' : '', meta.slice(0, -1), ',"dataUrl":"', dataUrl, '"}'], TYPE);
             photoCount++;
-            if (photoCount % 5 === 0) toast('백업 만드는 중… 사진 ' + photoCount + '/' + records.length + '장', { duration: 0 });
+            progress();
+          });
+        });
+      });
+      // 1.6.0: "docs": [{ id, propertyId, kind, name, mime, size, addedAt, dataUrl }]. 예전 앱은 이 키를 읽지 않는다
+      chain = chain.then(function () { acc = new Blob([acc, '],"docs":['], TYPE); });
+      docs.forEach(function (rec) {
+        if (!rec.blob) return;
+        chain = chain.then(function () {
+          return blobToDataURL(rec.blob).then(function (dataUrl) {
+            var meta = JSON.stringify({ id: rec.id, propertyId: rec.propertyId, kind: rec.kind, name: rec.name, mime: rec.mime, size: rec.size, addedAt: rec.addedAt });
+            acc = new Blob([acc, docCount ? ',' : '', meta.slice(0, -1), ',"dataUrl":"', dataUrl, '"}'], TYPE);
+            docCount++;
+            progress();
           });
         });
       });
@@ -5100,38 +7173,41 @@
 
     var step;
     if (includePhotos) {
-      toast('사진을 넣어 백업 파일을 만드는 중…', { duration: 0 });
-      step = Photos.all().then(function (all) {
-        if (!all.length) return null; // 1.4.5: 사진이 0장이면(기억값이 켜짐이어도) 사진 없이 만든다 → 대화상자 "사진 없이 만들었어요"
-        var estimate = all.reduce(function (sum, r) { return sum + (r.blob ? r.blob.size : 0); }, 0) * 1.37;
-        if (estimate < BIG_BACKUP_BYTES) return buildWithPhotos(all);
+      toast('사진·서류를 넣어 백업 파일을 만드는 중…', { duration: 0 });
+      step = Promise.all([
+        Photos.all().catch(function (err) { console.warn('사진 읽기 실패', err); photoReadFail = true; return []; }),
+        Docs.all().catch(function (err) { console.warn('서류 읽기 실패', err); photoReadFail = true; return []; })
+      ]).then(function (r) {
+        var all = r[0];
+        var docs = r[1];
+        if (!all.length && !docs.length) return null; // 1.4.5: 사진·서류가 없으면(기억값이 켜짐이어도) 없이 만든다 → 대화상자 "사진·서류 없이 만들었어요"
+        var estimate = all.concat(docs).reduce(function (sum, x) { return sum + (x.blob ? x.blob.size : 0); }, 0) * 1.37;
+        if (estimate < BIG_BACKUP_BYTES) return buildWithFiles(all, docs);
         hideToast();
         return confirmDialog({
           title: '백업 파일이 아주 커요',
-          message: '사진 ' + all.length + '장, 예상 크기 약 ' + bytesText(estimate) + '예요. 사진이 많으면 iPhone 에서 만들다가 실패하거나 앱이 다시 열릴 수 있어요.\n\n사진 없이 먼저 백업해 두고, 사진 백업은 나중에 와이파이·충전 중에 다시 해 보세요.',
-          confirmText: '그래도 사진 넣어 만들기',
-          cancelText: '사진 없이 만들기'
+          message: filesCountText(all.length, docs.length) + ', 예상 크기 약 ' + bytesText(estimate) + '예요. 사진이 많으면 iPhone 에서 만들다가 실패하거나 앱이 다시 열릴 수 있어요.\n\n사진·서류 없이 먼저 백업해 두고, 사진·서류 백업은 나중에 와이파이·충전 중에 다시 해 보세요.',
+          confirmText: '그래도 사진·서류 넣어 만들기',
+          cancelText: '사진·서류 없이 만들기'
         }).then(function (ok) {
-          if (!ok) { skipped = all.length; return null; }
-          toast('사진을 넣어 백업 파일을 만드는 중…', { duration: 0 });
-          return buildWithPhotos(all);
+          if (!ok) { skipped = all.length; skippedDocs = docs.length; return null; }
+          toast('사진·서류를 넣어 백업 파일을 만드는 중…', { duration: 0 });
+          return buildWithFiles(all, docs);
         });
-      }).catch(function (err) {
-        console.warn('사진 읽기 실패', err);
-        toast('사진을 읽지 못해 사진 없이 백업해요', { duration: 4000 });
-        photoCount = 0;
-        return null;
       });
     } else {
-      // 사진을 안 넣을 때도 몇 장이 빠지는지 세어 알린다(사진 저장소를 못 쓰면 0)
-      step = Photos.count().then(function (n) { skipped = n || 0; return null; }, function () { return null; });
+      // 사진·서류를 안 넣을 때도 몇 개가 빠지는지 세어 알린다(저장소를 못 쓰면 0)
+      step = Promise.all([Photos.count().catch(function () { return 0; }), Docs.count().catch(function () { return 0; })])
+        .then(function (c) { skipped = c[0] || 0; skippedDocs = c[1] || 0; return null; });
     }
 
     step.then(function (photoBlob) {
-      var blob = photoBlob || new Blob([headJson.slice(0, -1), ',"photos":[]}'], TYPE);
-      // 파일 이름: imjang-backup-<기기 이름>-YYYY-MM-DD(-photos).json. 실제로 넣은 사진이 있을 때만 -photos
+      var blob = photoBlob || new Blob([headJson.slice(0, -1), ',"photos":[],"docs":[]}'], TYPE);
+      // 파일 이름: imjang-backup-<기기 이름>-YYYY-MM-DD(-photos).json. 실제로 넣은 사진이 있을 때만 -photos(1.6.0: 서류만 넣었으면 -docs)
       var safeDev = fileSafeName(dev);
-      var fname = 'imjang-backup-' + (safeDev ? safeDev + '-' : '') + todayISO() + (photoBlob && photoCount ? '-photos' : '') + '.json';
+      var fname = 'imjang-backup-' + (safeDev ? safeDev + '-' : '') + todayISO() + (photoBlob && photoCount ? '-photos' : photoBlob && docCount ? '-docs' : '') + '.json';
+      var included = filesCountText(photoCount, docCount);
+      var left = filesCountText(skipped, skippedDocs);
       var shareFile = null;
       try {
         var f = new File([blob], fname, TYPE);
@@ -5165,8 +7241,10 @@
         title: '백업 파일이 준비됐어요',
         // 1.5.0(L34): 첫 줄에 두 기기 맞추기의 다음 단계(합치기 결과창의 [이 기기 백업 파일 만들기]로 왔을 때 특히)
         message: '다른 기기와 맞추려면: 그 기기에서 설정 → 백업 불러오기 → [합치기]\n\n' + fname + '\n크기: ' + bytesText(blob.size) +
-          (photoBlob ? ' · 사진 ' + photoCount + '장 포함' : (includePhotos ? ' · 사진 없이 만들었어요' : '')) +
-          (!photoBlob && skipped ? '\n사진 ' + skipped + '장은 들어가지 않아요. 사진도 옮기려면 "사진도 함께 넣기"를 켜고 다시 만드세요.' : '') +
+          (photoBlob && included ? ' · ' + included + ' 포함' : (includePhotos ? ' · 사진·서류 없이 만들었어요' : '')) +
+          (photoReadFail ? '\n사진·서류 저장소를 읽지 못해 일부가 빠졌을 수 있어요.' : '') +
+          // "사진 3장은" / "사진 3장·서류 2개는": 마지막 낱말(장/개)에 맞춘 조사
+          (!photoBlob && left ? '\n' + left + (skippedDocs ? '는' : '은') + ' 들어가지 않아요. 옮기려면 "사진·서류도 함께 넣기"를 켜고 다시 만드세요.' : '') +
           '\n\niPhone 에서는 "공유하기 → 파일에 저장"이 가장 확실해요.' +
           (isStandalone() && !shareFile ? '\n홈 화면 앱에서는 내려받기가 안 될 수 있어요. 안 되면 iOS 를 최신으로 업데이트해 주세요.' : ''),
         buttons: buttons
@@ -5197,6 +7275,43 @@
             blob: blob, createdAt: numOrNull(p.createdAt) || Date.now()
           }).then(function () { added++; });
         }).catch(function (err) { console.warn('사진 불러오기 실패', err); });
+      });
+    });
+    return chain.then(function () { return added; });
+  }
+
+  // 1.6.0: 백업 속 서류. PDF·사진만 받는다(mime 과 dataUrl 머리가 맞아야 함)
+  var DOC_MIME_RE = /^(application\/pdf|image\/[a-z0-9.+-]+)$/i;
+  function validDocEntry(p) {
+    if (!p || typeof p !== 'object' || typeof p.id !== 'string' || typeof p.propertyId !== 'string' || typeof p.dataUrl !== 'string') return false;
+    if (!SNAP_ID_RE.test(p.id) || BAD_KEYS[p.id]) return false;
+    var m = /^data:([^;,]+)/.exec(p.dataUrl);
+    return !!m && DOC_MIME_RE.test(m[1]);
+  }
+
+  /** 1.6.0: 백업의 서류 넣기(합친 뒤 남은 매물 것만). skipExisting: 이미 있는 id 는 건너뜀(합치기). 결과: 넣은 수 */
+  function importDocs(entries, skipExisting) {
+    var known = {};
+    state.properties.forEach(function (p) { known[p.id] = true; });
+    var added = 0;
+    var chain = Promise.resolve();
+    entries.forEach(function (p) {
+      if (!known[p.propertyId]) return;
+      chain = chain.then(function () {
+        return (skipExisting ? Docs.get(p.id) : Promise.resolve(null)).then(function (exists) {
+          if (exists) return;
+          var blob = dataURLToBlob(p.dataUrl);
+          var mime = DOC_MIME_RE.test(str(p.mime)) ? str(p.mime).toLowerCase() : (blob.type || 'application/octet-stream');
+          return Docs.put({
+            id: p.id, propertyId: p.propertyId,
+            kind: DOC_KIND_LABEL[p.kind] ? p.kind : 'other',
+            name: cleanDocName(p.name, mime),
+            mime: mime,
+            size: blob.size,
+            addedAt: numOrNull(p.addedAt) || Date.now(),
+            blob: blob
+          }).then(function () { added++; });
+        }).catch(function (err) { console.warn('서류 불러오기 실패', err); });
       });
     });
     return chain.then(function () { return added; });
@@ -5273,6 +7388,7 @@
         var oldN = legacyCount(data); // 1.3.1: 예전 버전 앱이 쓴 매물(항목별 시각 없음)
         var incoming = normalizeState(data);
         var photos = Array.isArray(obj.photos) ? obj.photos.filter(validPhotoEntry) : [];
+        var docs = Array.isArray(obj.docs) ? obj.docs.filter(validDocEntry) : []; // 1.6.0: 서류함
         var origin = backupOrigin(obj);
         // 1.5.0 검토 반영: 더 새로운 앱이 만든 백업이면 이 앱이 모르는 정보(예: 1.5.0 의 가져오기 참고)가 합치면서 빠질 수 있다고 알린다
         var backupVer = str(obj.appVersion) || str(obj.meta && obj.meta.appVersion);
@@ -5281,10 +7397,11 @@
         data = null;
         // 1.3.1: 합치면 이 기기에서 지워질 매물 수를 미리 계산해 보여 준다(저장하지 않음)
         var willDelete = MG ? computeMerge(incoming).report.removed.length : 0;
-        var info = { legacy: oldN, photoCount: photos.length };
+        var info = { legacy: oldN, photoCount: photos.length, docs: docs, docCount: docs.length };
         return openDialog({
           title: '백업 불러오기',
-          message: origin + ' · 매물 ' + incoming.properties.length + '개' + (photos.length ? ' · 사진 ' + photos.length + '장' : ' · 사진 없음') + '\n\n' +
+          message: origin + ' · 매물 ' + incoming.properties.length + '개' +
+            (photos.length || docs.length ? ' · ' + filesCountText(photos.length, docs.length).replace('·', ' · ') : ' · 사진 없음') + '\n\n' +
             '· 합치기(권장): 두 기록을 항목마다 합쳐요. 같은 항목은 더 최근에 고친 쪽을 남기고, 백업을 만든 기기에서 지운 매물은 여기서도 지워요.' +
             (willDelete ? ' 지금 합치면 이 기기에서 매물 ' + willDelete + '개가 지워져요(다음 화면에서 확인).' : '') + '\n' +
             '· 덮어쓰기: 이 기기의 지금 기록을 모두 지우고 백업 내용으로 바꿔요.',
@@ -5312,7 +7429,7 @@
           if (r.value === 'replace') {
             return confirmDialog({
               title: '정말 덮어쓸까요?',
-              message: '지금 이 기기에 있는 매물 ' + state.properties.length + '개와 사진이 모두 지워지고 백업 내용으로 바뀌어요. 다른 기기의 기록은 그대로예요.',
+              message: '지금 이 기기에 있는 매물 ' + state.properties.length + '개와 사진·서류가 모두 지워지고 백업 내용으로 바뀌어요. 다른 기기의 기록은 그대로예요.',
               confirmText: '덮어쓰기', danger: true
             }).then(function (ok) { if (ok) return doImport('replace', incoming, photos, info); });
           }
@@ -5327,7 +7444,7 @@
 
   /**
    * [합치기] 직전(1.3.1): 백업을 만든 기기에서 지운 매물이라 이 기기에서도 지워질 것이 있으면, 이름을 보여 주고 고르게 한다.
-   * 사진까지 지워지고 되돌릴 수 없어서, 모르는 사이 한꺼번에 지워지지 않게 한다.
+   * 사진·서류까지 지워지고 되돌릴 수 없어서, 모르는 사이 한꺼번에 지워지지 않게 한다.
    * 결과 Promise: 지워도 되는 매물 { id: true }(지울 것이 없거나 [지우지 않고 합치기]면 {}), [취소]면 null
    */
   function confirmMergeDeletes(incoming) {
@@ -5336,7 +7453,7 @@
     var all = list.length >= state.properties.length;
     return openDialog({
       title: all ? '이 기기의 매물이 모두 지워져요' : '매물 ' + list.length + '개가 지워져요',
-      message: '백업을 만든 기기에서 지운 매물이라, 합치면 이 기기에서도 지워져요. 사진도 함께 지워지고 되돌릴 수 없어요.' +
+      message: '백업을 만든 기기에서 지운 매물이라, 합치면 이 기기에서도 지워져요. 사진·서류도 함께 지워지고 되돌릴 수 없어요.' +
         (all ? '\n맞는 백업 파일인지, 그 기기에서 정말 모두 지웠는지 확인하세요.' : ''),
       content: nameList(list),
       buttons: [
@@ -5409,7 +7526,7 @@
    *   info.allowDelete(1.3.1): 확인 창에서 지워도 된다고 한 매물만 지운다.
    * - 덮어쓰기: 매물 목록을 백업으로 바꾼다. 1.3.1: 지금 매물은 localDeleted(이 기기 초기화)로 표시해 이 기기의 다른 탭만
    *   맞추고, 백업에 실어 다른 기기로 보내지 않는다(deleted 에 넣으면 다른 기기 [합치기]에서 그 기기 매물까지 지워짐).
-   * info: { legacy(예전 버전 매물 수), photoCount(백업 속 사진 수), allowDelete }
+   * info: { legacy(예전 버전 매물 수), photoCount(백업 속 사진 수), allowDelete, docs(1.6.0: 백업 속 서류 항목), docCount }
    */
   function doImport(mode, incoming, photos, info) {
     info = info || {};
@@ -5459,21 +7576,29 @@
     lastSavedAt = Date.now();
     if (saveFailed) { saveFailed = false; showSaveError(null); }
 
+    var docs = info.docs || []; // 1.6.0: 서류함도 사진과 같은 규칙(덮어쓰기는 비우고 넣고, 합치기는 없는 id 만)
+    var added = 0;
     var photoStep = mode === 'replace'
       ? Photos.clear().catch(function (err) { console.warn('사진 비우기 실패', err); }).then(function () { return importPhotos(photos, false); })
       : importPhotos(photos, true);
-    toast('사진을 넣는 중…', { duration: 0 });
-    return photoStep.then(function (added) {
+    var fileStep = photoStep.then(function (n) {
+      added = n;
+      return mode === 'replace'
+        ? Docs.clear().catch(function (err) { console.warn('서류 비우기 실패', err); }).then(function () { return importDocs(docs, false); })
+        : importDocs(docs, true);
+    });
+    toast(docs.length ? '사진·서류를 넣는 중…' : '사진을 넣는 중…', { duration: 0 });
+    return fileStep.then(function (docsAdded) {
       if (view.name === 'settings') renderSettings();
       if (mode === 'replace') {
-        toast('백업으로 바꿨어요: 매물 ' + state.properties.length + '개' + (added ? ', 사진 ' + added + '장' : ''), { duration: 4000 });
+        toast('백업으로 바꿨어요: 매물 ' + state.properties.length + '개' + (added ? ', 사진 ' + added + '장' : '') + (docsAdded ? ', 서류 ' + docsAdded + '개' : ''), { duration: 4000 });
         focusImportCard();
         return;
       }
       hideToast();
-      if (report.deleted) cleanDeletedPhotos(); // 백업을 만든 기기에서 지운 매물의 사진도 이 기기에서 정리
+      if (report.deleted) cleanDeletedPhotos(); // 백업을 만든 기기에서 지운 매물의 사진·서류도 이 기기에서 정리
       // 다시 그린 설정 화면 위에 결과를 띄우고, 닫으면 "백업 불러오기" 제목으로 초점을 옮긴다(예전 버튼은 사라졌으므로)
-      return showMergeResult(report, added, { dups: dups, legacy: info.legacy, photoCount: info.photoCount }).then(focusImportCard);
+      return showMergeResult(report, added, { dups: dups, legacy: info.legacy, photoCount: info.photoCount, docsAdded: docsAdded, docCount: info.docCount || 0 }).then(focusImportCard);
     });
   }
 
@@ -5495,7 +7620,8 @@
     var dups = extra.dups || [];
     var added = rep.added + rep.revived.length;
     var mergedN = rep.merged + rep.updated;
-    var sameHere = !added && !mergedN && !rep.deleted && !photosAdded; // 이 기기 기록은 그대로
+    var docsAdded = extra.docsAdded || 0; // 1.6.0
+    var sameHere = !added && !mergedN && !rep.deleted && !photosAdded && !docsAdded; // 이 기기 기록은 그대로
     var notes = rep.keptAfterDelete.length + rep.keptLocal.length + rep.revived.length + rep.skipped.length + dups.length; // 따로 알려 줄 매물
     function group(cls, title, desc, list) {
       if (!list.length) return null;
@@ -5509,7 +7635,9 @@
         h('span', { text: '추가 ' + added }), ' · ',
         h('span', { text: '합침 ' + mergedN + (mergedN && rep.items ? '(항목 ' + rep.items + '개)' : '') }), ' · ',
         h('span', { text: '삭제 ' + rep.deleted }), ' · ',
-        h('span', { text: '사진 ' + (photosAdded || 0) + '장' })),
+        h('span', { text: '사진 ' + (photosAdded || 0) + '장' }),
+        extra.docCount || docsAdded ? ' · ' : null,
+        extra.docCount || docsAdded ? h('span', { text: '서류 ' + docsAdded + '개' }) : null),
       // 이 기기는 그대로지만 이 기기에만 있는 내용이 있으면 "백업과 같았다"고 하지 않는다
       sameHere ? h('p', { class: 'small muted', text: notes || rep.incomingBehind ? '이 기기 기록은 그대로예요.' : '바뀐 것이 없어요. 이미 백업과 같은 기록이었어요.' }) : null,
       extra.legacy ? h('div', { class: 'dlg-warn' },
@@ -5520,8 +7648,8 @@
       group('is-revived', '되살린 매물', '이 기기에서 지웠지만, 백업을 만든 기기에서 그 뒤에 고쳐서 다시 넣었어요.', rep.revived),
       group('', '지운 매물', '백업을 만든 기기에서 지운 매물이라 여기서도 지웠어요.', rep.removed),
       group('', '넣지 않은 매물', '이 기기에서 지운 매물이라 넣지 않았어요. 그 기기에서도 지우려면 여기서 백업 파일을 만들어 그 기기에서 [합치기] 하세요.', rep.skipped),
-      group('is-kept', '같은 매물로 보이는 것', '두 기기에서 따로 추가한 같은 매물로 보여요(매물번호나 링크가 같음). 하나를 지우기 전에 양쪽의 체크 기록과 사진을 확인하세요. 지운 쪽의 기록과 사진은 함께 사라져요.', dups),
-      extra.photoCount === 0 ? h('p', { class: 'small muted', text: '이 백업에는 사진이 없어요. 사진도 옮기려면 그 기기에서 "사진도 함께 넣기"를 켜고 백업하세요.' }) : null,
+      group('is-kept', '같은 매물로 보이는 것', '두 기기에서 따로 추가한 같은 매물로 보여요(매물번호나 링크가 같음). 하나를 지우기 전에 양쪽의 체크 기록과 사진·서류를 확인하세요. 지운 쪽의 기록과 사진·서류는 함께 사라져요.', dups),
+      extra.photoCount === 0 && !extra.docCount ? h('p', { class: 'small muted', text: '이 백업에는 사진·서류가 없어요. 사진·서류도 옮기려면 그 기기에서 "사진·서류도 함께 넣기"를 켜고 백업하세요.' }) : null,
       rep.incomingBehind
         ? h('p', { class: 'small muted', text: '이 기기에만 있던 내용도 있어요. 백업을 만든 기기도 맞추려면 아래 [이 기기 백업 파일 만들기]로 만든 파일을 그 기기에서 [합치기] 하세요.' })
         : (sameHere ? null : h('p', { class: 'small muted', text: '이제 이 기기 기록이 백업과 같아요.' }))
@@ -5541,7 +7669,7 @@
   function wipeAll() {
     confirmDialog({
       title: '모든 기록을 지울까요?',
-      message: '매물 ' + state.properties.length + '개와 체크 기록, 사진이 이 기기에서 모두 지워져요. 다른 기기의 기록은 그대로예요(그 기기 백업을 [합치기] 하면 그 기록이 다시 들어와요). 지우기 전에 백업을 권해요.',
+      message: '매물 ' + state.properties.length + '개와 체크 기록, 사진·서류가 이 기기에서 모두 지워져요. 다른 기기의 기록은 그대로예요(그 기기 백업을 [합치기] 하면 그 기록이 다시 들어와요). 지우기 전에 백업을 권해요.',
       confirmText: '다음', danger: true
     }).then(function (ok) {
       if (!ok) return;
@@ -5582,7 +7710,11 @@
         return Photos.clear().catch(function (err) {
           console.warn('사진 비우기 실패(다음에 다시 시도)', err);
         }).then(function () {
+          // 1.6.0: 서류함도 비운다(실패하면 다음 실행의 남은 정리가 지운 매물(localDeleted) 서류를 지움)
+          return Docs.clear().catch(function (err) { console.warn('서류 비우기 실패(다음에 다시 시도)', err); });
+        }).then(function () {
           revokeAllPhotoUrls();
+          revokeAllDocUrls();
           toast('모든 기록을 지웠어요');
           navigate('/', true);
         });
@@ -5590,7 +7722,7 @@
     });
   }
 
-  /** 지운 매물의 사진이 남아 있으면(지울 때 저장소 연결이 끊겼던 경우) 조용히 정리한다. 전체 삭제·덮어쓰기로 지운 매물 포함 */
+  /** 지운 매물의 사진·서류(1.6.0)가 남아 있으면(지울 때 저장소 연결이 끊겼던 경우) 조용히 정리한다. 전체 삭제·덮어쓰기로 지운 매물 포함 */
   function cleanDeletedPhotos() {
     if (loadProblem) return; // 기록을 제대로 못 읽었으면 아무것도 지우지 않는다
     var alive = {};
@@ -5608,9 +7740,10 @@
     if (recent) setTimeout(cleanDeletedPhotos, UNDO_KEEP_MS);
     var chain = Promise.resolve();
     ids.forEach(function (id) {
-      chain = chain.then(function () { return Photos.removeByProperty(id); });
+      // 1.6.0: 서류도 같이(사진과 같은 규칙)
+      chain = chain.then(function () { return Photos.removeByProperty(id); }).then(function () { return Docs.removeByProperty(id); });
     });
-    chain.catch(function (err) { console.warn('지운 매물 사진 정리 실패', err); });
+    chain.catch(function (err) { if (!dbBlockedErr(err)) console.warn('지운 매물 사진·서류 정리 실패', err); });
   }
 
   // ---------------- 코드·글로 매물 추가 (Claude 가져오기 코드, 네이버 매물 화면 글) ----------------
@@ -5725,7 +7858,19 @@
       h('details', { class: 'prompt-box' },
         h('summary', {}, '요청문 펼쳐 보기'),
         h('pre', { class: 'prompt-text', text: IMP.PROMPT })),
-      h('p', { class: 'small muted', text: '호수는 네이버 부동산에 없어서 담은 뒤 직접 입력해요. 숫자를 잘못 읽을 수 있으니 미리보기에서 꼭 확인하세요.' })
+      h('p', { class: 'small muted', text: '호수는 네이버 부동산에 없어서 담은 뒤 직접 입력해요. 숫자를 잘못 읽을 수 있으니 미리보기에서 꼭 확인하세요.' }),
+      // 1.6.0 통합: 등기부 사진은 Claude 로(앱은 사진 글자를 읽지 못함). PDF 는 상세 화면 등기부 섹션의 [서류 올리기]가 바로 읽는다
+      IMP.REGISTRY_PROMPT ? [
+        h('h3', { class: 'imp-way', text: '등기부 사진은 Claude로 읽기' }),
+        h('ol', { class: 'isteps', role: 'list' },
+          importStep(1, '인터넷등기소 PDF가 있으면 그것을 올려요', '매물 상세 화면 등기부 섹션의 [서류 올리기]에 PDF를 올리면 앱이 바로 읽어요. "말소사항 포함"으로 열람한 PDF가 좋아요.'),
+          importStep(2, '사진이면 [등기부 요청문 복사] → Claude 채팅', '요청문을 붙여 넣고 등기부 사진(모든 장)을 첨부해요.'),
+          importStep(3, 'Claude가 준 등기부 코드를 위 칸에 붙여 넣어요', '어느 매물의 등기부인지 고르고 미리보기를 확인한 뒤 답해요.')),
+        h('button', { type: 'button', class: 'btn btn-secondary btn-block', onclick: copyRegistryPrompt }, icon('copy', 'ic-sm'), '등기부 요청문 복사'),
+        h('details', { class: 'prompt-box' },
+          h('summary', {}, '등기부 요청문 펼쳐 보기'),
+          h('pre', { class: 'prompt-text', text: IMP.REGISTRY_PROMPT }))
+      ] : null
     ];
     // 한 번이라도 코드·글로 담은 적이 있으면(가져온 매물이 있음) 입력 카드의 한 줄 안내를 생략한다
     var returning = !linkMode && state.properties.some(function (p) { return !!p.importedAt; });
@@ -5791,7 +7936,10 @@
     var list = h('div', { class: 'imp-list' });
     var submitBtn = h('button', { type: 'button', class: 'btn btn-block', disabled: true }, '담기');
     var actions = h('div', { class: 'imp-actions', hidden: true }, submitBtn);
-    var resultEl = h('section', { class: 'imp-result', 'aria-label': '미리보기' }, errBox, naverNote, status, hint, list, actions);
+    // 1.6.0 통합: 등기부 코드(registry 블록) 상자. 등기부만 있으면 넣을 매물을 고르고 [등기부 미리보기], 매물과 같이 오면 담는 매물에 함께
+    var regBox = h('div', { class: 'imp-reg', hidden: true });
+    var regTarget = null; // 사용자가 고른 매물 id(다시 그려도 유지)
+    var resultEl = h('section', { class: 'imp-result', 'aria-label': '미리보기' }, errBox, naverNote, status, regBox, hint, list, actions);
 
     // 딥링크: 안내 → 미리보기 → 입력 칸 → (접힌) 방법 안내. 그 밖(1.5.0: 처음 쓸 때도 같음): 입력 칸 → 미리보기 → (접힌) 방법 안내
     if (linkMode) main.append(linkCard, resultEl, pasteCard, howEl);
@@ -5886,9 +8034,19 @@
         setError(r && !r.ok ? r.message : '');
         hint.hidden = true;
         actions.hidden = true;
+        drawRegistry(null);
         return;
       }
       setError('');
+      // 1.6.0 통합: 등기부 코드만 있음(매물 없음) → 넣을 매물 고르기 + [등기부 미리보기]. [담기] 바는 숨김
+      if (!r.entries.length && r.registry) {
+        setStatus(['등기부 코드를 찾았어요', '어느 매물의 등기부인지 고르고 [등기부 미리보기]를 누르세요. 아직 저장되지 않아요.']);
+        hint.hidden = true;
+        actions.hidden = true;
+        drawRegistry(r);
+        return;
+      }
+      drawRegistry(r);
       var offN = r.entries.filter(function (e) { return e.canImport && !e.checked; }).length;
       var dupN = r.entries.filter(function (e) { return e.warnings.some(function (w) { return w.code === 'exists' || w.code === 'gone' || w.code === 'repeat'; }); }).length;
       // 네이버 상세+목록 글: 경고 없이 기본 해제한 목록 매물
@@ -5911,6 +8069,87 @@
       hint.hidden = false;
       actions.hidden = false;
       refreshCount();
+    }
+
+    /**
+     * 1.6.0 통합: 등기부 코드 상자. 요약(열람 일시·소유자 수·살아 있는 기록)·경고·참고 문구.
+     * 매물과 함께 온 코드면 "담는 매물에 함께 넣어요", 등기부만 있으면 넣을 매물 고르기(registry match 로 자동 선택) + [등기부 미리보기]
+     */
+    function drawRegistry(r) {
+      regBox.textContent = '';
+      var s = r && r.ok ? r.registry : null;
+      regBox.hidden = !s;
+      if (!s) return;
+      var model = registryModelFromCode(s, r.registryNotes, r.registryWarnings);
+      var liveN = {};
+      Object.keys(model.live).forEach(function (k) { if (Array.isArray(model.live[k]) && model.live[k].length) liveN[k] = model.live[k].length; });
+      var risky = REG_STOP_KINDS.filter(function (k) { return liveN[k]; });
+      var sum = [regViewedText(model.viewedAt, model.docType), model.owners.length ? '소유자 ' + model.owners.length + '명' : '',
+        risky.length ? '살아 있는 멈춤 기록: ' + risky.map(function (k) { return REG_KIND_LABEL[k] + ' ' + liveN[k] + '건'; }).join(', ') : '살아 있는 멈춤 기록 없음',
+        liveN.mortgage ? '근저당 ' + liveN.mortgage + '건' : ''].filter(Boolean).join(' · ');
+      var m = model.match || {};
+      var where = [m.name, m.dong ? m.dong + '동' : '', m.ho ? m.ho + '호' : ''].filter(Boolean).join(' ');
+      appendKid(regBox, [ // append 는 null 을 "null" 글자로 넣으므로 appendKid(빈 값 건너뜀)
+        h('h3', { class: 'imp-reg-title', text: '등기부 코드' + (where ? ' · ' + where : '') }),
+        h('p', { class: 'imp-reg-sum', text: sum }),
+        (r.registryWarnings || []).length ? h('p', { class: 'imp-warns' }, r.registryWarnings.map(function (w) { return h('span', { class: 'imp-warn w-' + str(w.code), text: str(w.text) }); })) : null,
+        (r.registryNotes || []).length ? h('p', { class: 'imp-notes', text: r.registryNotes.join(' · ') }) : null]);
+      if (r.entries.length) {
+        regBox.append(h('p', { class: 'small', text: '[담기]를 누르면 새로 담는 매물 가운데 동·단지명이 맞는 매물에 이 등기부를 함께 넣어요. 맞는 매물이 없으면 넣지 않고, 알림의 [등기부 미리보기]로 확인한 뒤 넣을 수 있어요. 담은 뒤 상세 화면 등기부 섹션에서 답을 확인하세요.' }));
+        return;
+      }
+      var props = state.properties.filter(function (p) { return p.status !== 'dropped'; })
+        .concat(state.properties.filter(function (p) { return p.status === 'dropped'; }));
+      if (!props.length) {
+        regBox.append(h('div', { class: 'notice', role: 'note' },
+          h('strong', { text: '등기부를 넣을 매물이 없어요' }),
+          h('p', { text: '먼저 매물을 추가한 뒤 이 코드를 다시 붙여 넣으세요.' }),
+          h('a', { class: 'btn btn-small btn-secondary', href: '#/new' }, '매물 추가')));
+        return;
+      }
+      var hit = matchRegistryTarget(s, props);
+      if (regTarget && !findProp(regTarget)) regTarget = null;
+      var chosen = regTarget || (hit && hit.prop ? hit.prop.id : '');
+      // 1.6.0 검토 반영: 맞는 매물이 여럿(동점)이면 그 후보를 목록 맨 위에 두고 "여러 개예요"로 알린다
+      var tie = hit && hit.tie ? hit.tie : [];
+      if (tie.length) props = tie.concat(props.filter(function (p) { return tie.indexOf(p) < 0; }));
+      var selId = 'imp-reg-target';
+      var sel = h('select', { class: 'select', id: selId, 'aria-describedby': 'imp-reg-why' },
+        chosen ? null : h('option', { value: '', text: '매물을 골라 주세요' }),
+        props.map(function (p) {
+          var u = [p.dong ? p.dong + '동' : '', p.ho ? p.ho + '호' : ''].filter(Boolean).join(' ');
+          return h('option', { value: p.id, text: (tie.indexOf(p) >= 0 ? '후보 · ' : '') + p.name + (u ? ' · ' + u : '') + (p.status === 'dropped' ? ' (탈락)' : '') });
+        }));
+      sel.value = chosen;
+      var why = h('p', { class: 'small muted', id: 'imp-reg-why', text: regTarget ? '직접 고른 매물이에요.'
+        : hit && hit.prop ? '자동으로 골랐어요: ' + hit.why + '. 다르면 바꾸세요.'
+          : tie.length ? '맞는 매물이 여러 개예요(' + tie.map(function (p) { return p.name + (p.dong ? ' ' + p.dong + '동' : '') + (p.ho ? ' ' + p.ho + '호' : ''); }).join(', ') + '). 골라 주세요.'
+            : '맞는 매물을 찾지 못했어요. 직접 골라 주세요.' });
+      var go = h('button', { type: 'button', class: 'btn btn-block btn-accent', disabled: !chosen }, '등기부 미리보기');
+      sel.addEventListener('change', function () {
+        regTarget = sel.value || null;
+        go.disabled = !sel.value;
+        why.textContent = sel.value ? '직접 고른 매물이에요.' : '매물을 골라 주세요.';
+      });
+      go.addEventListener('click', function () {
+        var p = findProp(sel.value);
+        if (!p) return;
+        var mdl = prepareRegistryModel(p, registryModelFromCode(s, r.registryNotes, r.registryWarnings));
+        registryPreview(p, mdl, {}).then(function (choice) {
+          if ((choice.action !== 'apply' && choice.action !== 'record') || view !== v) return null;
+          return answerFromRegistry(p, mdl, choice, null).then(function (res) {
+            if (!res) return; // 답하지 못함(토스트로 알림)
+            sessionRemove(IMPORT_TEXT_KEY);
+            var g = gateSections()[0];
+            if (g) pendingSection = g.id; // 상세가 등기부 섹션을 열고 그리로 스크롤
+            homeReveal[p.id] = true;
+            navigate('/p/' + p.id, true);
+          });
+        });
+      });
+      regBox.append(
+        h('div', { class: 'field imp-reg-pick' }, h('label', { for: selId, text: '어느 매물의 등기부인가요?' }), sel, why),
+        go);
     }
 
     function parseNow() {
@@ -6025,16 +8264,49 @@
       });
       Array.prototype.unshift.apply(state.properties, made);
       made.forEach(function (p) { homeReveal[p.id] = true; }); // 1.5.1 검토 반영: 홈 필터·검색이 남아 있어도 담은 매물이 홈에서 보이게
+      // 1.6.0 통합: 같은 코드에 등기부(registry)도 있으면 새로 담은 매물 가운데 동·단지명이 맞는 매물에 함께 넣는다.
+      // 새 매물이라 덮어쓸 답이 없으므로 미리보기 없이 넣고, 답은 상세 화면 등기부 섹션에서 확인한다.
+      // 1.6.0 검토 반영: 맞는 매물이 없거나 여럿이면(동이 다름 등) 넣지 않는다 — 다른 집의 "없음" 답이 새 매물에 들어가지 않게.
+      // 토스트의 [등기부 미리보기]로 고른 매물에 미리보기를 거쳐 넣을 수 있다
+      var regMsg = '';
+      var regLater = null;
+      if (current && current.registry) {
+        var regCode = current.registry;
+        var regNotes = current.registryNotes;
+        var regWarns = current.registryWarnings;
+        var regHit = matchRegistryTarget(regCode, made);
+        if (regHit && regHit.prop) {
+          var regProp = regHit.prop;
+          var rm = registryModelFromCode(regCode, regNotes, regWarns);
+          var ru = registryUnitCheck(regProp, rm.dong, rm.ho);
+          var rr = applyRegistrySnapshot(regProp, rm.snap, { noRefresh: true, titleMismatch: ru.state === 'mismatch' ? ru.label : '' });
+          if (rr.ok) regMsg = made.length > 1 ? ' 등기부 코드는 "' + regProp.name + '"에 넣었어요.' : ' 등기부 코드도 함께 넣었어요.';
+        } else {
+          regMsg = ' 등기부의 동·호' + (regHit && regHit.tie ? '로 담은 매물 하나를 고르지 못해' : '가 담은 매물과 맞지 않아') + ' 등기부는 넣지 않았어요.';
+          var target = regHit && regHit.tie ? regHit.tie[0] : made[0];
+          regLater = function () {
+            // 지금 화면(호수를 적는 수정 폼 등) 위에 미리보기를 띄운다. 폼은 손댄 칸만 저장하므로 답·면적과 겹치지 않는다
+            if (!findProp(target.id)) return;
+            var mdl = prepareRegistryModel(target, registryModelFromCode(regCode, regNotes, regWarns));
+            registryPreview(target, mdl, {}).then(function (choice) {
+              if (choice.action === 'apply' || choice.action === 'record') return answerFromRegistry(target, mdl, choice, null);
+            });
+          };
+        }
+      }
       dirty = true;
       saveNow();
       sessionRemove(IMPORT_TEXT_KEY);
       // hashchange 를 기다리지 않고 이 클릭 안에서 다음 화면을 그린다(1개면 호수 칸에 바로 키보드가 뜨게)
+      // 1.6.0 검토 반영: 등기부를 넣지 못했으면 토스트에 [등기부 미리보기](그 매물 상세로 가서 미리보기 → 답하기)
+      var regOpt = regLater ? { duration: 15000, action: { label: '등기부 미리보기', fn: regLater } } : regMsg ? { duration: 4000 } : null;
       if (made.length === 1) {
         pendingFocus = 'ho';
-        toast('매물을 담았어요'); // 1.5.0 검토 반영: "호수만 입력하면 돼요"는 수정 폼의 배너가 같은 자리에서 말하므로 토스트에서 뺌
+        // 1.5.0 검토 반영: "호수만 입력하면 돼요"는 수정 폼의 배너가 같은 자리에서 말하므로 토스트에서 뺌
+        toast(regMsg ? '매물을 담았어요.' + regMsg : '매물을 담았어요', regOpt);
         navigateNow('/p/' + made[0].id + '/edit', true);
       } else {
-        toast(made.length + '개 담았어요. 호수를 입력해 주세요', { duration: 4000 });
+        toast(made.length + '개 담았어요. 호수를 입력해 주세요' + (regMsg ? '.' + regMsg : ''), regOpt || { duration: 4000 });
         navigateNow('/', true);
       }
     });
@@ -6194,6 +8466,7 @@
     if (closeLightbox) closeLightbox();
     closeAllDialogs();
     revokeAllPhotoUrls();
+    revokeAllDocUrls(); // 1.6.0: 서류 보기 임시 주소(이미 연 새 창은 다 읽은 뒤라 괜찮음)
 
     var result = renderPath(path);
     window.scrollTo(0, isBack && scrollMemory[path] ? scrollMemory[path] : 0);
@@ -6223,6 +8496,7 @@
     if (busyEditing()) { refreshTimer = setTimeout(tryRefreshView, 1500); return; }
     var y = window.scrollY;
     revokeAllPhotoUrls();
+    revokeAllDocUrls();
     renderPath(currentPath());
     window.scrollTo(0, y);
   }
@@ -6320,6 +8594,8 @@
     if (loadProblem === 'broken') {
       alertDialog('저장된 기록을 읽지 못했어요', '기록이 손상돼 새로 시작해요. 손상된 원본은 지우지 않고 따로 보관했어요. 백업 파일이 있다면 설정 → 백업 불러오기로 되살릴 수 있어요.');
     }
+    // 1.6.0: 다른 탭이 예전 버전으로 사진 DB 를 열어 두어 업그레이드(서류함 추가)가 막히면 안내 띠, 풀리면 다시 그림
+    IDB.onBlockedChange(showDbBlocked);
     // 사진 저장소를 쓸 수 없으면(파일로 열기 등) 사진 버튼을 숨기고 안내를 보여 준다
     Photos.probe().then(function (ok) {
       document.documentElement.classList.toggle('no-photos', !ok);

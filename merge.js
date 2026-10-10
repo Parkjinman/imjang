@@ -29,6 +29,11 @@
  *   - 한쪽에만 있는 항목·섹션 메모는 그대로 남긴다(합집합). 단, 다른 쪽이 예전 기록(legacyAt)이고 그보다 전에
  *     바뀐 것이면 다른 쪽에서 지운 것으로 본다(1.2.x 의 "더 나중에 고친 매물이 이김"과 같은 결과).
  *   - 매물번호·확인매물·가져온 시각·출처는 비어 있지 않은 쪽, 둘 다 있으면 더 나중에 고친 매물 쪽.
+ *   - 1.6.0 매도인 이름(sellerName)은 기본 정보처럼 fieldsAt 으로 비교한다. 다만 나중에 늘어난 칸이라, 시각이 없는 빈 값은
+ *     "아직 몰랐다"(시각 0)로 본다(LATE_FIELDS) — 예전 버전 기기·탭의 사본이 다른 기기에서 먼저 적은 이름을 지우지 않게.
+ *   - 1.6.0 등기부 해석 기록(registrySnapshots: [{ id, …, t }])은 id 합집합. 같은 id 는 t(없으면 addedAt)가 큰 쪽(같으면 내 것).
+ *     지운 기록은 registrySnapshotsRemoved { 기록id: 지운 시각 } 합집합(큰 시각)으로 전하고, 지운 시각 뒤에 고친 기록이 아니면 뺀다.
+ *     1.6.0 검토 반영: 열람 일시·고유번호·서류 종류가 같은 겹친 기록(두 기기에서 같은 PDF 를 따로 올림)은 하나로 줄인다(dedupeSnapshots).
  *   - 매물 삭제는 deleted { 매물id: 지운 시각 } 로 전한다. 지운 시각보다 나중에 고친 매물은 지우지 않고 남긴다.
  *     전체 삭제·[덮어쓰기]로 지운 것(app.js localDeleted)은 이 기기 일이라 여기서 다루지 않는다.
  */
@@ -40,8 +45,12 @@
   'use strict';
 
   // 기본 정보(폼에서 고치는 칸 + 가져오기 코드의 공급면적). fieldsAt 의 키
+  // 1.6.0: sellerName(매도인 이름. 등기부 소유자와 비교에 씀) 추가
   var FIELDS = ['name', 'dong', 'ho', 'area', 'supplyArea', 'floor', 'direction', 'askPrice', 'realPrice',
-    'agentName', 'agentPhone', 'memo', 'sourceUrl'];
+    'agentName', 'agentPhone', 'memo', 'sourceUrl', 'sellerName'];
+  // 1.6.0: FIELDS 가운데 나중에 늘어난 칸. 시각(fieldsAt)이 없는 빈 값은 "그때 비어 있었다"가 아니라 "아직 몰랐다"(시각 0)로 본다.
+  // 그러지 않으면 예전 버전(1.5.x) 기기·탭이 쓴 사본의 빈 값이 그 사본의 updatedAt 을 시각으로 얻어, 다른 기기에서 먼저 적은 이름을 지운다
+  var LATE_FIELDS = { sellerName: 1 };
   // 진행 상태 묶음. statusAt 하나로 함께 움직인다(탈락 사유는 상태와 같이 정해지므로)
   var STATUS_FIELDS = ['status', 'dropReason'];
   // 가져오기 코드가 채우는 값. 사용자가 고치지 않으므로 시각 없이 "비어 있지 않은 쪽"
@@ -127,7 +136,96 @@
     for (var j = 0; j < ik.length; j++) if (!sameItem(own(a.items, ik[j]), own(b.items, ik[j]))) return false;
     var mk = unionKeys(a.sectionMemos, b.sectionMemos);
     for (var m = 0; m < mk.length; m++) if (!sameVal(own(a.sectionMemos, mk[m]), own(b.sectionMemos, mk[m]))) return false;
-    return true;
+    return sameSnapshots(a, b); // 1.6.0: 등기부 해석 기록과 지운 기록 표시
+  }
+
+  // ---------------- 1.6.0 등기부 해석 기록(registrySnapshots) ----------------
+  /** 기록 목록: 배열이고 id 가 있는 객체만(없으면 빈 배열) */
+  function snapList(v) {
+    return Array.isArray(v) ? v.filter(function (s) { return isObj(s) && !blank(s.id) && !BAD_KEYS[s.id]; }) : [];
+  }
+  /** 기록이 마지막으로 바뀐 시각(t, 없으면 addedAt) */
+  function snapT(s) { return ms(s.t) || ms(s.addedAt); }
+  /** 키 순서와 상관없이 같은 내용이면 같은 글자(비교용) */
+  function stable(v) {
+    if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+    if (isObj(v)) return '{' + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ':' + stable(v[k]); }).join(',') + '}';
+    return JSON.stringify(v === undefined ? null : v);
+  }
+  function snapKey(list) {
+    return stable(list.slice().sort(function (x, y) { return str(x.id) < str(y.id) ? -1 : str(x.id) > str(y.id) ? 1 : 0; }));
+  }
+  function sameSnapshots(a, b) {
+    return snapKey(snapList(a.registrySnapshots)) === snapKey(snapList(b.registrySnapshots)) &&
+      stable(timeMap(a.registrySnapshotsRemoved, 0)) === stable(timeMap(b.registrySnapshotsRemoved, 0));
+  }
+  /**
+   * 두 사본의 등기부 해석 기록 합치기 → { list, removed, n(받은 쪽 덕분에 들어오거나 바뀐 기록 수) }.
+   * id 합집합, 같은 id 는 t 가 큰 쪽(같으면 내 것). 지운 기록 표시(removed)도 합집합(큰 시각)이고,
+   * 지운 시각 이후에 고친(t 가 더 큰) 기록이 아니면 뺀다. 순서는 만든 시각(addedAt)·id 순(어느 쪽에서 합쳐도 같게)
+   */
+  function mergeSnapshots(L, I) {
+    var removed = unionMax(timeMap(L.registrySnapshotsRemoved, 0), timeMap(I.registrySnapshotsRemoved, 0));
+    var pick = {};
+    var fromI = {};
+    snapList(L.registrySnapshots).forEach(function (s) { if (!hasOwn(pick, s.id)) pick[s.id] = s; });
+    snapList(I.registrySnapshots).forEach(function (s) {
+      var cur = own(pick, s.id);
+      if (!cur || snapT(s) > snapT(cur)) {
+        if (!cur || stable(cur) !== stable(s)) fromI[s.id] = true;
+        pick[s.id] = s;
+      }
+    });
+    var list = [];
+    Object.keys(pick).forEach(function (id) {
+      var s = pick[id];
+      if (own(removed, id) && removed[id] >= snapT(s)) return;
+      list.push(clone(s));
+    });
+    // 1.6.0 검토 반영: 두 기기에서 같은 등기부를 따로 올려 생긴 겹친 기록은 하나로
+    list = dedupeSnapshots(list);
+    var n = 0;
+    list.forEach(function (s) { if (fromI[s.id]) n++; });
+    list.sort(function (x, y) { return (ms(x.addedAt) - ms(y.addedAt)) || (str(x.id) < str(y.id) ? -1 : str(x.id) > str(y.id) ? 1 : 0); });
+    return { list: list, removed: removed, n: n };
+  }
+  /**
+   * 1.6.0 검토 반영: 같은 등기부를 두 기기에서(또는 한 기기에서 두 번) 따로 올려 생긴 겹친 기록 — 열람 일시·고유번호·서류 종류가
+   * 같고 id 만 다른 것 — 을 하나로 줄인다(열람 일시가 없는 기록은 줄이지 않음). 남는 것은 t 가 큰 쪽(같으면 id 가 작은 쪽).
+   * 남는 기록에 서류(docId)가 없으면 버리는 쪽 것을 잇고, 앱이 넣은 답 표시(applied)는 항목마다 시각이 큰 것을 합친다.
+   * 어느 기기에서, 어떤 순서로 합쳐도 같은 결과가 나온다. 결과: 새 배열(합친 기록만 사본, 나머지는 받은 객체 그대로)
+   */
+  function dedupeSnapshots(list) {
+    var groups = {};
+    var order = [];
+    (Array.isArray(list) ? list : []).forEach(function (s) {
+      if (!isObj(s)) return;
+      var v = ms(s.viewedAt);
+      var k = v ? 'v' + v + '|' + str(s.uniqueNo) + '|' + str(s.docType) : 'i' + str(s.id);
+      if (!hasOwn(groups, k)) { groups[k] = []; order.push(k); }
+      groups[k].push(s);
+    });
+    var out = [];
+    order.forEach(function (k) {
+      var g = groups[k];
+      if (g.length === 1) { out.push(g[0]); return; }
+      g.sort(function (x, y) { return (snapT(y) - snapT(x)) || (str(x.id) < str(y.id) ? -1 : str(x.id) > str(y.id) ? 1 : 0); });
+      var keep = clone(g[0]);
+      g.slice(1).forEach(function (s) {
+        if (!keep.docId && s.docId) keep.docId = s.docId;
+        if (!isObj(s.applied)) return;
+        if (!isObj(keep.applied)) keep.applied = {};
+        Object.keys(s.applied).forEach(function (id) {
+          var a = s.applied[id];
+          var b = own(keep.applied, id);
+          if (BAD_KEYS[id] || !isObj(a)) return;
+          if (!isObj(b) || ms(a.t) > ms(b.t)) keep.applied[id] = clone(a);
+        });
+        if (ms(s.appliedAt) > ms(keep.appliedAt)) keep.appliedAt = s.appliedAt;
+      });
+      out.push(keep);
+    });
+    return out;
   }
 
   // ---------------- 항목 안의 값별 시각(ft) ----------------
@@ -271,6 +369,8 @@
     var fa = {};
     FIELDS.forEach(function (f) {
       var t = typeof rawFa === 'number' ? ms(rawFa) : ms(own(rawFa, f));
+      // 1.6.0: 나중에 늘어난 칸(매도인 이름)은 시각이 없고 비어 있으면 채우지 않는다(= 아직 모름, 시각 0)
+      if (!t && LATE_FIELDS[f] && blank(p[f])) return;
       if (t || fill) fa[f] = t || fill;
     });
     p.fieldsAt = fa;
@@ -312,7 +412,7 @@
    * 같은 매물의 두 사본을 합친다. 둘 다 고치지 않고 새 매물을 만든다.
    * 결과: { prop, changed(내 것과 내용이 다름), sameAsIncoming(받은 것과 내용이 같음),
    *         fields(받은 쪽에서 가져온 기본 정보 수), status(상태를 가져왔는지), items(가져온 항목 수),
-   *         memos(가져온 섹션 메모 수), other(채운 그 밖 필드 수) }
+   *         memos(가져온 섹션 메모 수), other(채운 그 밖 필드 수), snapshots(1.6.0: 가져온 등기부 해석 기록 수) }
    */
   function mergeProperty(local, incoming) {
     var L = isObj(local) ? local : {};
@@ -326,8 +426,10 @@
     // 1) 기본 정보: 필드마다 더 나중에 고친 쪽
     var fa = {};
     FIELDS.forEach(function (f) {
-      var lt = ms(own(L.fieldsAt, f)) || lBase;
-      var it = ms(own(I.fieldsAt, f)) || iBase;
+      // 1.6.0: 나중에 늘어난 칸은 시각 없는 빈 값을 "아직 모름"(0)으로 본다(LATE_FIELDS)
+      var late = !!LATE_FIELDS[f];
+      var lt = ms(own(L.fieldsAt, f)) || (late && blank(L[f]) ? 0 : lBase);
+      var it = ms(own(I.fieldsAt, f)) || (late && blank(I[f]) ? 0 : iBase);
       if (it > lt) {
         set(out, f, I[f]);
         fa[f] = it;
@@ -414,6 +516,17 @@
     out.sectionMemoAt = memoAt;
     set(out, 'legacyAt', oF || undefined);
 
+    // 5') 1.6.0 등기부 해석 기록: id 합집합(같은 id 는 더 나중에 바꾼 쪽), 지운 기록 표시도 합집합.
+    //     어느 쪽에도 없으면(예전 기록끼리) 키를 만들지 않는다
+    var snapN = 0;
+    if (hasOwn(L, 'registrySnapshots') || hasOwn(I, 'registrySnapshots') ||
+      hasOwn(L, 'registrySnapshotsRemoved') || hasOwn(I, 'registrySnapshotsRemoved')) {
+      var ms5 = mergeSnapshots(L, I);
+      out.registrySnapshots = ms5.list;
+      set(out, 'registrySnapshotsRemoved', Object.keys(ms5.removed).length ? ms5.removed : undefined);
+      snapN = ms5.n;
+    }
+
     // 6) 나머지: id 는 내 것, 만든 시각은 이른 쪽, 고친 시각은 늦은 쪽
     set(out, 'id', L.id !== undefined ? L.id : I.id);
     var c1 = ms(L.createdAt);
@@ -430,7 +543,8 @@
       status: sum.status,
       items: sum.items,
       memos: sum.memos,
-      other: sum.other
+      other: sum.other,
+      snapshots: snapN // 1.6.0: 받은 쪽에서 들어오거나 바뀐 등기부 해석 기록 수
     };
   }
 
@@ -579,6 +693,7 @@
   return {
     after: after,
     FIELDS: FIELDS,
+    LATE_FIELDS: LATE_FIELDS,
     STATUS_FIELDS: STATUS_FIELDS,
     OTHER_FIELDS: OTHER_FIELDS,
     ITEM_FIELDS: ITEM_FIELDS,
@@ -588,6 +703,8 @@
     editItem: editItem,
     mergeItem: mergeItem,
     mergeProperty: mergeProperty,
+    mergeSnapshots: mergeSnapshots,
+    dedupeSnapshots: dedupeSnapshots,
     mergeStates: mergeStates,
     sameProperty: sameProperty,
     sameItem: sameItem

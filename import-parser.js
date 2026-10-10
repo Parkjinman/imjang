@@ -23,6 +23,10 @@
  *   목록 매물은 저장된 매물·지운 매물과 단지명·동·호가로 한 번 더 비교, 평에서 바꾼 면적은 "약"(근삿값),
  *   실거래 표의 가격 칸 모양 검사, 같은 면적 표가 아니면 실거래가는 메모에만, 붙은 전화번호를 못 나누면 메모로(확인 필요).
  *   tools/make-import-code.js 가 네이버 글로 만든 코드에는 "from":"naver-text" 를 넣는다(앱이 같은 주의를 보여 줌).
+ * 1.6.0: "등기부 코드"도 읽는다. Claude 가 등기부등본 사진·PDF 를 읽고 답한 { "imjang": 1, "registry": { … } } 블록을
+ *   parseRegistryBlock 으로 검사해 등기부 기록(snapshot: { id, source:'code', viewedAt, docType, includesCancelled, uniqueNo, area,
+ *   owners, live, history, mortgages, answers, match, notes })으로 바꿔 결과의 registry 에 넣는다. properties 와 함께 와도 되고
+ *   registry 만 와도 된다(그때 entries 는 빈 배열). 요청문은 REGISTRY_PROMPT. 주민등록번호처럼 보이는 글은 가린다.
  *
  * 보안: 붙여 넣은 글은 믿지 않는다. 아는 필드만 골라 읽고(길이·범위 검사), __proto__·constructor·prototype 키는
  *       버리고, 링크는 http/https 만 남긴다. 결과는 문자열·숫자뿐이며 화면에는 textContent 로만 넣는다.
@@ -41,12 +45,22 @@
     properties: 30,         // 한 번에 담을 수 있는 매물 수
     candidates: 100,        // 글 속에서 JSON 후보를 찾아보는 횟수 상한(코드 블록 여러 개를 모두 읽으므로 넉넉히)
     name: 80, dong: 20, floor: 20, direction: 20, tradeType: 10,
-    agentName: 60, agentPhone: 30, memo: 2000, url: 2000, articleNo: 30, confirmedAt: 30
+    agentName: 60, agentPhone: 30, memo: 2000, url: 2000, articleNo: 30, confirmedAt: 30,
+    // 1.6.0 등기부 코드
+    regEntries: 30,   // 칸(근저당·압류 …)마다 기록 수
+    regOwners: 20,    // 소유자 수
+    regNotes: 10,     // Claude 가 남긴 참고 문장 수
+    regNote: 300,     // 참고 문장·기록 메모 한 개 길이
+    regHolder: 60,    // 권리자·채무자
+    regPurpose: 40,   // 등기목적
+    regOwnerName: 40, // 소유자 이름
+    regBlocks: 5      // 한 글에서 살펴볼 등기부 블록 수(쓰는 것은 첫 번째뿐)
   };
   var RANGE = {
     area: [1, 1000],           // 전용면적 ㎡
     supplyArea: [1, 2000],     // 공급면적 ㎡
-    price: [1, 10000000]       // 만원 (1천억까지)
+    price: [1, 10000000],      // 만원 (1천억까지)
+    won: [1000, 1000000000000] // 1.6.0 등기부 금액: 원 (1천원 ~ 1조원)
   };
   var BAD_KEYS = { '__proto__': 1, 'constructor': 1, 'prototype': 1 };
   var EXAMPLE_NAME = '단지명'; // 요청문 속 예시의 자리표시 이름
@@ -68,6 +82,28 @@
     '```'
   ].join('\n');
 
+  // 1.6.0: 등기부등본 사진·PDF 를 Claude 에게 보낼 때 쓰는 요청문. README 에 같은 글이 들어간다(바꾸면 README 도 함께).
+  // 예시의 이름(홍길동·김철수)·은행(○○은행)·고유번호(0000-…)는 자리표시다. match.name 이 "단지명"인 블록은 예시로 보고 건너뛴다
+  var REGISTRY_PROMPT = [
+    '임장체크 앱에 넣을 등기부등본 내용을 정리해 줘.',
+    '첨부한 등기부등본(사진·PDF)을 읽고 아래 형식의 JSON만 코드 블록으로 답해 줘.',
+    '- 빨간 실선이 그어진 기록은 말소된 것이야. 살아 있는 기록은 live, 말소된 기록은 history에 나눠 넣어.',
+    '- 화면에 없는 값은 빼고, 추측하지 마. 흐리거나 잘려서 못 읽은 곳은 notes에 적어 줘.',
+    '- 주민등록번호는 넣지 마(앞자리도). 권리자·채무자는 이름만 적고 등록번호·주소는 빼.',
+    '- match: 표제부의 건물 이름(name), 동(dong)·호(ho)는 숫자만, 맨 위 고유번호(uniqueNo).',
+    '- viewedAt: 아래쪽 "열람일시"(예: 2026-01-02T09:00). docType: "열람용" 또는 "제출용". includesCancelled: 제목에 "말소사항 포함"이 있으면 true, "현재 유효사항"이면 false.',
+    '- area: 전유부분 건물 내역의 면적(㎡ 숫자, 적힌 그대로).',
+    '- owners: 지금 소유자(갑구의 마지막 소유권 기록). share는 지분(혼자면 "1/1", "2분의 1"은 "1/2"), since는 그 기록의 접수일.',
+    '- live·history 칸: trust(신탁) seizure(압류·가압류) injunction(가처분) auction(경매개시결정) provisional(가등기) mortgage(근저당) jeonse(전세권) lease(주택임차권) other(그 밖). 기록이 없는 칸은 빼. 소유권이전 기록과 "○번 등기말소" 줄은 넣지 마.',
+    '- 기록 하나: rank(순위번호), date(접수일), purpose(등기목적), holder(권리자), amount(금액, 원 단위 숫자: 금23,400,000원 → 23400000). 근저당은 amount 대신 maxAmount(채권최고액)와 debtor(채무자). 1-1처럼 붙은 번호(부기)로 바뀐 금액·채무자·권리자는 본 기록에 반영하고 따로 넣지 마.',
+    '- answers: 아래 항목마다 해당하면 "yes", 아니면 "no"(말소된 기록은 reg-history에서만 봐). 마지막 장의 "이하여백"까지 모두 보지 못했으면 "no"는 쓰지 말고 빼.',
+    '  reg-land-separate(표제부 "토지별도등기 있음"), reg-trust, reg-seizure, reg-injunction, reg-auction, reg-provisional, reg-mortgage, reg-jeonse, reg-lease, reg-frequent(최근 1~2년에 소유자가 여러 번 바뀜), reg-history(말소된 압류·가압류·가처분·경매·가등기·임차권 기록이 있음. 말소사항 포함일 때만)',
+    '- 위반건축물은 건축물대장에서 보는 것이라 넣지 마.',
+    '```json',
+    '{"imjang":1,"registry":{"match":{"name":"단지명","dong":"101","ho":"1203","uniqueNo":"0000-0000-000000"},"viewedAt":"2026-01-02T09:00","docType":"열람용","includesCancelled":true,"area":84.97,"owners":[{"name":"홍길동","share":"1/1","since":"2020-06-15"}],"live":{"mortgage":[{"rank":"3","date":"2020-06-15","purpose":"근저당권설정","maxAmount":252000000,"holder":"○○은행","debtor":"홍길동"}]},"history":{"mortgage":[{"rank":"1","date":"2012-03-02","purpose":"근저당권설정","maxAmount":97500000,"holder":"○○은행","debtor":"김철수"}]},"answers":{"reg-land-separate":"no","reg-trust":"no","reg-seizure":"no","reg-injunction":"no","reg-auction":"no","reg-provisional":"no","reg-mortgage":"yes","reg-jeonse":"no","reg-lease":"no","reg-frequent":"no","reg-history":"no"},"notes":[]}}',
+    '```'
+  ].join('\n');
+
   var MESSAGES = {
     empty: '',
     'too-big': '붙여 넣은 글이 너무 길어요(200KB까지). Claude 답변은 코드 부분만, 네이버 글은 매물 화면 하나만 복사해 붙여 주세요.',
@@ -81,7 +117,9 @@
     nothing: '코드나 네이버 매물 글을 찾지 못했어요. Claude 답변 전체나, 네이버 매물 상세 화면의 글 전체를 복사해 붙여 주세요.',
     naver: '네이버 글에서 매물을 찾지 못했어요. 매물 상세 화면을 연 채로 글 전체를 복사해 붙여 주세요.',
     // 1.4.1: 상세 화면 글은 있는데 제목·가격을 읽지 못함(다시 복사해도 같으므로 다른 방법을 안내)
-    'naver-detail': '매물 상세 화면 글인데 단지명·가격을 읽지 못했어요. 네이버 화면 모양이 달라졌을 수 있어요. [매물 추가]로 직접 넣거나 Claude 방법을 써 주세요.'
+    'naver-detail': '매물 상세 화면 글인데 단지명·가격을 읽지 못했어요. 네이버 화면 모양이 달라졌을 수 있어요. [매물 추가]로 직접 넣거나 Claude 방법을 써 주세요.',
+    // 1.6.0: 등기부 코드("registry")는 있는데 읽을 수 있는 값이 하나도 없음(매물도 없음)
+    'reg-empty': '등기부 코드에 읽을 수 있는 내용이 없어요. 등기부가 잘 보이게 다시 찍어(또는 PDF로) Claude에게 보내 보세요.'
   };
 
   // ---------------- 작은 도구 ----------------
@@ -246,6 +284,31 @@
     return list.length > 0 && list.every(function (p) { return isObj(p) && get(p, 'name') === EXAMPLE_NAME; });
   }
 
+  /**
+   * 1.6.0: 해석한 값에서 등기부 블록(들)을 꺼낸다. { "registry": {…} }(배열이면 객체만), 또는 감싸지 않은 등기부 객체
+   * (properties·name 이 없고 live·history·owners·match 중 하나가 있음). 없으면 빈 배열
+   */
+  function registryFrom(v) {
+    if (!isObj(v)) return [];
+    if (has(v, 'registry')) {
+      var r = v.registry;
+      if (isObj(r)) return [r];
+      return Array.isArray(r) ? r.filter(isObj) : [];
+    }
+    if (has(v, 'properties') || has(v, 'name')) return [];
+    return (has(v, 'live') || has(v, 'history') || has(v, 'owners') || has(v, 'match')) ? [v] : [];
+  }
+  /**
+   * 요청문 속 등기부 예시: match.name 이 "단지명"이고 고유번호가 없거나 예시 값(0000-…)이다.
+   * (Claude 가 건물 이름 자리에 "단지명"을 베껴 써도 진짜 고유번호가 있으면 답으로 읽는다)
+   */
+  function isRegistryExample(r) {
+    var m = get(r, 'match');
+    if (get(m, 'name') !== EXAMPLE_NAME) return false;
+    var no = get(m, 'uniqueNo');
+    return !uniqueNoOf(no === undefined || no === null || no === '' ? get(r, 'uniqueNo') : no);
+  }
+
   // 코드처럼 보이는 시작: {"… 또는 [{… 또는 []
   var JSONISH_RE = /^(?:\{\s*"|\[\s*[{\]])/;
 
@@ -253,7 +316,8 @@
    * 한 가지 글에서 찾기. 글 끝까지 보면서 코드 블록을 모두 모은다
    * (Claude 는 스크린샷이 여러 장이면 블록을 나눠 답하기도 한다. 첫 블록만 담고 나머지를 조용히 버리지 않게).
    * 코드처럼 보이는 곳({"… [{…)만 짝을 맞춰 읽고, 설명 글 속 괄호("[참고]")는 한 글자씩 건너뛴다(횟수에 세지 않음).
-   * 결과: { list, blocks(읽은 코드 수), incomplete(코드 후보가 너무 많아 끝까지 못 봄), naver(네이버 글로 만든 코드가 있음, 1.4.1) }
+   * 결과: { list, registry(1.6.0: 등기부 블록 원본 배열), blocks(읽은 코드 수), incomplete(코드 후보가 너무 많아 끝까지 못 봄),
+   *         naver(네이버 글로 만든 코드가 있음, 1.4.1) }. 등기부 블록만 있으면 list 는 빈 배열
    *       또는 { error: 'notfound' | 'broken' | 'comment' | 'example' | 'none' | 'too-many' }
    */
   function scan(t) {
@@ -262,6 +326,8 @@
     var sawExample = false;
     var sawEmpty = false;
     var lists = [];
+    var regs = []; // 1.6.0: 등기부 블록(원본)
+    var blocks = 0;
     var incomplete = false;
     var fromNaver = false; // 1.4.1: tools/make-import-code.js 가 네이버 글로 만든 코드("from":"naver-text")
     var na = -2; // 다음 { 위치(-1: 더 없음). 매번 처음부터 찾지 않게 기억해 둔다
@@ -283,24 +349,35 @@
         return { error: r.comments ? 'comment' : 'broken' };
       }
       var list = listFrom(r.value);
+      var used = false;
       if (list) {
         if (!list.length) sawEmpty = true;
         else if (isExampleOnly(list)) sawExample = true; // 요청문 예시는 건너뛴다
         else {
           lists.push(list);
+          used = true;
           if (isObj(r.value) && get(r.value, 'from') === NAVER_SOURCE_ID) fromNaver = true;
         }
       }
+      // 1.6.0: 등기부 블록. 같은 블록에 properties 와 함께 있어도 된다. 등기부 요청문 예시는 건너뛴다
+      registryFrom(r.value).forEach(function (reg) {
+        if (isRegistryExample(reg)) sawExample = true;
+        else if (regs.length < LIMITS.regBlocks) { regs.push(reg); used = true; }
+      });
+      if (used) blocks++;
       i = end + 1; // 이 덩어리 안쪽은 다시 보지 않는다
     }
-    if (lists.length) {
+    if (lists.length || regs.length) {
       var all = [];
       lists.forEach(function (l) { for (var k = 0; k < l.length; k++) all.push(l[k]); });
-      return { list: all, blocks: lists.length, incomplete: incomplete, naver: fromNaver };
+      return { list: all, registry: regs, blocks: blocks, incomplete: incomplete, naver: fromNaver };
     }
     if (incomplete) return { error: 'too-many' };
     return { error: sawEmpty ? 'none' : (sawExample ? 'example' : 'notfound') };
   }
+
+  /** scan 결과에서 찾은 것의 수(매물 + 등기부 블록) */
+  function foundCount(f) { return (f.list ? f.list.length : 0) + (f.registry ? f.registry.length : 0); }
 
   /** 글에서 코드를 찾는다. 원문으로 먼저, 스마트 따옴표(“ ” ‘ ’)를 일반 따옴표로 바꿔 한 번 더 */
   function extract(src) {
@@ -310,8 +387,8 @@
     if (smart === t) return first;
     var second = scan(smart);
     if (first.list) {
-      // 블록마다 따옴표가 다를 때(일부만 스마트 따옴표): 바꿔 읽어 매물이 더 많이 나오면 그쪽을 쓴다
-      return second.list && second.list.length > first.list.length ? second : first;
+      // 블록마다 따옴표가 다를 때(일부만 스마트 따옴표): 바꿔 읽어 매물(1.6.0: + 등기부 블록)이 더 많이 나오면 그쪽을 쓴다
+      return second.list && foundCount(second) > foundCount(first) ? second : first;
     }
     if (second.list) return second;
     if (second.error === 'broken' || second.error === 'comment' || second.error === 'none' || second.error === 'too-many') return second;
@@ -531,6 +608,471 @@
     return { prop: p, notes: notes, warnings: warnings };
   }
 
+  // ---------------- 등기부 코드 (1.6.0) ----------------
+  // Claude 가 등기부등본 사진·PDF 를 읽고 답한 "registry" 블록 → 등기부 기록(snapshot). 모양은 registry-parser.js 가 PDF 글에서
+  // 만드는 기록과 같고 출처만 source: 'code' 다.
+  //   { id, source: 'code', viewedAt: 'YYYY-MM-DDTHH:MM' | 'YYYY-MM-DD' | '', docType: '열람용' | '제출용' | '',
+  //     includesCancelled: true | false | null, uniqueNo: '0000-0000-000000' | '', area: ㎡ | null,
+  //     owners: [{ name, share: '1/2', since: 'YYYY-MM-DD' }], live: { 칸: [기록] }, history: { 칸: [기록] },
+  //     mortgages: [살아 있는 근저당(live.mortgage 사본)], answers: { 항목 id: 'yes' | 'no' | 'done' },
+  //     match: { name, dong, ho }, notes: [Claude 가 남긴 참고 문장] }
+  //   칸: trust seizure injunction auction provisional mortgage jeonse lease other. 코드에 있던 칸만 둔다(빈 배열도 그대로).
+  //   기록: { section('gap'|'eul'), rank, date, purpose, holder, (근저당) maxAmount·debtor | (전세권·임차권) deposit | amount,
+  //          (말소) cancelledAt, text } 값이 있는 키만. 금액은 원. 이름은 registry-parser.js 의 기록 요약(brief)과 맞췄다.
+  //   앱(app.js normalizeSnapshot)이 이 기록을 저장 모양으로 다시 정리한다(viewedAt → ms, live·history → 줄 목록 등).
+  // 믿지 않는 글이므로 아는 키만 골라 새 객체를 만들고(길이·범위·모양 검사), 모르는 항목 id·값은 버리고 참고 문구로 알린다.
+  // 멈춤 신호를 놓치지 않게: 살아 있는 기록이 있는 칸의 항목은 Claude 가 "no"라고 했어도 "yes"로 바꾼다(경고 conflict).
+  // "no"는 코드에 적힌 답만 쓴다(빈 칸·빠진 칸으로 "없음"을 짐작하지 않음).
+
+  var REG_CATS = ['trust', 'seizure', 'injunction', 'auction', 'provisional', 'mortgage', 'jeonse', 'lease', 'other'];
+  var REG_CAT_LABEL = { trust: '신탁', seizure: '압류·가압류', injunction: '가처분', auction: '경매개시결정', provisional: '가등기',
+    mortgage: '근저당', jeonse: '전세권', lease: '임차권등기', other: '그 밖의 기록' };
+  /** 칸 → 체크리스트 항목(data.js 등기부 섹션 flag). 살아 있는 기록이 있으면 그 항목이 "있음" */
+  var REG_CAT_ITEM = { trust: 'reg-trust', seizure: 'reg-seizure', injunction: 'reg-injunction', auction: 'reg-auction',
+    provisional: 'reg-provisional', mortgage: 'reg-mortgage', jeonse: 'reg-jeonse', lease: 'reg-lease' };
+  /** Claude 가 칸 이름을 한글·복수형으로 적었을 때 */
+  var REG_CAT_ALIAS = { '신탁': 'trust', seizures: 'seizure', '압류': 'seizure', '가압류': 'seizure', '압류·가압류': 'seizure',
+    injunctions: 'injunction', '가처분': 'injunction', auctions: 'auction', '경매': 'auction', '경매개시결정': 'auction',
+    '가등기': 'provisional', mortgages: 'mortgage', '근저당': 'mortgage', '근저당권': 'mortgage', '전세권': 'jeonse',
+    leases: 'lease', '임차권': 'lease', '임차권등기': 'lease', '주택임차권': 'lease', others: 'other', '기타': 'other' };
+  /** 칸 → 등기부의 구(registry-parser.js brief 의 section 과 같은 값. 앱 기록 줄의 part). other 는 어느 쪽인지 몰라 비움 */
+  var REG_CAT_SECTION = { trust: 'gap', seizure: 'gap', injunction: 'gap', auction: 'gap', provisional: 'gap',
+    mortgage: 'eul', jeonse: 'eul', lease: 'eul' };
+  /** 말소된 이 칸의 기록이 있으면 reg-history(지난 기록) "있음". 분양 때 신탁·갚고 지운 근저당·전세권은 흔해서 세지 않는다(data.js reg-history tip) */
+  var REG_HISTORY_CATS = ['seizure', 'injunction', 'auction', 'provisional', 'lease'];
+  /** 코드로 받는 답 [id, type, 짧은 이름](data.js 순서). flag 는 'yes'/'no', check 는 'done'(확인함)만 */
+  var REG_ANSWERS = [
+    ['reg-view', 'check', '열람'], ['reg-land-separate', 'flag', '토지별도등기'], ['reg-joint', 'check', '공동명의 확인'],
+    ['reg-period', 'check', '소유 기간 확인'], ['reg-trust', 'flag', '신탁'], ['reg-seizure', 'flag', '압류·가압류'],
+    ['reg-injunction', 'flag', '가처분'], ['reg-auction', 'flag', '경매개시결정'], ['reg-provisional', 'flag', '가등기'],
+    ['reg-frequent', 'flag', '잦은 소유자 변경'], ['reg-mortgage', 'flag', '근저당'], ['reg-jeonse', 'flag', '전세권'],
+    ['reg-lease', 'flag', '임차권등기'], ['reg-history', 'flag', '지난 기록'], ['reg-date', 'check', '열람 일시 기록']
+  ];
+  var REG_ANSWER_TYPES = {};
+  var REG_ANSWER_LABEL = {};
+  REG_ANSWERS.forEach(function (a) { REG_ANSWER_TYPES[a[0]] = a[1]; REG_ANSWER_LABEL[a[0]] = a[2]; });
+  /** 등기부 섹션 항목이지만 등기부 코드로는 답하지 않는 것 → 버리며 남길 참고 문구 */
+  var REG_ANSWER_SKIP = {
+    'reg-title': '표제부: 중개사 설명과 비교하는 항목이라 코드 답은 뺐어요(직접 확인)',
+    'reg-owner-diff': '소유자 ≠ 매도인: 매도인과 비교하는 항목이라 코드 답은 뺐어요(직접 확인)',
+    'reg-building': '위반건축물: 건축물대장에서 보는 항목이라 코드 답은 뺐어요'
+  };
+  var REG_WHERE_LABEL = { live: '살아 있는 기록', history: '말소된 기록' };
+
+  // 주민등록번호(가린 것 포함: "800101-1******", "800101-*******"). 법인등록번호도 같은 모양이라 함께 가려진다(괜찮음)
+  var RRN_RE = /\d{6}\s*-\s*[\d*]{7}/g;
+  // 붙여 쓴 13자리: 앞 6자리가 날짜 모양이고 7번째가 1~8 (ES5: 뒤돌아보기 없이 앞 글자를 잡아 되돌림)
+  var RRN_BARE_RE = /(^|[^\d])\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])[1-8][\d*]{6}(?!\d)/g;
+  var RRN_MASK = '******-*******';
+  /** 주민등록번호처럼 보이는 글을 ******-******* 로 가린다 */
+  function maskRrn(s) {
+    return String(s).replace(RRN_RE, RRN_MASK).replace(RRN_BARE_RE, function (m, pre) { return pre + RRN_MASK; });
+  }
+  /** 등기부 한 줄 글: 주민등록번호를 먼저 가리고(자른 자리에 앞자리만 남지 않게) 길이를 자른다. 가렸으면 ctx.rrn */
+  function regText(v, max, ctx) {
+    var s = oneLine(v, LIMITS.inputChars);
+    if (!s) return '';
+    var masked = maskRrn(s);
+    if (masked !== s && ctx) ctx.rrn = true;
+    return cut(masked, max);
+  }
+  /** "없음"·"none" 같은 말(빈 칸으로 본다) */
+  function noneWord(v) { return typeof v === 'string' && /^(없음|없다|해당없음|none|no|n\/a|-)$/i.test(v.replace(/\s+/g, '')); }
+
+  var REG_DATE_RE = /^(\d{4})\s*(?:[.\-\/]|년)\s*(\d{1,2})\s*(?:[.\-\/]|월)\s*(\d{1,2})\s*(?:일|\.)?/;
+  function daysIn(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+  /** 날짜 → 'YYYY-MM-DD'. "2020-01-02", "2020.1.2.", "2020년1월2일" 모두. 없는 날짜·범위 밖(1900~2100)은 '' */
+  function regDate(v) {
+    var m = REG_DATE_RE.exec(oneLine(v, 40));
+    if (!m) return '';
+    var y = +m[1];
+    var mo = +m[2];
+    var d = +m[3];
+    if (y < 1900 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > daysIn(y, mo)) return '';
+    return y + '-' + pad2(mo) + '-' + pad2(d);
+  }
+  /** 열람 일시 → 'YYYY-MM-DDTHH:MM'(시각이 없으면 'YYYY-MM-DD'). "2026년1월2일 09시00분00초"도 받는다(초는 버림) */
+  function regDateTime(v) {
+    var s = oneLine(v, 40);
+    var date = regDate(s);
+    if (!date) return '';
+    var t = /^\s*T?\s*(\d{1,2})\s*(?::|시)\s*(\d{1,2})/.exec(s.slice(REG_DATE_RE.exec(s)[0].length));
+    return t && +t[1] < 24 && +t[2] < 60 ? date + 'T' + pad2(+t[1]) + ':' + pad2(+t[2]) : date;
+  }
+  /** 원 → "120,000,000원" (경고 문구용) */
+  function wonText(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '원'; }
+  /**
+   * 등기부 금액 → 원 정수(또는 null). 숫자, "금120,000,000원", "120,000,000", "1억 2,000만원" 모두 받는다.
+   * 범위(1천원~1조원) 밖이거나 읽을 수 없으면 빼고 참고 문구. warnBelow 보다 작으면 경고 smallamount(만원 단위로 적은 실수 등)
+   */
+  function wonOf(v, label, ctx, warnBelow) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = null;
+    if (typeof v === 'number') n = v;
+    else if (typeof v === 'string') {
+      var s = v.replace(/\s+/g, '');
+      if (/[억만천]/.test(s)) {
+        var mw = parseMoneyText(s); // 만원
+        n = mw === null ? null : mw * 10000;
+      } else if (/^금?\d[\d,]*(?:\.\d+)?원?$/.test(s)) n = parseFloat(s.replace(/[^\d.]/g, ''));
+    }
+    if (n === null || !isFinite(n) || n < RANGE.won[0] || n > RANGE.won[1]) {
+      addNote(ctx.notes, label + ': 금액이 이상해서 뺐어요');
+      return null;
+    }
+    n = Math.round(n);
+    if (warnBelow && n < warnBelow) {
+      ctx.warnings.push({ code: 'smallamount', text: label + ' ' + wonText(n) + '은 너무 작아요. 원 단위가 맞는지 확인하세요' });
+    }
+    return n;
+  }
+  /** 순위번호: "5", "1-1", "1 (전 1)" → 앞의 번호만 */
+  function rankOf(v) {
+    var m = /^\d{1,4}(?:-\d{1,4}){0,3}/.exec(oneLine(v, 30).replace(/\s+/g, '').replace(/^제/, ''));
+    return m ? m[0] : '';
+  }
+  /** 호: "1203", "제1203호", "101동 1203호", "제12층 제1203호", "101-1203" → 호 번호만. 못 읽으면 '' */
+  function hoOf(v) {
+    var s = oneLine(v, 30).replace(/\s+/g, '').replace(/^제(?=\d)/, '');
+    if (!s) return '';
+    var d = /^\d{1,4}-(\d{1,5})호?$/.exec(s);
+    if (d) return d[1];
+    var m = /^(?:제?[0-9A-Za-z가-힣]+동)?(?:제?\d{1,3}층)?제?([0-9A-Za-z]{1,8})호?$/.exec(s);
+    return m ? m[1] : '';
+  }
+  /** 고유번호: 4-4-6 자리(붙여 써도 됨). 모두 0(요청문 예시)이면 '' */
+  function uniqueNoOf(v) {
+    var m = /^(\d{4})-?(\d{4})-?(\d{6})$/.exec(oneLine(v, 40).replace(/\s+/g, ''));
+    if (!m || /^0+$/.test(m[1] + m[2] + m[3])) return '';
+    return m[1] + '-' + m[2] + '-' + m[3];
+  }
+  function docTypeOf(v) {
+    var s = oneLine(v, 20).replace(/\s+/g, '');
+    if (/열람/.test(s)) return '열람용';
+    if (/제출|발급/.test(s)) return '제출용';
+    return '';
+  }
+  /** 말소사항 포함 여부: true / false / 모름 null */
+  function cancelledOf(v) {
+    if (typeof v === 'boolean') return v;
+    var s = oneLine(v, 20).replace(/\s+/g, '').toLowerCase();
+    if (/^(true|yes|예|포함|말소사항포함)$/.test(s)) return true;
+    if (/^(false|no|아니오|아니요|미포함|현재유효사항)$/.test(s)) return false;
+    return null;
+  }
+  /** 지분: "1/2", "2분의 1" → "1/2", "단독" → "1/1". 모양이 다르면 '' */
+  function shareOf(v) {
+    var s = oneLine(v, 30).replace(/\s+/g, '').replace(/^지분/, '');
+    if (!s) return '';
+    if (/^(단독(소유)?|전부|1)$/.test(s)) return '1/1';
+    var a;
+    var b;
+    var m = /^(\d{1,6})\/(\d{1,6})$/.exec(s);
+    if (m) { a = +m[1]; b = +m[2]; }
+    else if ((m = /^(\d{1,6})분의(\d{1,6})$/.exec(s))) { a = +m[2]; b = +m[1]; }
+    else return '';
+    return a > 0 && b > 0 && a <= b ? a + '/' + b : '';
+  }
+
+  /**
+   * 기록 하나 → { section, rank, date, purpose, holder, maxAmount·debtor(근저당) | deposit(전세권·임차권) | amount, cancelledAt(말소), text }
+   * 또는 null(읽을 값 없음). section('gap'|'eul')은 칸에서 정한다. 이름은 registry-parser.js 의 brief 와 맞췄다
+   * (앱 normalizeSnapshot 이 둘을 같은 기록 줄로 바꾼다. 글 한 줄로 온 기록은 text 로)
+   */
+  function regEntry(raw, cat, where, ctx) {
+    var e = regEntryBody(raw, cat, where, ctx);
+    if (!e || !has(REG_CAT_SECTION, cat)) return e;
+    var o = { section: REG_CAT_SECTION[cat] };
+    Object.keys(e).forEach(function (k) { o[k] = e[k]; });
+    return o;
+  }
+  function regEntryBody(raw, cat, where, ctx) {
+    if (typeof raw === 'string') { // "2023-01-05 가압류 ○○보증" 처럼 글로 적은 기록
+      var only = regText(raw, LIMITS.regNote, ctx);
+      return only ? { text: only } : null;
+    }
+    if (!isObj(raw)) return null;
+    var e = {};
+    var live = where === 'live';
+    var rank = rankOf(get(raw, 'rank'));
+    if (rank) e.rank = rank;
+    var date = regDate(get(raw, 'date'));
+    if (date) e.date = date;
+    var purpose = regText(get(raw, 'purpose'), LIMITS.regPurpose, ctx);
+    if (purpose) e.purpose = purpose;
+    var holder = regText(get(raw, 'holder'), LIMITS.regHolder, ctx);
+    if (holder) e.holder = holder;
+    var label = (live ? '' : '말소된 ') + REG_CAT_LABEL[cat] + (rank ? ' ' + rank + '번' : '');
+    var amt;
+    if (cat === 'mortgage') {
+      amt = get(raw, 'maxAmount');
+      if (amt === undefined || amt === null || amt === '') amt = get(raw, 'amount');
+      var max = wonOf(amt, label + ' 채권최고액', ctx, live ? 1000000 : 0);
+      if (max !== null) e.maxAmount = max;
+      var debtor = regText(get(raw, 'debtor'), LIMITS.regHolder, ctx);
+      if (debtor) e.debtor = debtor;
+    } else {
+      // 금액 이름은 아무거나 받는다(amount·deposit·maxAmount). 전세권·임차권은 보증금(deposit), 그 밖은 amount 로 둔다
+      var keys = ['amount', 'deposit', 'maxAmount'];
+      for (var i = 0; i < keys.length; i++) {
+        amt = get(raw, keys[i]);
+        if (amt !== undefined && amt !== null && amt !== '') break;
+      }
+      var dep = cat === 'jeonse' || cat === 'lease';
+      var amount = wonOf(amt, label + (dep ? ' 보증금' : ' 금액'), ctx, live ? (dep ? 1000000 : 10000) : 0);
+      if (amount !== null) e[dep ? 'deposit' : 'amount'] = amount;
+    }
+    if (!live) {
+      var cancelledAt = regDate(get(raw, 'cancelledAt'));
+      if (cancelledAt) e.cancelledAt = cancelledAt;
+    }
+    var t = get(raw, 'text');
+    var text = regText(t === undefined || t === null || t === '' ? get(raw, 'note') : t, LIMITS.regNote, ctx);
+    if (text) e.text = text;
+    return Object.keys(e).length ? e : null;
+  }
+
+  /** live / history → { 칸: [기록] }. 모르는 칸·목록이 아닌 값·읽지 못한 기록은 빼고 참고 문구 */
+  function regLists(raw, where, ctx) {
+    var out = {};
+    if (raw === undefined || raw === null) return out;
+    var wl = REG_WHERE_LABEL[where];
+    if (!isObj(raw)) { addNote(ctx.notes, wl + ': 모양이 달라 뺐어요'); return out; }
+    Object.keys(raw).forEach(function (k) {
+      if (has(BAD_KEYS, k)) return;
+      var cat = has(REG_CAT_LABEL, k) ? k : (has(REG_CAT_ALIAS, k) ? REG_CAT_ALIAS[k] : '');
+      if (!cat) { addNote(ctx.notes, wl + ': 모르는 칸이라 뺐어요 "' + regText(k, 20, ctx) + '"'); return; }
+      var v = raw[k];
+      if (v === null || v === undefined || noneWord(v)) v = [];
+      else if (isObj(v) || typeof v === 'string') v = [v];
+      if (!Array.isArray(v)) { addNote(ctx.notes, wl + ' ' + REG_CAT_LABEL[cat] + ': 목록이 아니라 뺐어요'); return; }
+      var list = has(out, cat) ? out[cat] : (out[cat] = []);
+      var bad = 0;
+      var over = 0;
+      v.forEach(function (x) {
+        if (noneWord(x) || (isObj(x) && !Object.keys(x).length)) return; // "없음", {} 는 조용히 건너뜀
+        var e = regEntry(x, cat, where, ctx);
+        if (!e) { bad++; return; }
+        if (list.length >= LIMITS.regEntries) { over++; return; }
+        list.push(e);
+      });
+      if (bad) addNote(ctx.notes, wl + ' ' + REG_CAT_LABEL[cat] + ': 읽지 못한 기록 ' + bad + '개는 뺐어요');
+      if (over) addNote(ctx.notes, wl + ' ' + REG_CAT_LABEL[cat] + ': ' + LIMITS.regEntries + '개까지만 넣었어요');
+    });
+    return out;
+  }
+
+  /** owners → [{ name, share, since }]. 이름 뒤에 붙은 주민등록번호(가린 것 포함)는 지운다 */
+  function regOwners(raw, ctx) {
+    var out = [];
+    if (raw === undefined || raw === null) return out;
+    if (isObj(raw) || typeof raw === 'string') raw = [raw];
+    if (!Array.isArray(raw)) { addNote(ctx.notes, '소유자: 목록이 아니라 뺐어요'); return out; }
+    var over = 0;
+    raw.forEach(function (o) {
+      if (typeof o === 'string') o = { name: o };
+      if (!isObj(o)) return;
+      var w = {};
+      var name = regText(get(o, 'name'), LIMITS.regOwnerName + 20, ctx)
+        .replace(/\(?\s*\*{6}-\*{7}\s*\)?/g, ' ').replace(/\s+/g, ' ').trim();
+      if (name) w.name = cut(name, LIMITS.regOwnerName);
+      var rawShare = get(o, 'share');
+      var share = shareOf(rawShare);
+      if (share) w.share = share;
+      else if (oneLine(rawShare, 30)) addNote(ctx.notes, '소유자 지분: 모양이 달라 뺐어요');
+      var since = regDate(get(o, 'since'));
+      if (since) w.since = since;
+      if (!Object.keys(w).length) return;
+      if (out.length >= LIMITS.regOwners) { over++; return; }
+      out.push(w);
+    });
+    if (over) addNote(ctx.notes, '소유자: ' + LIMITS.regOwners + '명까지만 넣었어요');
+    return out;
+  }
+
+  /** flag: 'yes'/'no', check: 'done'. 답 없음(모름·빈 값·check 의 "no")은 '', 알 수 없는 값은 null */
+  function answerOf(type, v) {
+    var s = typeof v === 'boolean' ? (v ? 'yes' : 'no') : oneLine(v, 20).replace(/\s+/g, '').toLowerCase();
+    if (!s || /^(null|unknown|모름|확인못함|못봄|-)$/.test(s)) return '';
+    if (type === 'flag') {
+      if (/^(yes|y|있음|있다|true)$/.test(s)) return 'yes';
+      if (/^(no|n|없음|없다|false)$/.test(s)) return 'no';
+      return null;
+    }
+    if (/^(done|yes|y|true|확인|확인함|했음)$/.test(s)) return 'done';
+    if (/^(no|n|false|안함|안했음)$/.test(s)) return '';
+    return null;
+  }
+  /** answers → { 항목 id: 값 }. 모르는 id(다른 섹션 포함)·코드로 답하지 않는 항목·알 수 없는 값은 빼고 참고 문구 */
+  function regAnswers(raw, ctx) {
+    var out = {};
+    if (raw === undefined || raw === null) return out;
+    if (!isObj(raw)) { addNote(ctx.notes, '답(answers): 모양이 달라 뺐어요'); return out; }
+    Object.keys(raw).forEach(function (k) {
+      if (has(BAD_KEYS, k)) return;
+      var id = oneLine(k, 40);
+      if (has(REG_ANSWER_SKIP, id)) { addNote(ctx.notes, REG_ANSWER_SKIP[id]); return; }
+      if (!has(REG_ANSWER_TYPES, id)) { addNote(ctx.notes, '등기부 항목이 아니라 뺐어요: "' + regText(k, 30, ctx) + '"'); return; }
+      var v = answerOf(REG_ANSWER_TYPES[id], raw[k]);
+      if (v) out[id] = v;
+      else if (v === null) addNote(ctx.notes, REG_ANSWER_LABEL[id] + ': 답 "' + regText(raw[k], 20, ctx) + '"을 알 수 없어 뺐어요');
+    });
+    return out;
+  }
+
+  /** Claude 가 남긴 참고 문장(notes) → 문자열 배열(주민등록번호는 가림) */
+  function regNotes(raw, ctx) {
+    if (raw === undefined || raw === null) return [];
+    var list = typeof raw === 'string' ? [raw] : (Array.isArray(raw) ? raw : null);
+    if (!list) { addNote(ctx.notes, '참고(notes): 모양이 달라 뺐어요'); return []; }
+    var out = [];
+    list.forEach(function (x) {
+      var s = regText(x, LIMITS.regNote, ctx);
+      if (s && out.length < LIMITS.regNotes && out.indexOf(s) < 0) out.push(s);
+    });
+    return out;
+  }
+
+  /** 등기부 기록 id: 'rg-' + 시각(36진수) + '-' + 임의 8자 */
+  function regId() {
+    var rand = '';
+    try {
+      var c = typeof crypto !== 'undefined' ? crypto : null;
+      if (c && c.getRandomValues) {
+        var b = new Uint8Array(4);
+        c.getRandomValues(b);
+        for (var i = 0; i < b.length; i++) rand += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+      }
+    } catch (e) { rand = ''; }
+    if (!rand) rand = Math.random().toString(16).slice(2, 10);
+    return 'rg-' + Date.now().toString(36) + '-' + rand;
+  }
+  function copyJson(v) { return JSON.parse(JSON.stringify(v)); }
+
+  /**
+   * 등기부 코드 블록 하나 → { snapshot, notes(앱이 보여 줄 참고 문구), warnings([{ code, text }]) }.
+   * raw 는 registry 객체(또는 { registry: {…} } 코드 전체). 읽을 값(고유번호·열람 일시·면적·소유자·기록·답)이 하나도 없으면 snapshot 은 null.
+   * opts.id: 기록 id(없으면 새로 만듦)
+   * warning code: conflict(살아 있는 기록이 있는데 답이 "no" → "yes"로 바꿈) / smallamount(금액이 너무 작음: 단위 확인)
+   * 답 채우기: 살아 있는 기록이 있는 칸 → 그 항목 "yes", 말소된 압류·가압류·가처분·경매·가등기·임차권 → reg-history "yes",
+   *   말소사항 포함이 아니면(false) reg-history "no"는 버림, 확인 항목 reg-view(늘)·reg-date(열람 일시)·reg-joint(소유자)·
+   *   reg-period(소유자 모두 접수일) → "done"
+   */
+  function parseRegistryBlock(raw, opts) {
+    opts = opts || {};
+    var ctx = { notes: [], warnings: [], rrn: false };
+    if (isObj(raw) && has(raw, 'registry') && isObj(raw.registry)) raw = raw.registry;
+    if (!isObj(raw)) return { snapshot: null, notes: ['등기부: 모양이 달라 읽지 못했어요'], warnings: [] };
+
+    var m = get(raw, 'match');
+    if (m !== undefined && m !== null && !isObj(m)) { addNote(ctx.notes, '건물(match): 모양이 달라 뺐어요'); m = null; }
+    var match = { name: regText(get(m, 'name'), LIMITS.name, ctx), dong: dongOf(get(m, 'dong')), ho: hoOf(get(m, 'ho')) };
+    if (match.name === EXAMPLE_NAME) match.name = ''; // 요청문 예시의 자리표시를 베껴 쓴 것
+    if (!match.ho && oneLine(get(m, 'ho'), 30)) addNote(ctx.notes, '호: 모양이 달라 뺐어요');
+    var rawNo = get(m, 'uniqueNo');
+    if (rawNo === undefined || rawNo === null || rawNo === '') rawNo = get(raw, 'uniqueNo');
+    var uniqueNo = uniqueNoOf(rawNo);
+    if (!uniqueNo && oneLine(rawNo, 40)) addNote(ctx.notes, '고유번호: 모양이 달라 뺐어요(0000-0000-000000 모양)');
+    var viewedAt = regDateTime(get(raw, 'viewedAt'));
+    if (!viewedAt && oneLine(get(raw, 'viewedAt'), 40)) addNote(ctx.notes, '열람 일시: 날짜를 읽지 못해 뺐어요');
+    var docType = docTypeOf(get(raw, 'docType'));
+    var includesCancelled = cancelledOf(get(raw, 'includesCancelled'));
+    var area = null;
+    var rawArea = get(raw, 'area');
+    if (rawArea !== undefined && rawArea !== null && rawArea !== '') {
+      var am = typeof rawArea === 'number' ? [0, String(rawArea)]
+        : /^\s*(\d+(?:\.\d+)?)\s*(?:㎡|m²|m2|제곱미터)?\s*$/i.exec(typeof rawArea === 'string' ? rawArea.replace(/,/g, '') : '');
+      var an = am ? parseFloat(am[1]) : NaN;
+      if (isFinite(an) && an >= RANGE.area[0] && an <= RANGE.area[1]) area = Math.round(an * 1000) / 1000; // 등기부는 소수 셋째 자리까지 적음
+      else addNote(ctx.notes, '전용면적: 값이 이상해서 뺐어요');
+    }
+    var owners = regOwners(get(raw, 'owners'), ctx);
+    var live = regLists(get(raw, 'live'), 'live', ctx);
+    var history = regLists(get(raw, 'history'), 'history', ctx);
+    var answers = regAnswers(get(raw, 'answers'), ctx);
+    var notes = regNotes(get(raw, 'notes'), ctx);
+
+    var substantive = uniqueNo || viewedAt || area !== null || owners.length || Object.keys(live).length ||
+      Object.keys(history).length || Object.keys(answers).length;
+    if (!substantive) {
+      addNote(ctx.notes, '등기부: 읽을 수 있는 내용이 없어 뺐어요');
+      return { snapshot: null, notes: ctx.notes, warnings: [] };
+    }
+
+    // 살아 있는 기록이 있는 칸 → 그 항목 "있음"(멈춤 신호를 놓치지 않게 Claude 의 "no"보다 앞선다)
+    REG_CATS.forEach(function (cat) {
+      var id = has(REG_CAT_ITEM, cat) ? REG_CAT_ITEM[cat] : '';
+      var n = id && has(live, cat) ? live[cat].length : 0;
+      if (!n) return;
+      if (answers[id] === 'no') {
+        ctx.warnings.push({ code: 'conflict', text: REG_CAT_LABEL[cat] + ': 살아 있는 기록이 ' + n + '개 있는데 답이 "없음"이라 "있음"으로 바꿨어요' });
+      }
+      answers[id] = 'yes';
+    });
+    var past = 0;
+    REG_HISTORY_CATS.forEach(function (cat) { if (has(history, cat)) past += history[cat].length; });
+    if (past) {
+      if (answers['reg-history'] === 'no') {
+        ctx.warnings.push({ code: 'conflict', text: '지난 기록: 말소된 압류·가압류·가처분·경매·가등기·임차권 기록이 ' + past + '개 있는데 답이 "없음"이라 "있음"으로 바꿨어요' });
+      }
+      answers['reg-history'] = 'yes';
+    } else if (includesCancelled === false && answers['reg-history'] === 'no') {
+      delete answers['reg-history'];
+      addNote(ctx.notes, '지난 기록: 말소사항 포함 등기부가 아니라 "없음" 답은 뺐어요');
+    }
+    if (includesCancelled === false) addNote(ctx.notes, '현재 유효사항만 나온 등기부라 말소된 지난 기록은 알 수 없어요');
+    // 확인(check) 항목: 코드에 그 값이 있으면 확인한 것으로 본다
+    answers['reg-view'] = 'done';
+    if (viewedAt) answers['reg-date'] = 'done';
+    if (owners.length) answers['reg-joint'] = 'done';
+    if (owners.length && owners.every(function (o) { return !!o.since; })) answers['reg-period'] = 'done';
+    var ordered = {};
+    REG_ANSWERS.forEach(function (a) { if (has(answers, a[0])) ordered[a[0]] = answers[a[0]]; });
+    if (ctx.rrn) addNote(ctx.notes, '주민등록번호처럼 보이는 글은 가렸어요');
+
+    return {
+      snapshot: {
+        id: typeof opts.id === 'string' && opts.id ? cut(opts.id, 60) : regId(),
+        source: 'code',
+        viewedAt: viewedAt,
+        docType: docType,
+        includesCancelled: includesCancelled,
+        uniqueNo: uniqueNo,
+        area: area,
+        owners: owners,
+        live: live,
+        history: history,
+        mortgages: has(live, 'mortgage') ? copyJson(live.mortgage) : [],
+        answers: ordered,
+        match: match,
+        notes: notes
+      },
+      notes: ctx.notes,
+      warnings: ctx.warnings
+    };
+  }
+
+  /** 등기부 기록(snapshot) → 코드의 registry 객체(빈 값은 뺌). tools/make-import-code.js 가 쓴다 */
+  function registryToCode(s) {
+    if (!isObj(s)) return null;
+    var o = {};
+    var mt = {};
+    var sm = isObj(s.match) ? s.match : {};
+    ['name', 'dong', 'ho'].forEach(function (k) { if (typeof sm[k] === 'string' && sm[k]) mt[k] = sm[k]; });
+    if (s.uniqueNo) mt.uniqueNo = s.uniqueNo;
+    if (Object.keys(mt).length) o.match = mt;
+    if (s.viewedAt) o.viewedAt = s.viewedAt;
+    if (s.docType) o.docType = s.docType;
+    if (typeof s.includesCancelled === 'boolean') o.includesCancelled = s.includesCancelled;
+    if (typeof s.area === 'number') o.area = s.area;
+    if (Array.isArray(s.owners) && s.owners.length) o.owners = copyJson(s.owners);
+    if (isObj(s.live) && Object.keys(s.live).length) o.live = copyJson(s.live);
+    if (isObj(s.history) && Object.keys(s.history).length) o.history = copyJson(s.history);
+    if (isObj(s.answers) && Object.keys(s.answers).length) o.answers = copyJson(s.answers);
+    if (Array.isArray(s.notes) && s.notes.length) o.notes = s.notes.slice();
+    return o;
+  }
+
   // ---------------- 중복 판단 ----------------
   /** 링크 비교용: 프로토콜·www·끝의 / 무시, 쿼리는 이름순 정렬(추적용 값·빈 값 제외) */
   function urlKey(href) {
@@ -667,13 +1209,16 @@
    * opts: { existing: 저장된 매물 배열, goneKeys: { 열쇠: 시각 } }
    * 결과: { ok, error, message, entries: [ { index, prop, notes, warnings: [{code,text}], canImport, checked, fromList } ],
    *         total(코드 속 매물 수), truncated(30개를 넘어 뺀 수), skipped(읽을 수 없는 항목 수),
-   *         blocks(읽은 코드 블록 수), incomplete(글이 길어 끝까지 못 읽음), source('code') }
+   *         blocks(읽은 코드 블록 수), incomplete(글이 길어 끝까지 못 읽음), source('code'),
+   *         registry(1.6.0: 등기부 기록 snapshot 또는 null), registryNotes(참고 문구), registryWarnings([{code,text}]) }
    * warning code: noname(담을 수 없음) / notsale(매매 아님) / swap(전용≥공급) / lowprice(가격이 이상하게 낮음) /
    *               exists(이미 있음) / gone(전에 지움) / repeat(코드 안에서 겹침)
+   * 1.6.0: 등기부 코드만 있으면 ok 이고 entries 는 빈 배열(registry 만 있음). 등기부 블록이 있는데 읽을 값이 없고 매물도 없으면 'reg-empty'
    */
   function parse(input, opts) {
     opts = opts || {};
-    var res = { ok: false, error: '', message: '', entries: [], total: 0, truncated: 0, skipped: 0, blocks: 0, incomplete: false, source: 'code' };
+    var res = { ok: false, error: '', message: '', entries: [], total: 0, truncated: 0, skipped: 0, blocks: 0, incomplete: false, source: 'code',
+      registry: null, registryNotes: [], registryWarnings: [] };
     var src = typeof input === 'string' ? input : '';
     if (!src.trim()) { res.error = 'empty'; return res; }
     if (src.length > LIMITS.inputChars) { res.error = 'too-big'; res.message = MESSAGES['too-big']; return res; }
@@ -685,10 +1230,33 @@
     // 1.4.1: 네이버 글로 만든 코드(tools/make-import-code.js 가 "from":"naver-text" 를 넣음)는 앱이 직접 읽은 글과 같게
     // 주의를 보여 주고 출처를 'naver-text' 로 남긴다(값은 코드 그대로)
     if (found.naver) { res.source = 'naver'; res.kind = 'code'; }
+    readRegistry(res, found.registry || []);
     fillEntries(res, found.list, opts, null);
-    if (!res.entries.length) { res.error = 'none'; res.message = MESSAGES.none; return res; }
+    if (!res.entries.length) {
+      if (res.registry) { res.ok = true; return res; } // 1.6.0: 등기부만 있는 코드
+      res.error = found.registry && found.registry.length ? 'reg-empty' : 'none';
+      res.message = MESSAGES[res.error];
+      return res;
+    }
     res.ok = true;
     return res;
+  }
+
+  /** 1.6.0: 등기부 블록들 → res.registry(처음으로 읽힌 것), registryNotes, registryWarnings */
+  function readRegistry(res, raws) {
+    var extra = 0;
+    var emptyNotes = null;
+    raws.forEach(function (raw) {
+      if (res.registry) { extra++; return; }
+      var r = parseRegistryBlock(raw);
+      if (r.snapshot) {
+        res.registry = r.snapshot;
+        res.registryNotes = r.notes;
+        res.registryWarnings = r.warnings;
+      } else if (!emptyNotes) emptyNotes = r.notes;
+    });
+    if (!res.registry && emptyNotes) res.registryNotes = emptyNotes;
+    if (extra) res.registryNotes.push('등기부 코드가 ' + (extra + 1) + '개 있어 첫 번째만 읽었어요');
   }
 
   // ---- 느슨한 중복(1.4.1, 네이버 글) ----
@@ -1394,6 +1962,7 @@
   /**
    * 정리된 매물들 → 코드 객체(빈 값은 뺌, 호수 없음). tools/make-import-code.js 가 쓴다.
    * opts.from: 'naver-text'(1.4.1) 이면 최상위에 "from" 을 넣는다. 앱(parse)이 보고 네이버 글 주의·출처를 쓴다
+   * opts.registry(1.6.0): 등기부 기록(snapshot)이면 "registry" 로 넣는다(registryToCode). 매물이 없으면 properties 는 뺀다
    */
   function toCode(props, opts) {
     var order = ['name', 'dong', 'area', 'supplyArea', 'askPrice', 'realPrice', 'tradeType', 'floor', 'direction',
@@ -1409,6 +1978,10 @@
       });
       return o;
     });
+    if (opts && opts.registry) {
+      if (!code.properties.length) delete code.properties;
+      code.registry = registryToCode(opts.registry);
+    }
     return code;
   }
 
@@ -1463,6 +2036,7 @@
     NAVER_SOURCE_ID: NAVER_SOURCE_ID,
     LIMITS: LIMITS,
     PROMPT: PROMPT,
+    REGISTRY_PROMPT: REGISTRY_PROMPT, // 1.6.0
     MESSAGES: MESSAGES,
     parse: parse,
     parseText: parseText,           // 1.4.0: 코드 → 네이버 글 순서(앱 입력 칸·도구)
@@ -1481,6 +2055,14 @@
     articleNoFromUrl: articleNoFromUrl,
     encodeLink: encodeLink,
     decodeLink: decodeLink,
-    linkFragment: linkFragment
+    linkFragment: linkFragment,
+    // 1.6.0 등기부 코드
+    parseRegistryBlock: parseRegistryBlock,
+    registryToCode: registryToCode,
+    maskRrn: maskRrn,
+    REGISTRY_ANSWERS: REG_ANSWERS.map(function (a) { return { id: a[0], type: a[1], label: a[2] }; }),
+    REGISTRY_CATEGORIES: REG_CATS.map(function (c) {
+      return { key: c, label: REG_CAT_LABEL[c], item: has(REG_CAT_ITEM, c) ? REG_CAT_ITEM[c] : '' };
+    })
   };
 });

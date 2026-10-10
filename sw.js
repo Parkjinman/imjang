@@ -8,22 +8,27 @@
 'use strict';
 
 var CACHE_PREFIX = 'imjang-static-';
-var CACHE_VERSION = CACHE_PREFIX + 'v1.5.1';
+var CACHE_VERSION = CACHE_PREFIX + 'v1.6.0';
 
-// 사전 캐시 목록 — 실제 파일과 반드시 일치해야 한다(하나라도 없으면 설치 실패)
+// 사전 캐시 목록 — 실제 파일과 반드시 일치해야 한다(하나라도 없으면 설치 실패).
+// tools/make-dist.js 가 이 목록의 파일만 배포 폴더로 복사한다.
+// 1.6.0: 등기부 PDF 해석기와 PDF 읽기 도구(pdf.js, 약 1.5MB)도 미리 저장한다 → 현장에서 인터넷이 끊겨도 PDF 를 읽는다
 var PRECACHE = [
   './',
   './index.html',
   './styles.css',
   './data.js',
   './import-parser.js',
+  './registry-parser.js',
   './merge.js',
   './app.js',
   './manifest.webmanifest',
   './icons/apple-touch-icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/icon-maskable-512.png'
+  './icons/icon-maskable-512.png',
+  './vendor/pdfjs/pdf.min.js',
+  './vendor/pdfjs/pdf.worker.min.js'
 ];
 
 // 리다이렉트된 응답은 Safari 가 탐색 응답으로 쓰지 못하므로 깨끗한 응답으로 다시 만든다
