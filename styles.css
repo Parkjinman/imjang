@@ -1732,7 +1732,9 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 
 /* ---------- 1.7.0 대출·비용(추정) ---------- */
 /* 홈 카드 가격 줄의 작은 KB시세 칩(줄이 좁으면 칩째 다음 줄로) */
-.kb-chip { display: inline-block; margin-left: 2px; padding: 0 7px; border-radius: 6px; background: var(--teal-soft); color: var(--teal-ink); font-size: 0.7647rem; font-weight: 700; line-height: 1.6; white-space: nowrap; vertical-align: 1px; }
+.kb-chip, .real-chip { display: inline-block; margin-left: 2px; padding: 0 7px; border-radius: 6px; background: var(--teal-soft); color: var(--teal-ink); font-size: 0.7647rem; font-weight: 700; line-height: 1.6; white-space: nowrap; vertical-align: 1px; }
+/* 1.8.1: 최근 실거래가 칩(KB 칩과 구분되게 중립색) */
+.real-chip { background: var(--chip); color: var(--text); }
 
 /* 상세 '대출·비용' 카드(접힘). 머리 줄: 제목 + 요약 줄(필요 현금·대출) + 펼침 표시 */
 .fin-card > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 10px; min-height: 44px; }

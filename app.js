@@ -29,7 +29,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.8.0';
+  var APP_VERSION = '1.8.1';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -2956,6 +2956,9 @@
       h('p', { class: 'pcard-price', id: idBase ? idBase + '-price' : null },
         p.askPrice ? '호가 ' + formatManwon(p.askPrice) : '호가 입력 안 함',
         diff !== null ? h('span', { class: 'pcard-diff', text: ' · 실거래 대비 ' + pctText(diff) }) : null,
+        // 1.8.1: 최근 실거래가 작은 칩(없으면 생략). '실거래 대비'의 기준 금액을 함께 보이게
+        p.realPrice ? ' ' : null,
+        p.realPrice ? h('span', { class: 'real-chip', title: '최근 실거래가', text: '실거래 ' + kbShort(p.realPrice) }) : null,
         // 1.7.0: KB시세 작은 칩(없으면 생략). 칩 앞의 공백은 화면 읽기에서 숫자가 붙어 읽히지 않게
         p.kbPrice ? ' ' : null,
         p.kbPrice ? h('span', { class: 'kb-chip', title: 'KB시세' + (p.kbAt ? ' (' + formatISODate(p.kbAt) + ')' : ''), text: 'KB ' + kbShort(p.kbPrice) }) : null
