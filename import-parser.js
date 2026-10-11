@@ -101,7 +101,7 @@
     '- match: 표제부의 건물 이름(name), 동(dong)·호(ho)는 숫자만, 맨 위 고유번호(uniqueNo).',
     '- viewedAt: 아래쪽 "열람일시"(예: 2026-01-02T09:00). docType: "열람용" 또는 "제출용". includesCancelled: 제목에 "말소사항 포함"이 있으면 true, "현재 유효사항"이면 false.',
     '- area: 전유부분 건물 내역의 면적(㎡ 숫자, 적힌 그대로).',
-    '- owners: 지금 소유자(갑구의 마지막 소유권 기록). share는 지분(혼자면 "1/1", "2분의 1"은 "1/2"), since는 그 기록의 접수일.',
+    '- owners: 지금 소유자 모두(공동명의면 한 사람씩). share는 그 사람의 지분(혼자면 "1/1", "2분의 1"은 "1/2"), since는 그 사람이 소유권·지분을 얻은 기록의 접수일(사람마다 다를 수 있어). 그 사람이 예전에도 이 집 소유자였으면(신탁했다가 돌려받음, 팔았다가 다시 삼) firstSince에 처음 소유자가 된 접수일도 넣어.',
     '- live·history 칸: trust(신탁) seizure(압류·가압류) injunction(가처분) auction(경매개시결정) provisional(가등기) mortgage(근저당) jeonse(전세권) lease(주택임차권) other(그 밖). 기록이 없는 칸은 빼. 소유권이전 기록과 "○번 등기말소" 줄은 넣지 마.',
     '- 기록 하나: rank(순위번호), date(접수일), purpose(등기목적), holder(권리자), amount(금액, 원 단위 숫자: 금23,400,000원 → 23400000). 근저당은 amount 대신 maxAmount(채권최고액)와 debtor(채무자). 1-1처럼 붙은 번호(부기)로 바뀐 금액·채무자·권리자는 본 기록에 반영하고 따로 넣지 마.',
     '- answers: 아래 항목마다 해당하면 "yes", 아니면 "no"(말소된 기록은 reg-history에서만 봐). 마지막 장의 "이하여백"까지 모두 보지 못했으면 "no"는 쓰지 말고 빼.',
@@ -821,9 +821,11 @@
   // 만드는 기록과 같고 출처만 source: 'code' 다.
   //   { id, source: 'code', viewedAt: 'YYYY-MM-DDTHH:MM' | 'YYYY-MM-DD' | '', docType: '열람용' | '제출용' | '',
   //     includesCancelled: true | false | null, uniqueNo: '0000-0000-000000' | '', area: ㎡ | null,
-  //     owners: [{ name, share: '1/2', since: 'YYYY-MM-DD' }], live: { 칸: [기록] }, history: { 칸: [기록] },
+  //     owners: [{ name, share: '1/2', since: 'YYYY-MM-DD', firstSince?(1.8.0: 예전에도 소유자였으면 처음 날) }],
+  //     live: { 칸: [기록] }, history: { 칸: [기록] },
   //     mortgages: [살아 있는 근저당(live.mortgage 사본)], answers: { 항목 id: 'yes' | 'no' | 'done' },
-  //     match: { name, dong, ho }, notes: [Claude 가 남긴 참고 문장] }
+  //     match: { name, dong, ho }, notes: [Claude 가 남긴 참고 문장],
+  //     ownersUncertain?(1.8.0 검토 반영: 지분 합계가 1/1 이 아님 — 참일 때만) }
   //   칸: trust seizure injunction auction provisional mortgage jeonse lease other. 코드에 있던 칸만 둔다(빈 배열도 그대로).
   //   기록: { section('gap'|'eul'), rank, date, purpose, holder, (근저당) maxAmount·debtor | (전세권·임차권) deposit | amount,
   //          (말소) cancelledAt, text } 값이 있는 키만. 금액은 원. 이름은 registry-parser.js 의 기록 요약(brief)과 맞췄다.
@@ -1070,7 +1072,10 @@
     return out;
   }
 
-  /** owners → [{ name, share, since }]. 이름 뒤에 붙은 주민등록번호(가린 것 포함)는 지운다 */
+  /**
+   * owners → [{ name, share, since, firstSince? }]. 이름 뒤에 붙은 주민등록번호(가린 것 포함)는 지운다.
+   * 1.8.0 검토 반영: firstSince(예전에도 이 집 소유자였으면 처음 소유자가 된 접수일)는 since 보다 앞일 때만 둔다
+   */
   function regOwners(raw, ctx) {
     var out = [];
     if (raw === undefined || raw === null) return out;
@@ -1091,11 +1096,34 @@
       var since = regDate(get(o, 'since'));
       if (since) w.since = since;
       if (!Object.keys(w).length) return;
+      var first = regDate(get(o, 'firstSince'));
+      if (first && since && first < since) w.firstSince = first;
       if (out.length >= LIMITS.regOwners) { over++; return; }
       out.push(w);
     });
     if (over) addNote(ctx.notes, '소유자: ' + LIMITS.regOwners + '명까지만 넣었어요');
     return out;
+  }
+  /**
+   * 1.8.0 검토 반영: 소유자 지분 합계. 혼자인데 지분이 없으면 1/1 로 본다. 결과 { full: 합계가 1/1, text: '1/2'|'?' }.
+   * 공동 소유자 중 지분이 빠진 사람이 있거나 합계가 1/1 이 아니면 소유자 계산이 불확실(지금 소유자를 다 적지 않았을 수 있음)
+   */
+  function ownersShareTotal(owners) {
+    if (owners.length === 1 && !owners[0].share) return { full: true, text: '1/1' };
+    var n = 0;
+    var d = 1;
+    var ok = true;
+    owners.forEach(function (o) {
+      var m = /^(\d+)\/(\d+)$/.exec(o.share || '');
+      if (!m) { ok = false; return; }
+      n = n * +m[2] + (+m[1]) * d;
+      d = d * +m[2];
+      var a = n;
+      var b = d;
+      while (b) { var t = a % b; a = b; b = t; } // 최대공약수로 줄인다
+      if (a > 1) { n = n / a; d = d / a; }
+    });
+    return ok ? { full: n === d, text: n + '/' + d } : { full: false, text: '?' };
   }
 
   /** flag: 'yes'/'no', check: 'done'. 답 없음(모름·빈 값·check 의 "no")은 '', 알 수 없는 값은 null */
@@ -1162,6 +1190,7 @@
    * raw 는 registry 객체(또는 { registry: {…} } 코드 전체). 읽을 값(고유번호·열람 일시·면적·소유자·기록·답)이 하나도 없으면 snapshot 은 null.
    * opts.id: 기록 id(없으면 새로 만듦)
    * warning code: conflict(살아 있는 기록이 있는데 답이 "no" → "yes"로 바꿈) / smallamount(금액이 너무 작음: 단위 확인)
+   *   / 1.8.0 검토 반영: cancelled(현재 유효사항인데 말소된 기록이 있음) / owners(지분 합계가 1/1 이 아님 → snapshot.ownersUncertain)
    * 답 채우기: 살아 있는 기록이 있는 칸 → 그 항목 "yes", 말소된 압류·가압류·가처분·경매·가등기·임차권 → reg-history "yes",
    *   말소사항 포함이 아니면(false) reg-history "no"는 버림, 확인 항목 reg-view(늘)·reg-date(열람 일시)·reg-joint(소유자)·
    *   reg-period(소유자 모두 접수일) → "done"
@@ -1229,6 +1258,20 @@
       addNote(ctx.notes, '지난 기록: 말소사항 포함 등기부가 아니라 "없음" 답은 뺐어요');
     }
     if (includesCancelled === false) addNote(ctx.notes, '현재 유효사항만 나온 등기부라 말소된 지난 기록은 알 수 없어요');
+    // 1.8.0 검토 반영: 현재 유효사항인데 말소된 기록이 적혀 있음(제목을 잘못 읽었거나 칸을 잘못 넣음). 앱은 이 기록들의 시기를 정하지 않는다
+    if (includesCancelled === false && Object.keys(history).length) {
+      ctx.warnings.push({ code: 'cancelled', text: '현재 유효사항 등기부인데 말소된 기록이 적혀 있어요. 등기부 제목이 "말소사항 포함"인지 보세요.' });
+    }
+    // 1.8.0 검토 반영: 지분 합계가 1/1 이 아니거나 공동 소유자의 지분이 빠짐 → 소유자 계산이 불확실(PDF 해석기의 ownersUncertain 과 같은 뜻.
+    // 앱은 매도인 비교 "없음"·공동명의 확인·지난 기록의 시기(지금 소유자 전/때)를 정하지 않는다)
+    var ownersUncertain = false;
+    if (owners.length) {
+      var total = ownersShareTotal(owners);
+      if (!total.full) {
+        ownersUncertain = true;
+        ctx.warnings.push({ code: 'owners', text: '소유자 지분을 더하면 ' + total.text + '이에요. 지금 소유자를 모두 적었는지 원본 갑구를 보세요.' });
+      }
+    }
     // 확인(check) 항목: 코드에 그 값이 있으면 확인한 것으로 본다
     answers['reg-view'] = 'done';
     if (viewedAt) answers['reg-date'] = 'done';
@@ -1238,26 +1281,24 @@
     REG_ANSWERS.forEach(function (a) { if (has(answers, a[0])) ordered[a[0]] = answers[a[0]]; });
     if (ctx.rrn) addNote(ctx.notes, '주민등록번호처럼 보이는 글은 가렸어요');
 
-    return {
-      snapshot: {
-        id: typeof opts.id === 'string' && opts.id ? cut(opts.id, 60) : regId(),
-        source: 'code',
-        viewedAt: viewedAt,
-        docType: docType,
-        includesCancelled: includesCancelled,
-        uniqueNo: uniqueNo,
-        area: area,
-        owners: owners,
-        live: live,
-        history: history,
-        mortgages: has(live, 'mortgage') ? copyJson(live.mortgage) : [],
-        answers: ordered,
-        match: match,
-        notes: notes
-      },
-      notes: ctx.notes,
-      warnings: ctx.warnings
+    var snapshot = {
+      id: typeof opts.id === 'string' && opts.id ? cut(opts.id, 60) : regId(),
+      source: 'code',
+      viewedAt: viewedAt,
+      docType: docType,
+      includesCancelled: includesCancelled,
+      uniqueNo: uniqueNo,
+      area: area,
+      owners: owners,
+      live: live,
+      history: history,
+      mortgages: has(live, 'mortgage') ? copyJson(live.mortgage) : [],
+      answers: ordered,
+      match: match,
+      notes: notes
     };
+    if (ownersUncertain) snapshot.ownersUncertain = true; // 참일 때만(앱 normalizeSnapshot 과 같음)
+    return { snapshot: snapshot, notes: ctx.notes, warnings: ctx.warnings };
   }
 
   /** 등기부 기록(snapshot) → 코드의 registry 객체(빈 값은 뺌). tools/make-import-code.js 가 쓴다 */

@@ -660,6 +660,7 @@ details.flow-details > summary::-webkit-details-marker { display: none; }
 .item.is-done::before { background: var(--teal); }
 .item.st-good::before { background: var(--green); }
 .item.st-caution::before, .item.st-yes-caution::before { background: var(--yellow); }
+.item.st-yes-ref::before { background: var(--muted); } /* 1.8.0 검토 반영: 지난 기록 "있음"을 앱이 '참고'로 셈(주의 노랑 대신 중립색) */
 .item.st-yes-stop::before { background: var(--red); }
 .item.st-yes-stop { background: linear-gradient(90deg, var(--red-soft), transparent 70%); }
 
@@ -669,6 +670,7 @@ details.flow-details > summary::-webkit-details-marker { display: none; }
 .sev { display: inline-block; font-size: 0.8824rem; font-weight: 800; padding: 1px 8px; border-radius: 6px; }
 .sev-stop { background: var(--red-soft); color: var(--red-ink); }
 .sev-caution { background: var(--yellow-soft); color: var(--yellow-ink); }
+.sev-ref { background: var(--chip); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); } /* 1.8.0: 지난 기록이 모두 지금 소유자 전 → '참고' */
 .type-tag { display: inline-block; font-size: 0.7647rem; font-weight: 700; padding: 1px 8px; border-radius: 6px; background: var(--chip); color: var(--muted); }
 
 .item-help {
@@ -877,6 +879,8 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 .sum-item-title { font-weight: 700; }
 .sum-item-sec { font-size: 0.8235rem; color: var(--muted); font-weight: 700; }
 .sum-item-memo { font-size: 0.8824rem; white-space: pre-wrap; }
+.sum-item-note { font-size: 0.8824rem; font-weight: 600; padding-left: 9px; border-left: 3px solid var(--line); } /* 1.8.0: 앱이 붙인 안내 */
+.sum-item.is-caution .sum-item-note { border-left-color: var(--yellow); }
 .sum-item.is-stop { border-color: var(--red); background: var(--red-soft); }
 .sum-item.is-caution { border-color: var(--yellow); background: var(--yellow-soft); }
 .sum-item .q { font-weight: 700; }
@@ -1388,6 +1392,7 @@ details.flow-details-first > .flow { margin-top: 6px; }
 .fold-ans-caution, .fold-ans-yes { background: var(--yellow-soft); color: var(--yellow-ink); }
 .fold-ans-stop { background: var(--red-soft); color: var(--red-ink); }
 .fold-ans-ask { background: var(--teal-soft); color: var(--teal-ink); }
+.fold-ans-ref { background: var(--chip); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); } /* 1.8.0 검토 반영: 지난 기록 "있음 · 참고" */
 .fold-memo, .fold-photo { display: none; flex: none; color: var(--teal-ink); }
 .item.has-memo > .item-fold .fold-memo { display: inline-flex; }
 .item:has(.thumbs:not([hidden])) > .item-fold .fold-photo { display: inline-flex; }
@@ -1660,6 +1665,19 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 .rp-over { list-style: none; margin: 8px 0 0; padding: 0; }
 .rp-over li + li { border-top: 1px solid var(--line); }
 .rp-over .rp-check { padding: 8px 0; }
+
+/* 1.8.0: 지난 기록의 시기 — 미리보기 "지난 기록" 묶음과 지난 기록 항목 카드의 자동 안내(지금 소유자 전/때). 색은 왼쪽 막대·배지로 */
+.rp-era-list .rp-name { font-weight: 500; }
+.rp-era-list .rp-when { display: inline-block; white-space: nowrap; } /* 접수일이 중간에서 끊기지 않게(앞에서 줄 바꿈) */
+.item-auto { margin: 8px 0 4px; padding: 9px 12px; border-radius: var(--radius-sm); background: var(--card-2); border: 1px solid var(--line); border-left: 4px solid var(--orange); font-size: 0.8824rem; line-height: 1.55; }
+.item-auto.is-before { border-left-color: var(--green); }
+.item-auto.is-current { border-left-color: var(--yellow); }
+.item-auto-head { font-weight: 700; }
+.item-auto .rp-list { margin-top: 4px; }
+.item-auto .rp-row { padding: 4px 0; }
+.item-auto .rp-name { font-size: 0.8235rem; }
+.item-auto-note { margin-top: 4px; color: var(--muted); font-size: 0.8235rem; }
+.item-auto-src { margin-top: 6px; color: var(--muted); font-size: 0.7647rem; }
 
 /* 상세 등기부 섹션 머리 아래 "등기부 기록 N개 · 마지막 열람 …" + [기록 보기](접혀 있어도 보임) */
 .reg-snaps { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; padding: 0 10px 10px 16px; }

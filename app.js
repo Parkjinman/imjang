@@ -20,6 +20,8 @@
  *   PDF 글자를 꺼내는 pdf.js(vendor/pdfjs)는 처음 PDF 를 올릴 때만 불러온다(loadPdfjs). 서류·해석 결과는 이 기기 밖으로 보내지 않는다.
  * 1.7.0: 대출 한도·월 상환·매수 부대비용·필요 현금·보유비용 추정은 finance.js(window.ImjangFinance)가 맡는다(merge.js 다음, 이 파일 전에 로드).
  *   매물의 KB시세·관리비 등 네이버 참고값은 import-parser.js 가 읽고, 상세 화면 '대출·비용' 카드(finCard)가 보여 준다. 모든 수치는 추정이다.
+ * 1.8.0: 지워진 지난 기록(reg-history)을 지금 소유자가 산 날 전/후로 나눈다(registry-parser.js classifyHistory). 저장 필드 없이
+ *   등기부 기록(registrySnapshots)에서 그때그때 계산해 미리보기 꼬리표·항목 카드 안내·답하기 메모·주의/참고 개수·요약에 쓴다(historyEraOf).
  */
 (function () {
   'use strict';
@@ -27,7 +29,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.7.1';
+  var APP_VERSION = '1.8.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -658,11 +660,15 @@
   //   { id, docId|null(서류함 레코드 id), source: 'pdf'|'code'|'manual', viewedAt(열람 일시 ms|null),
   //     docType(문서 구분 글자, 예: '열람용'·'제출용' 또는 문서 제목), includesCancelled(말소사항 포함 true, 현재 유효사항만 false, 모름 null),
   //     uniqueNo(고유번호 글자), area(표제부 전용면적 ㎡|null),
-  //     owners: [{ name, share(지분 글자), since(취득 접수일 글자) }],
+  //     owners: [{ name, share(지분 글자), since(취득 접수일 글자) }]
+  //       (1.8.0 검토 반영: 받은 값에 firstSince(예전에도 이 집 소유자였으면 처음 소유자가 된 접수일)가 since 보다 앞이면 since 를 그 날로 접는다.
+  //        저장 기록의 since 는 지난 기록 시기 구분에만 쓰고, 예전 버전 탭도 since 는 그대로 두므로 저장 필드를 늘리지 않으려고),
   //     live: [{ kind(종류: trust·seizure·injunction·auction·provisional·lease·mortgage·jeonse·ownership·other|''),
   //              part: 'title'|'gap'|'eul'|'', rank(순위번호), purpose(등기목적), date(접수일 글자), text(요약) }]  지금 살아 있는 기록
   //     history: [ 같은 모양 ]  말소된(빨간 줄) 지난 기록
-  //       (live·history 는 registry-parser 모양 { 종류: [{ section, rank, purpose, receiptDate, maxAmount, holder… }] } 도 받아 위 모양으로 바꾼다)
+  //       (live·history 는 registry-parser 모양 { 종류: [{ section, rank, purpose, receiptDate, maxAmount, holder… }] } 도 받아 위 모양으로 바꾼다.
+  //        1.8.0 검토 반영: 등기목적이 없어도 순위번호·접수일이 있는 줄은 남기고 등기목적 자리에 종류 이름을 넣는다. 줄이 SNAP_ENTRY_MAX 를 넘으면
+  //        history 는 압류·가압류·가처분·경매·가등기·임차권 줄을, 그 안에서는 접수일이 늦은 것부터 남긴다(순서는 그대로))
   //     mortgages: [{ rank, maxAmount(채권최고액, 원), holder(근저당권자), debtor(채무자) }]  말소되지 않은 근저당(없으면 live.mortgage 에서 만듦)
   //     answers: { 항목id: 'yes'|'no'|'done' }  flag 는 yes/no, check 는 done(applyRegistrySnapshot 이 항목 답으로 반영)
   //     addedAt(ms), t(이 기록을 마지막으로 바꾼 시각 — 합치기에서 같은 id 는 t 가 큰 쪽),
@@ -702,17 +708,34 @@
     if (!d || d.length > 15) return null;
     return parseInt(d, 10);
   }
+  /** 날짜 글자 → 'YYYY-MM-DD'(못 읽으면 ''). '2021-06-01'·'2021.6.1'·'2021년 6월 1일' */
+  function snapDay(v) {
+    var m = /(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})/.exec(str(v));
+    return m ? m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2) : '';
+  }
   function snapOwners(v) {
     var out = [];
     (Array.isArray(v) ? v : []).forEach(function (o) {
       var obj = o && typeof o === 'object';
       var name = snapText(obj ? o.name : o, 40);
-      if (name && out.length < SNAP_OWNER_MAX) out.push({ name: name, share: snapText(obj ? o.share : '', 40), since: snapText(obj ? o.since : '', 20) });
+      if (!name || out.length >= SNAP_OWNER_MAX) return;
+      var since = snapText(obj ? o.since : '', 20);
+      // 1.8.0 검토 반영: 예전에도 이 집 소유자였으면(신탁 뒤 돌려받음·되사기) since 를 처음 소유자가 된 날로 접는다(위 설명)
+      var first = obj ? snapText(o.firstSince, 20) : '';
+      if (first && since && snapDay(first) && snapDay(since) && snapDay(first) < snapDay(since)) since = first;
+      out.push({ name: name, share: snapText(obj ? o.share : '', 40), since: since });
     });
     return out;
   }
   // 기록 줄의 종류(registry-parser.js 의 분류와 같은 열쇠)
   var SNAP_KINDS = { ownership: 1, trust: 1, seizure: 1, injunction: 1, auction: 1, provisional: 1, lease: 1, mortgage: 1, jeonse: 1, other: 1 };
+  // 1.8.0 검토 반영: 등기목적이 빈 줄의 등기목적 자리에 넣는 종류 이름(REG_KIND_LABEL 과 같은 글. 저장본을 처음 읽을 때도 쓰므로 여기에 둔다)
+  var SNAP_KIND_LABEL = {
+    ownership: '소유권', trust: '신탁', seizure: '압류·가압류', injunction: '가처분', auction: '경매개시결정', provisional: '가등기',
+    lease: '임차권등기', mortgage: '근저당', jeonse: '전세권'
+  };
+  // 지난 기록 시기 구분(reg-history)에 쓰는 종류. 줄이 넘칠 때 history 에서 먼저 남긴다(registry-parser HISTORY_KINDS 와 같음)
+  var SNAP_HISTORY_FIRST = { seizure: 1, injunction: 1, auction: 1, lease: 1, provisional: 1 };
   function snapEntry(e, kind) {
     if (!e || typeof e !== 'object') return { kind: SNAP_KINDS[kind] ? kind : '', part: '', rank: '', purpose: '', date: '', text: snapText(e, 160) };
     var k = SNAP_KINDS[e.kind] ? e.kind : (SNAP_KINDS[kind] ? kind : '');
@@ -722,22 +745,43 @@
       var amt = snapAmount(e.maxAmount || e.deposit || e.amount);
       text = [str(e.holder), amt ? (e.maxAmount ? '채권최고액 ' : e.deposit ? '보증금 ' : '금액 ') + formatManwon(amt / 10000) : ''].filter(Boolean).join(' · ');
     }
-    return { kind: k, part: SNAP_PARTS[part] ? part : '', rank: snapText(e.rank, 12), purpose: snapText(e.purpose, 40), date: snapText(e.date || e.receiptDate, 20), text: snapText(text, 160) };
+    var o = { kind: k, part: SNAP_PARTS[part] ? part : '', rank: snapText(e.rank, 12), purpose: snapText(e.purpose, 40), date: snapText(e.date || e.receiptDate, 20), text: snapText(text, 160) };
+    // 1.8.0 검토 반영: 등기목적이 없는 줄(등기부 코드의 { rank, date }만 있는 기록)도 버리지 않게 종류 이름을 넣는다
+    if (!o.purpose && (o.rank || o.date) && SNAP_KIND_LABEL[k]) o.purpose = SNAP_KIND_LABEL[k];
+    return o;
   }
-  /** 기록 줄 목록. 배열, 또는 registry-parser 모양 { 종류: [줄…] } 도 받는다 */
-  function snapEntries(v) {
+  /**
+   * 기록 줄 목록. 배열, 또는 registry-parser 모양 { 종류: [줄…] } 도 받는다. 등기목적·글·순위번호·접수일이 모두 없는 줄은 뺀다.
+   * 1.8.0 검토 반영: SNAP_ENTRY_MAX 를 넘으면 firstKinds 종류를 먼저, 그 안에서는 접수일이 늦은 것부터 남긴다(남긴 줄의 순서는 그대로).
+   * 상한에 닿은 기록은 지난 기록 시기 구분에서 '잘렸을 수 있음'(truncated)으로 본다(historyEraFrom)
+   */
+  function snapEntries(v, firstKinds) {
     var src = [];
     if (Array.isArray(v)) v.forEach(function (e) { src.push([e, '']); });
     else if (v && typeof v === 'object') {
       Object.keys(v).forEach(function (k) { if (!BAD_KEYS[k] && Array.isArray(v[k])) v[k].forEach(function (e) { src.push([e, k]); }); });
     }
-    var out = [];
+    var all = [];
     src.forEach(function (x) {
-      if (out.length >= SNAP_ENTRY_MAX) return;
       var o = snapEntry(x[0], x[1]);
-      if (o.purpose || o.text) out.push(o);
+      if (o.purpose || o.text || o.rank || o.date) all.push(o);
     });
-    return out;
+    if (all.length <= SNAP_ENTRY_MAX) return all;
+    var rank = function (o) { return firstKinds && firstKinds[o.kind] ? 0 : 1; };
+    var order = all.map(function (o, i) { return i; }).sort(function (a, b) {
+      var pa = rank(all[a]);
+      var pb = rank(all[b]);
+      if (pa !== pb) return pa - pb;
+      if (!pa) {
+        var da = snapDay(all[a].date);
+        var db = snapDay(all[b].date);
+        if (da !== db) return da > db ? -1 : 1; // 늦은 날 먼저(날짜 모름은 뒤로)
+      }
+      return a - b;
+    });
+    var keep = {};
+    order.slice(0, SNAP_ENTRY_MAX).forEach(function (i) { keep[i] = true; });
+    return all.filter(function (o, i) { return keep[i]; });
   }
   function snapMortgages(v, live) {
     var out = [];
@@ -792,7 +836,7 @@
       area: area > 0 && area < 100000 ? Math.round(area * 10000) / 10000 : null,
       owners: snapOwners(s.owners),
       live: snapEntries(s.live),
-      history: snapEntries(s.history),
+      history: snapEntries(s.history, SNAP_HISTORY_FIRST),
       mortgages: snapMortgages(s.mortgages, s.live),
       answers: snapAnswers(s.answers),
       addedAt: addedAt,
@@ -1739,6 +1783,24 @@
     } else if (want['reg-mortgage'] === 'no') {
       memoOf['reg-mortgage'] = []; // 예전 기록이 남긴 근저당 요약을 지운다
     }
+    // 1.8.0: 지난 기록 — 지워진 기록마다 지금 소유자 전/때(registry-parser classifyHistory). 답(있음/없음)은 바꾸지 않고 메모 묶음만.
+    // 1.8.0 검토 반영: 이 기록 하나가 아니라 항목 카드·주의 개수와 같은 계산(historyEraFrom: 이 기록을 넣은 뒤 매물의 등기부 기록들, 저장 모양).
+    // 메모는 공유 글에 실리므로 사람 이름 없이 종류 이름·순위번호·접수일만(regEntrySafeLabel). 현재 유효사항 등기부는 지난 기록이 안 보여
+    // 건드리지 않는다(단 앞 기록에 살아 있던 압류 등이 이 등기부에서 사라졌으면(gone) 묶음을 새로 쓴다)
+    var era = historyEraFrom((prop.registrySnapshots || []).filter(function (x) { return x.id !== src.id; }).concat([src]), null);
+    if (era && (src.includesCancelled !== false || era.gone)) {
+      if (era.counts.total) {
+        var hl = [head, '· ' + era.summary];
+        era.records.slice(0, HIST_MEMO_MAX).forEach(function (r) {
+          hl.push('· ' + regEntrySafeLabel({ part: r.section, rank: r.rank, kind: r.kind, purpose: r.purpose, date: r.date }) + ' — ' + (ERA_LABEL[r.era] || r.era) +
+            (r.gone ? ' (그사이 지워짐)' : ''));
+        });
+        if (era.records.length > HIST_MEMO_MAX) hl.push('· 그 밖 ' + (era.records.length - HIST_MEMO_MAX) + '건');
+        memoOf['reg-history'] = hl;
+      } else if (era.verdict === 'none') {
+        memoOf['reg-history'] = []; // 예전 기록이 남긴 지난 기록 묶음을 지운다
+      }
+    }
 
     // 2) 항목 답 반영
     var applied = {};
@@ -2205,10 +2267,113 @@
     return { total: stops.length, yes: yes, unanswered: unanswered };
   }
 
-  /** '있음'으로 표시한 위험 신호 (severity: 'stop' | 'caution') */
+  // ---- 1.8.0: 지난 기록(reg-history)의 시기 구분 ----
+  // 지워진 지난 기록이 지금 소유자가 사기 전 일이면 예전 주인의 일이라 '참고', 지금 소유자 때 일이면 잔금 전 새 압류 위험이라 '주의'.
+  // 저장하지 않고 등기부 기록(registrySnapshots, 저장 모양)에서 그때그때 계산한다(registry-parser classifyHistory — 새 저장 필드 없음).
+  // 1.8.0 검토 반영: 미리보기·답하기 메모·항목 카드·주의 개수가 모두 같은 함수(historyEraFrom)와 같은 저장 모양을 쓴다.
+  //  - 기준 기록: 지난 기록이 보이는(말소사항 포함 또는 모름) 기록 중 열람 일시가 있는 가장 최근 것(없으면 그중 가장 최근, 그것도 없으면
+  //    가장 최근 기록 → verdict 'unknown'). 열람 일시 없는 등기부 코드가 '넣은 시각'만으로 기준이 되지 않게
+  //  - 같은 집(고유번호가 같거나 한쪽이 없음)·같은 소유자(이름이 같거나 소유자를 못 읽음)의 다른 말소사항 포함 기록에서 본 지워진 기록도 합친다
+  //    (어느 기록에서든 '지금 소유자 때' 기록이 보이면 'has-current')
+  //  - 앞 기록에 살아 있던 압류·가압류 같은 기록이 가장 최근 기록에 없으면 그사이 지워진 기록(gone)으로 함께 나눈다
+  //    (말소사항 포함으로 본 뒤 현재 유효사항으로 다시 뗀 경우)
+  //  - 저장 상한(SNAP_ENTRY_MAX)에 닿은 기록이 있으면 truncated, 기준 기록보다 나중 기록에서 소유자가 바뀌었으면 ownerChanged
+  //    → 'before-only'(참고)를 내지 않는다
+  /** 두 기록 줄이 같은 기록인지(종류 같고, 순위번호·접수일 중 양쪽에 다 있는 것이 같음. 둘 다 없으면 등기목적·글이 같음) */
+  function sameRegEntry(a, b) {
+    if (a.kind !== b.kind) return false;
+    var ra = str(a.rank);
+    var rb = str(b.rank);
+    var da = snapDay(a.date);
+    var db = snapDay(b.date);
+    if (ra && rb && ra !== rb) return false;
+    if (da && db && da !== db) return false;
+    if ((ra && rb) || (da && db)) return true;
+    return !!(a.purpose || a.text) && str(a.purpose) + '|' + str(a.text) === str(b.purpose) + '|' + str(b.text);
+  }
+  /** 소유자 이름 모음(비교용 열쇠). 못 읽었으면 '' */
+  function snapOwnersKey(s) {
+    return (s.owners || []).map(function (o) { return personKey(o.name, true); }).filter(Boolean).sort().join('|');
+  }
+  /**
+   * 등기부 기록 목록(저장 모양) → classifyHistory 결과 + snap(기준 기록) + extra(다른 기록에서 더한 지워진 기록 수) + gone(그사이 지워진 기록 수).
+   * base 를 주면 그 기록이 기준(미리보기에서 다른 집 기록만 있을 때). 결과 null = 기록 없음·해석기 없음
+   */
+  function historyEraFrom(list, base) {
+    if (!REG || typeof REG.classifyHistory !== 'function' || !list || !list.length) return null;
+    var sorted = registrySnapshotsOf({ registrySnapshots: list }); // 최근 열람(없으면 넣은 때) 순
+    var when = function (s) { return s.viewedAt || s.addedAt || 0; };
+    if (!base) {
+      var seeing = sorted.filter(function (s) { return s.includesCancelled !== false; });
+      base = seeing.filter(function (s) { return !!s.viewedAt; })[0] || seeing[0] || sorted[0];
+    }
+    var bk = snapOwnersKey(base);
+    var house = sorted.filter(function (s) { return s === base || snapSameHouse(s, base.uniqueNo); });
+    var group = house.filter(function (s) { var k = snapOwnersKey(s); return s === base || !k || !bk || k === bk; });
+    var isHist = function (e) { return !!(e && SNAP_HISTORY_FIRST[e.kind]); };
+    var hist = (base.history || []).slice();
+    var has = function (e) { return hist.some(function (x) { return sameRegEntry(x, e); }); };
+    var extra = 0;
+    var from = 0;
+    group.forEach(function (s) {
+      if (s === base || s.includesCancelled === false) return;
+      var n = 0;
+      (s.history || []).forEach(function (e) { if (isHist(e) && !has(e)) { hist.push(e); n++; } });
+      if (n) { extra += n; from++; }
+    });
+    var latest = group[0];
+    var gone = 0;
+    group.forEach(function (s) {
+      if (s === latest || when(s) >= when(latest)) return;
+      (s.live || []).forEach(function (e) {
+        if (!isHist(e) || (latest.live || []).some(function (x) { return sameRegEntry(x, e); }) || has(e)) return;
+        hist.push(Object.assign({}, e, { gone: true }));
+        gone++;
+      });
+    });
+    var truncated = group.some(function (s) { return (s.history || []).length >= SNAP_ENTRY_MAX; });
+    var ownerChanged = house.some(function (s) {
+      var k = snapOwnersKey(s);
+      return s !== base && when(s) > when(base) && !!k && !!bk && k !== bk;
+    });
+    var r = REG.classifyHistory({
+      owners: base.owners, ownersUncertain: base.ownersUncertain, includesCancelled: base.includesCancelled, live: base.live,
+      answers: base.answers, history: hist, truncated: truncated, ownerChanged: ownerChanged
+    });
+    if (!r || !r.ok) return null;
+    r.snap = base;
+    r.extra = extra;
+    r.gone = gone;
+    if (extra) r.notes.push('다른 등기부 기록 ' + from + '개에서 본 지워진 기록 ' + extra + '건도 함께 나눴어요.');
+    if (gone) r.notes.push('앞 등기부에 살아 있던 기록 ' + gone + '건이 나중 등기부에서 사라져, 그사이 지워진 기록으로 보고 함께 나눴어요.');
+    if (truncated && r.reason !== 'truncated') r.notes.push('기록이 많아 앱이 일부만 남겼어요. 지워진 기록 수가 원본보다 적을 수 있어요.');
+    var later = house.some(function (s) { return s !== base && when(s) > when(base) && s.includesCancelled === false; });
+    if (later && base.includesCancelled !== false && r.counts.total) {
+      r.notes.push('기준 등기부(' + regViewedText(base.viewedAt, base.docType) + ') 뒤에 뗀 현재 유효사항 등기부에는 지워진 기록이 보이지 않아, 그사이 생겼다 지워진 기록은 알 수 없어요.');
+    }
+    return r;
+  }
+  /** 결과: historyEraFrom(매물의 등기부 기록) | null(등기부 기록 없음·해석기 없음) */
+  function historyEraOf(prop) { return historyEraFrom(prop.registrySnapshots || [], null); }
+  /** 기록 하나만 나눌 때의 입력([기록 보기] 요약): 저장 상한에 닿았으면 truncated */
+  function snapEraInput(s) { return Object.assign({}, s, { truncated: (s.history || []).length >= SNAP_ENTRY_MAX }); }
+  /** reg-history "있음"인데 기준 기록의 지워진 기록이 모두 지금 소유자 전(verdict 'before-only')이면 주의가 아니라 '참고'로 센다 */
+  function historyIsRef(prop) {
+    if (!CL.itemById['reg-history'] || getItemState(prop, 'reg-history').status !== 'yes') return false;
+    var era = historyEraOf(prop);
+    return !!(era && era.verdict === 'before-only');
+  }
+  /** '참고'로 돌린 등기부 주의 신호 수(지금은 reg-history 하나뿐) */
+  function refCount(prop) { return historyIsRef(prop) ? 1 : 0; }
+  // 지난 기록이 지금 소유자 때 생겼을 때 요약·공유 글의 협상·특약 후보에 붙이는 줄(판정이 아니라 할 일).
+  // 1.8.0 검토 반영: "잔금 당일 등기부를 다시 떼고"는 시기 요약(메모·안내)에 이미 있어 되풀이하지 않고 특약 문구 예만 적는다
+  var HIST_CLAUSE = '잔금 전 재열람·해제 특약 — 문구 예: "잔금 전에 새 압류·가압류 같은 권리가 생기면 계약을 해제할 수 있다."';
+
+  /** '있음'으로 표시한 위험 신호 (severity: 'stop' | 'caution'). 1.8.0: 'caution' 은 '참고'로 돌린 지난 기록(historyIsRef)을 뺀다 */
   function flagsYes(prop, severity) {
+    var ref = severity === 'caution' && historyIsRef(prop);
     return allItems().filter(function (it) {
-      return it.type === 'flag' && it.severity === severity && getItemState(prop, it.id).status === 'yes';
+      return it.type === 'flag' && it.severity === severity && getItemState(prop, it.id).status === 'yes' && !(ref && it.id === 'reg-history');
     });
   }
   function rateCautions(prop) {
@@ -2216,32 +2381,38 @@
       return it.type === 'rate' && getItemState(prop, it.id).status === 'caution';
     });
   }
-  /** 주의 개수 = 현장 평가 '주의' + 등기부 '주의' 신호 */
+  /** 주의 개수 = 현장 평가 '주의' + 등기부 '주의' 신호(1.8.0: '참고'로 돌린 지난 기록은 빼고 refCount 로 따로) */
   function cautionCount(prop) { return rateCautions(prop).length + flagsYes(prop, 'caution').length; }
 
   // 라벨 6개("멈춤 신호 n건" / "아직 안 봄" / "멈춤 신호 n개 미확인" / "주의 n건 · 멈춤 신호 없음" / "멈춤 신호 없음 · 확인 중 n/m" /
-  // "체크 항목 이상 없음")를 바꾸면 data.js 용어 "등기부 결과" 설명도 같이 고친다(사용자가 홈 카드의 라벨로 용어를 검색함)
+  // "체크 항목 이상 없음")를 바꾸면 data.js 용어 "등기부 결과" 설명도 같이 고친다(사용자가 홈 카드의 라벨로 용어를 검색함).
+  // 1.8.0: 지워진 지난 기록이 모두 지금 소유자 전이면(historyIsRef) 주의로 세지 않고 " · 참고 n건"을 붙인다(code 는 그대로. refs 에 수)
   function registryResult(prop) {
     var gs = gateSections();
-    if (!gs.length) return { code: 'none', label: '-' };
+    if (!gs.length) return { code: 'none', label: '-', refs: 0 };
     var items = [];
     gs.forEach(function (s) { items = items.concat(s.items); });
     var prog = progressOf(prop, items);
     var stops = 0;
     var cautions = 0;
+    var refs = 0;
+    var histRef = historyIsRef(prop);
     items.forEach(function (it) {
       if (it.type !== 'flag' || getItemState(prop, it.id).status !== 'yes') return;
-      if (it.severity === 'stop') stops++; else cautions++;
+      if (it.severity === 'stop') stops++;
+      else if (histRef && it.id === 'reg-history') refs++;
+      else cautions++;
     });
-    if (stops) return { code: 'stop', label: '멈춤 신호 ' + stops + '건' };
-    if (prog.done === 0) return { code: 'todo', label: '아직 안 봄' };
+    var refText = refs ? '참고 ' + refs + '건' : '';
+    if (stops) return { code: 'stop', label: '멈춤 신호 ' + stops + '건', refs: refs };
+    if (prog.done === 0) return { code: 'todo', label: '아직 안 봄', refs: refs };
     // 1.4.5: 핵심 과업(등기부 멈춤 신호에 모두 답하기)의 결과를 보여 준다. 전에는 모두 "없음"이어도 "확인 중 7/17"로만 보였음(1.5.0 데이터는 8/18)
     var gate = gateStopState(prop);
-    if (gate.unanswered > 0) return { code: 'unanswered', label: '멈춤 신호 ' + gate.unanswered + '개 미확인' };
+    if (gate.unanswered > 0) return { code: 'unanswered', label: '멈춤 신호 ' + gate.unanswered + '개 미확인', refs: refs };
     // 여기부터는 멈춤 신호를 모두 "없음"으로 답한 상태
-    if (cautions) return { code: 'caution', label: '주의 ' + cautions + '건 · 멈춤 신호 없음' };
-    if (prog.done < prog.total) return { code: 'clear', label: '멈춤 신호 없음 · 확인 중 ' + prog.done + '/' + prog.total };
-    return { code: 'ok', label: '체크 항목 이상 없음' };
+    if (cautions) return { code: 'caution', label: ['주의 ' + cautions + '건', refText, '멈춤 신호 없음'].filter(Boolean).join(' · '), refs: refs };
+    if (prog.done < prog.total) return { code: 'clear', label: ['멈춤 신호 없음', refText, '확인 중 ' + prog.done + '/' + prog.total].filter(Boolean).join(' · '), refs: refs };
+    return { code: 'ok', label: ['체크 항목 이상 없음', refText].filter(Boolean).join(' · '), refs: refs };
   }
 
   function suggestedDropReason(prop) {
@@ -2896,13 +3067,13 @@
   function searchKey(s) { return str(s).toLowerCase().replace(/\s+/g, ''); }
   /** 검색 대상: 단지명·동·호(unitText 모양 "204동 1604호" 포함)·중개사 이름·메모. 가져오기 참고(importNotes)는 뺀다 */
   function homeSearchText(p) { return searchKey([p.name, unitText(p), p.dong, p.ho, p.agentName, p.memo].join(' ')); }
-  /** 등기부(게이트) 섹션의 주의 신호(멈춤이 아닌 flag)를 "있음"으로 답한 수. registryResult 와 같은 셈이지만 멈춤 신호·미답과 관계없이 센다 */
+  /** 등기부(게이트) 섹션의 주의 신호(멈춤이 아닌 flag)를 "있음"으로 답한 수. registryResult 와 같은 셈이지만 멈춤 신호·미답과 관계없이 센다(1.8.0: '참고'로 돌린 지난 기록은 뺌) */
   function regCautionCount(p) {
     var n = 0;
     gateSections().forEach(function (s) {
       s.items.forEach(function (it) { if (it.type === 'flag' && it.severity !== 'stop' && getItemState(p, it.id).status === 'yes') n++; });
     });
-    return n;
+    return n - refCount(p);
   }
   /** 칩 판정·검색에 쓰는 매물 요약. photos 는 { 매물id: 사진 수 } 또는 null(아직 못 읽음) */
   function homeFacts(p, photos) {
@@ -4845,6 +5016,26 @@
    *   답하는 순간 접는 것은 깔끔한 답(없음·양호·check 완료)뿐이고, 주의·있음·답변·재방문은 메모를 이어 쓰도록 펼쳐 둔다
    * 상태 클래스는 applyItemClasses 가 className 을 통째로 다시 쓰므로, 접힘·도구 줄 클래스는 sync() 가 늘 다시 붙인다(afterItemChange 가 부름)
    */
+  /**
+   * 1.8.0: 지난 기록(reg-history) 항목 카드의 자동 안내 — 매물의 등기부 기록(historyEraOf: 기준 기록 + 같은 집·같은 소유자의 다른 기록)으로
+   * 지워진 기록을 지금 소유자 전/때로 나눈 한 줄 요약 + 기록마다 꼬리표(종류 이름·순위번호·접수일만). 등기부 기록이 없으면 null(전 화면 그대로).
+   * 답이 바뀌어도 다시 그리지 않으므로 문구는 답과 관계없게 쓴다. 1.8.0 검토 반영: 누가 세는지 분명하게("앱이 … 세어요")
+   */
+  function historyAutoEl(prop) {
+    var era = historyEraOf(prop);
+    if (!era) return null;
+    var v = era.verdict;
+    var s = era.snap;
+    var how = v === 'before-only' ? ' "있음"이어도 앱이 주의 개수에 넣지 않고 "참고"로 따로 세어요.'
+      : v === 'has-current' ? ' "있음"이면 요약의 협상·특약 후보에 잔금 전 재열람·해제 특약이 들어가요.'
+        : v === 'unknown' ? ' 확실히 나누지 못해 "있음"이면 앱이 전처럼 주의로 세어요.' : '';
+    return h('div', { class: 'item-auto ' + (v === 'before-only' || v === 'none' ? 'is-before' : v === 'has-current' ? 'is-current' : 'is-unknown'), role: 'note' },
+      h('p', { class: 'item-auto-head', text: era.summary }),
+      era.counts.total ? eraList(era, true) : null,
+      era.notes.map(function (n) { return h('p', { class: 'item-auto-note', text: n }); }),
+      h('p', { class: 'item-auto-src', text: '앱이 등기부 기록(' + regViewedText(s.viewedAt, s.docType) + ' · ' + snapSourceLabel(s) + ')으로 자동으로 나눴어요.' + how }));
+  }
+
   function itemEl(prop, sec, it) {
     var st = getItemState(prop, it.id);
     var el = h('div', { id: 'item-' + domId(it.id), tabindex: '-1' });
@@ -4898,11 +5089,15 @@
         it.type === 'flag' || it.type === 'rate' ? null : moreBtn, collapseBtn);
     }
 
+    // 1.8.0 검토 반영: 지난 기록 "있음"이 '참고'로 세어질 때(historyIsRef) 꼬리표 옆에 '참고'(sync 가 보이고 숨김)
+    var refTag = it.id === 'reg-history' ? h('span', { class: 'sev sev-ref', hidden: true, text: '참고 · 주의 개수에 넣지 않음' }) : null;
     var tags = it.type === 'flag'
       ? h('div', { class: 'item-tags' }, it.severity === 'stop'
         ? stopWordEl(prop, 'span', 'sev sev-stop', 'tag', sec.gate)
-        : h('span', { class: 'sev sev-caution', text: '주의 신호 · 있으면 조심해서 진행' }))
+        : h('span', { class: 'sev sev-caution', text: '주의 신호 · 있으면 조심해서 진행' }), refTag)
       : null;
+    // 1.8.0: 지난 기록 항목에는 등기부 기록으로 나눈 지금 소유자 전/때 자동 안내(사용자 답과 별개. 등기부 기록이 없으면 없음)
+    var autoEl = it.id === 'reg-history' ? historyAutoEl(prop) : null;
 
     var controls = null;
     var extra = null;
@@ -4978,7 +5173,7 @@
     if (it.type === 'flag' || it.type === 'rate') controls = h('div', { class: 'item-ctl' }, controls, moreBtn);
     // 1.5.0: 본문을 한 상자에 담아 접힘(.is-folded)과 요약 줄의 aria-controls 대상으로 쓴다
     var body = h('div', { class: 'item-body', id: bodyId },
-      head, tags, helpPanel, controls, stopInline, linkEl, extra, memo ? memo.wrap : null, tools, photoStrip('i:' + it.id, it.text));
+      head, tags, autoEl, helpPanel, controls, stopInline, linkEl, extra, memo ? memo.wrap : null, tools, photoStrip('i:' + it.id, it.text));
 
     // 1.5.0: 접힌 항목의 한 줄 요약(누르면 펼침). 사진 표시는 사진 줄이 보일 때 CSS(:has)가 켠다
     var foldAns = h('span', { class: 'fold-ans' });
@@ -5015,6 +5210,14 @@
       if (linkEl) linkEl.hidden = cur.status !== 'yes'; // 1.5.0(C11)
       foldBtn.setAttribute('aria-expanded', String(!folded));
       var a = answerLabel(it, cur);
+      // 1.8.0 검토 반영: 지난 기록 "있음"을 앱이 '참고'로 세면 노란 주의 표시 대신 중립색 테두리 + 접힌 줄 "있음 · 참고" + '참고' 꼬리표
+      var isRef = !!refTag && cur.status === 'yes' && historyIsRef(prop);
+      if (refTag) {
+        refTag.hidden = !isRef;
+        el.classList.toggle('st-yes-ref', isRef);
+        if (isRef) el.classList.remove('st-yes-caution');
+        if (isRef) a = ['있음 · 참고', 'ref'];
+      }
       foldAns.textContent = a ? a[0] : '';
       foldAns.className = 'fold-ans' + (a ? ' fold-ans-' + a[1] : '');
     }
@@ -5564,6 +5767,25 @@
     return (part === 'gap' ? '갑구 ' : part === 'eul' ? '을구 ' : '') + (b.rank ? b.rank + '번 ' : '') + (REG_KIND_LABEL[b.kind] || '기록') +
       (/지분/.test(str(b.purpose)) ? '(지분)' : '') + ((b.receiptDate || b.date) ? '(' + (b.receiptDate || b.date) + ' 접수)' : '');
   }
+  // 1.8.0: 지난 기록의 시기 꼬리표(registry-parser ERA_LABEL 과 같음)와 배지 색(미리보기 rp-ans 색을 그대로)
+  var ERA_LABEL = (REG && REG.ERA_LABEL) || { before: '지금 소유자 전', current: '지금 소유자 때', unknown: '확인 필요' };
+  var ERA_BADGE = { before: 'rp-no', current: 'rp-yes', unknown: 'rp-low' };
+  var HIST_MEMO_MAX = 8; // 지난 기록 메모 묶음에 적는 기록 줄 수(넘으면 "그 밖 N건")
+  /**
+   * classifyHistory 결과 → 기록 줄 목록(이름 + 꼬리표). safe: 사람 이름이 들어갈 수 있는 등기목적 대신 종류 이름(항목 카드).
+   * 접수일 "(2005-06-27 접수)"은 한 덩어리(rp-when, 줄 바꿈 없음) — 320px 에서 날짜 중간이 끊기지 않게
+   */
+  function eraList(era, safe) {
+    return h('ul', { class: 'rp-list rp-era-list' }, era.records.map(function (r) {
+      var b = { part: r.section, rank: r.rank, kind: r.kind, purpose: r.purpose || REG_KIND_LABEL[r.kind] };
+      return h('li', { class: 'rp-row' },
+        h('span', { class: 'rp-name' }, safe ? regEntrySafeLabel(b) : regEntryLabel(b),
+          r.date ? h('span', { class: 'rp-when', text: '(' + r.date + ' 접수)' }) : null,
+          // 1.8.0 검토 반영: 앞 등기부에 살아 있다가 나중 등기부에서 사라진 기록(historyEraFrom gone)
+          r.gone ? h('span', { class: 'rp-when rp-gone', text: ' · 그사이 지워짐' }) : null),
+        h('span', { class: 'rp-ans rp-era rp-era-' + r.era + ' ' + (ERA_BADGE[r.era] || ''), text: ERA_LABEL[r.era] || r.era }));
+    }));
+  }
   // 재열람 비교에서 "없음"을 말하려면 새 등기부로 답하는 멈춤 신호가 모두 확실해야 한다(registry-parser STOP_IDS 와 같음)
   var REG_STOP_IDS = ['reg-trust', 'reg-seizure', 'reg-injunction', 'reg-auction', 'reg-provisional', 'reg-lease'];
   /** 1.6.0 검토 반영: 새 등기부가 비교에 쓰기에 불확실한지(PDF 를 끝까지 읽지 못함·멈춤 신호 중 확신 낮음·빈칸) */
@@ -5615,7 +5837,12 @@
     // 근저당 요약은 을구 기록에서(부기로 바뀐 채권최고액·채무자가 반영된 값). 말소된 것과 부기 행은 뺀다
     var mortgages = (R.eul || []).filter(function (e) { return e.kind === 'mortgage' && !e.cancelled && !e.parent; })
       .map(function (e) { return { rank: e.rank, maxAmount: e.maxAmount || null, holder: e.holder || '', debtor: e.debtor || '' }; });
-    var owners = (R.owners || []).map(function (o) { return { name: o.name, share: o.share, since: o.since }; });
+    // 1.8.0 검토 반영: firstSince(예전에도 이 집 소유자였음)도 넘긴다 — 저장할 때 since 로 접힌다(normalizeSnapshot)
+    var owners = (R.owners || []).map(function (o) {
+      var x = { name: o.name, share: o.share, since: o.since };
+      if (o.firstSince) x.firstSince = o.firstSince;
+      return x;
+    });
     var snap = {
       id: uid(), docId: null, source: 'pdf', viewedAt: R.viewedAt, docType: R.docType || '', includesCancelled: R.includesCancelled,
       uniqueNo: R.uniqueNo || '', area: R.area, owners: owners, live: R.live, history: R.history, mortgages: mortgages, answers: answers,
@@ -5681,6 +5908,21 @@
       ownerChanged: ownerChanged, changed: changed, unsure: unsure, answer: changed ? 'yes' : unsure ? null : 'no',
       warnings: a.warnings.concat(b.warnings.filter(function (w) { return a.warnings.indexOf(w) < 0; }))
     });
+  }
+
+  /**
+   * 1.8.0 검토 반영: 미리보기의 지난 기록 시기 — 이 서류를 저장 모양(normalizeSnapshot)으로 바꿔, 넣은 뒤의 매물 등기부 기록으로 나눈다
+   * (답하기 뒤 항목 카드·메모·주의 개수와 같은 historyEraFrom). 같은 열람 일시의 기록(dupOf)은 이 서류로 바뀌므로 뺀다.
+   * 기준 기록이 이 서류와 다른 집(고유번호가 다름)이면 이 서류만으로. 결과에 self(기준 기록이 이 서류인지). 해석기가 없으면 null
+   */
+  function historyEraForModel(prop, model) {
+    var cand = normalizeSnapshot(model.snap);
+    if (!cand) return null;
+    var list = (prop.registrySnapshots || []).filter(function (s) { return s.id !== cand.id && s !== model.dupOf; }).concat([cand]);
+    var r = historyEraFrom(list, null);
+    if (r && r.snap !== cand && !snapSameHouse(r.snap, cand.uniqueNo)) r = historyEraFrom([cand], cand);
+    if (r) r.self = r.snap === cand;
+    return r;
   }
 
   /**
@@ -5752,6 +5994,9 @@
       ? sellers.every(function (n) { return model.owners.some(function (o) { return samePerson(o.name, n); }); }) : null;
     // 1.6.0 검토 반영: 소유자 계산이 불확실하면 매도인 이름이 같아 보여도 "없음"으로 답하지 않는다(확인 필요)
     var ownerUnsure = !!model.snap.ownersUncertain;
+    // 1.8.0: 지워진 지난 기록의 시기(지금 소유자 전/때). 1.8.0 검토 반영: 답하기 뒤 항목 카드·메모·주의 개수와 같은 입력과 계산
+    // (이 서류를 저장 모양으로 바꿔 매물의 다른 등기부 기록과 함께 — historyEraForModel)
+    var era = historyEraForModel(prop, model);
     var different = !!(model.diff && model.diff.res && !model.diff.res.ok && model.diff.res.error === 'different');
     // 다른 집 등기부일 수 있음(동·호가 다르거나 앞 기록과 고유번호가 다름): 주 버튼은 답하기가 아니다
     var suspect = unit.state === 'mismatch' || different;
@@ -5786,8 +6031,12 @@
     ]));
 
     // 3) 소유자
+    // 1.8.0 검토 반영: 예전에도 이 집 소유자였으면(firstSince) 처음 소유자가 된 날도 보인다(지난 기록 시기 구분의 기준일)
     var ownerKids = model.owners.length
-      ? model.owners.map(function (o) { return rpLine(o.name + (o.share ? ' · 지분 ' + o.share : '') + (o.since ? ' · ' + o.since + ' 접수' : '')); })
+      ? model.owners.map(function (o) {
+        return rpLine(o.name + (o.share ? ' · 지분 ' + o.share : '') + (o.since ? ' · ' + o.since + ' 접수' : '') +
+          (o.firstSince ? ' (처음 소유자가 된 날 ' + o.firstSince + ')' : ''));
+      })
       : [rpLine('소유자를 읽지 못했어요. 원본 갑구의 마지막 소유권 기록을 직접 보세요.', 'warn')];
     if (model.owners.length > 1) ownerKids.push(rpLine('공동명의 ' + model.owners.length + '명 — 팔려면 소유자 모두가 동의해야 해요.', 'warn'));
     if (model.owners.length && ownerUnsure) ownerKids.push(rpLine('소유자 계산이 확실하지 않아요(지분·이름을 다 읽지 못했거나 무엇을 지웠는지 모르는 말소가 있음). 원본 갑구를 직접 보세요.', 'warn'));
@@ -5811,6 +6060,11 @@
       }
       var a = answers[it.id];
       if (it.id === 'reg-mortgage' && !a && (model.mortgages || []).length) a = 'yes';
+      // 1.8.0: 지난 기록 "있음"에는 시기 한 마디(자세한 것은 아래 "지난 기록" 묶음)
+      if (it.id === 'reg-history' && a === 'yes' && era && era.counts.total) {
+        return { v: a, note: era.verdict === 'before-only' ? '모두 지금 소유자 전 — 앱이 주의가 아니라 "참고"로 세어요'
+          : era.verdict === 'has-current' ? '지금 소유자 때 ' + era.counts.current + '건 — 잔금 전 재열람·해제 특약' : '지금 소유자 전/때 확인 필요' };
+      }
       if (a === 'yes' || a === 'no') return { v: a };
       if (hasOwn(model.low, it.id)) return { v: 'low', note: '"' + regAnsText(model.low[it.id]) + '"으로 읽었지만 확실하지 않아요' };
       return { v: 'skip', note: '읽지 못함 — 직접 확인' };
@@ -5848,16 +6102,30 @@
         rpLine('채권최고액은 보통 빌린 돈의 110~130%로 적혀요. 실제 남은 빚은 매도인의 대출 잔액 증명서로 확인하세요.', 'muted')])));
     }
 
-    // 6) 지난 기록
+    // 6) 지난 기록. 1.8.0: 기록마다 지금 소유자 전/때 꼬리표 + 맨 위 한 줄 요약(registry-parser classifyHistory, 답하기 뒤 항목 카드와 같은 계산)
+    // 1.8.0 검토 반영: 매물의 다른 등기부 기록이 기준이면 그 기록을 밝히고, 현재 유효사항 서류여도 다른 기록으로 나눈 결과를 보인다
     var hist = REG_HISTORY_KINDS.filter(function (k) { return kindCount(model.history, k); })
       .map(function (k) { return REG_KIND_LABEL[k] + ' ' + kindCount(model.history, k) + '건'; });
     var common = kindCount(model.history, 'mortgage') + kindCount(model.history, 'trust') + kindCount(model.history, 'jeonse');
-    kids.push(rpSection('지난 기록(말소됨)', [
-      model.includesCancelled === false
-        ? rpLine('현재 유효사항으로 열람해 지워진 지난 기록이 보이지 않아요. "말소사항 포함"으로 열람하면 볼 수 있어요.', 'warn')
-        : rpLine(hist.length ? hist.join(', ') + ' — 지금은 풀렸지만 언제 왜 생겼는지 물어보세요.' : '압류·가압류·가처분·경매·가등기·임차권 지난 기록 없음', hist.length ? 'warn' : ''),
-      common ? rpLine('말소된 근저당·신탁·전세권 ' + common + '건은 흔한 기록이라 "지난 기록"으로 세지 않아요.', 'muted') : null
-    ]));
+    var histKids = [];
+    var currentOnly = model.includesCancelled === false;
+    var returnedOwner = model.owners.some(function (o) { return o.firstSince && o.since && o.firstSince < o.since; });
+    if (currentOnly) histKids.push(rpLine('현재 유효사항으로 열람해 이 서류에는 지워진 지난 기록이 보이지 않아요. "말소사항 포함"으로 열람하면 볼 수 있어요.', 'warn'));
+    if (era && era.counts.total) {
+      histKids.push(rpLine(era.summary, era.verdict === 'before-only' ? 'ok' : 'warn'));
+      histKids.push(eraList(era, false));
+      if (!era.self) histKids.push(rpLine('이 매물의 다른 등기부 기록(' + regViewedText(era.snap.viewedAt, era.snap.docType) + ' · ' + snapSourceLabel(era.snap) + ')을 기준으로 나눴어요.', 'muted'));
+      if (era.self && returnedOwner) histKids.push(rpLine('지금 소유자가 예전에도 이 집을 가진 적이 있어(신탁 뒤 돌려받음·다시 삼 등) 처음 소유자가 된 날부터를 지금 소유자 때로 봤어요.', 'muted'));
+      era.notes.forEach(function (n) { histKids.push(rpLine(n, 'muted')); });
+    } else if (currentOnly) {
+      // 위 한 줄로 알렸다
+    } else if (era && era.verdict !== 'none') {
+      histKids.push(rpLine(era.summary, 'warn'));
+    } else {
+      histKids.push(rpLine(hist.length ? hist.join(', ') + ' — 지금은 풀렸지만 언제 왜 생겼는지 물어보세요.' : '압류·가압류·가처분·경매·가등기·임차권 지난 기록 없음', hist.length ? 'warn' : ''));
+    }
+    if (common) histKids.push(rpLine('말소된 근저당·신탁·전세권 ' + common + '건은 흔한 기록이라 "지난 기록"으로 세지 않아요.', 'muted'));
+    kids.push(rpSection('지난 기록(말소됨)', histKids, 'rp-hist'));
 
     // 7) 전유면적 ↔ 매물 면적
     var pa = numOrNull(prop.area);
@@ -6397,6 +6665,12 @@
     if (count.mortgage) parts.push('근저당 ' + count.mortgage + '건');
     if (count.jeonse) parts.push('전세권 ' + count.jeonse + '건');
     if (s.owners && s.owners.length) parts.push('소유자 ' + s.owners.length + '명');
+    // 1.8.0: 지워진 지난 기록 수와 시기(지금 소유자 전/때) — 이 기록 하나만으로(저장 상한에 닿았으면 '시기 확인 필요')
+    var era = REG && typeof REG.classifyHistory === 'function' ? REG.classifyHistory(snapEraInput(s)) : null;
+    if (era && era.ok && era.counts.total) {
+      parts.push('지난 기록 ' + era.counts.total + '건(' + (era.verdict === 'before-only' ? '모두 지금 소유자 전'
+        : era.verdict === 'has-current' ? '지금 소유자 때 ' + era.counts.current + '건' : '시기 확인 필요') + ')');
+    }
     return parts.join(' · ');
   }
   /** [기록 보기]: 해석 기록 목록(최근 열람 순)과 앞 기록과의 차이, 기록 지우기 */
@@ -6512,10 +6786,24 @@
         var row = { it: it, st: st, sec: sec };
         // 1.5.0: 항목 cautionUse 가 섹션 값보다 우선('reference' = 가격 판단 참고, 특약 대상 아님)
         var useRef = (it.cautionUse || sec.cautionUse) === 'reference';
+        // 1.8.0: 지난 기록 "있음"은 등기부 기록으로 시기를 나눠 모은다(historyEraOf). 모두 지금 소유자 전 → 위험 신호에서 빼고
+        // 가격 판단 참고에만('참고'), 지금 소유자 때가 있음 → 주의 신호 + 협상·특약 후보(잔금 전 재열람·해제 특약), 모름·기록 없음 → 전과 같이
+        var era = it.type === 'flag' && it.id === 'reg-history' && st.status === 'yes' ? historyEraOf(prop) : null;
+        if (era && era.counts.total) {
+          row.notes = [];
+          if (str(st.memo).indexOf(era.summary) < 0) row.notes.push(era.summary); // 답하기 메모에 이미 있으면 되풀이하지 않음
+          if (era.verdict === 'has-current') row.notes.push(HIST_CLAUSE);
+        }
         if (it.type === 'flag' && st.status === 'yes') {
-          (it.severity === 'stop' ? S.stops : S.cautionFlags).push(row);
-          // 주의 신호를 특약으로 풀 수 있는 것(contractFlags)과 참고용(refFlags)으로 나눠 둔다(cautionFlags 는 둘 다)
-          if (it.severity !== 'stop') (useRef ? S.refFlags : S.contractFlags).push(row);
+          if (era && era.verdict === 'before-only') {
+            row.ref = true;
+            S.refFlags.push(row);
+          } else {
+            (it.severity === 'stop' ? S.stops : S.cautionFlags).push(row);
+            // 주의 신호를 특약으로 풀 수 있는 것(contractFlags)과 참고용(refFlags)으로 나눠 둔다(cautionFlags 는 둘 다)
+            if (era && era.verdict === 'has-current') S.contractFlags.push(row);
+            else if (it.severity !== 'stop') (useRef ? S.refFlags : S.contractFlags).push(row);
+          }
         }
         else if (it.type === 'rate' && st.status === 'caution') {
           S.rateCautions.push(row);
@@ -6601,11 +6889,14 @@
 
     // 위험 신호
     var reg = registryResult(prop);
-    var riskRows = S.stops.map(function (r) { return sumRow(r, 'is-stop', '멈춤 신호'); })
-      .concat(S.cautionFlags.map(function (r) { return sumRow(r, 'is-caution', '주의 신호'); }));
+    // 1.8.0 검토 반영: 위험 신호 목록에는 앱이 붙인 안내(r.notes)를 그리지 않는다(공유 글과 같게. 안내는 협상·특약 후보·가격 판단 참고에서만).
+    // 지난 기록이 '참고'로 세어졌으면 빈 상태 문구도 그렇게("있음"으로 답한 것과 어긋나 보이지 않게)
+    var riskRows = S.stops.map(function (r) { return sumRow(r, 'is-stop', '멈춤 신호', false, true); })
+      .concat(S.cautionFlags.map(function (r) { return sumRow(r, 'is-caution', '주의 신호', false, true); }));
     main.append(sumCard('위험 신호', riskRows.length,
       riskRows.length ? h('ul', { class: 'sum-list' }, riskRows) : null,
-      '"있음"으로 표시한 위험 신호가 없어요. (등기부: ' + reg.label + ')'));
+      (reg.refs ? '주의로 세는 위험 신호가 없어요. 지난 기록은 "참고" ' + reg.refs + '건으로 따로 셌어요(아래 가격 판단 참고).'
+        : '"있음"으로 표시한 위험 신호가 없어요.') + ' (등기부: ' + reg.label + ')'));
 
     // 협상·특약 후보 = 등기부 주의 신호 가운데 특약으로 풀 수 있는 것(근저당 말소·전세권 정리 등) + 집 안 "주의" 항목 + 메모 + 사진.
     // 1.5.0(L37): 특약으로 풀 수 없는 주의 신호(data.js cautionUse 'reference': 잦은 소유자 변경, 지난 기록)는 아래 "가격 판단 참고"로(S.refFlags)
@@ -6619,11 +6910,12 @@
       '등기부 주의 신호나 집 안에서 "주의"로 표시한 항목이 없어요.'));
 
     // 가격 판단 참고 = 특약으로 풀 수 없는 등기부 주의 신호(1.5.0 L37, S.refFlags) + 동네·단지 "주의" (특약으로 고칠 수 없는 것)
-    var refRows = S.refFlags.map(function (r) { return sumRow(r, 'is-caution', '주의 신호', true); })
+    // 1.8.0: 지워진 기록이 모두 지금 소유자 전인 지난 기록(r.ref)은 주의 신호가 아니라 '참고'
+    var refRows = S.refFlags.map(function (r) { return r.ref ? sumRow(r, 'is-ref', '참고', true) : sumRow(r, 'is-caution', '주의 신호', true); })
       .concat(S.refCautions.map(function (r) { return sumRow(r, '', null, true); }));
     if (refRows.length) {
       main.append(sumCard('가격 판단 참고 (특약 대상 아님)', refRows.length, [
-        h('p', { class: 'muted small', text: '동네·단지에서 "주의"로 표시한 항목과, 특약으로 풀 수 없는 등기부 주의 신호(잦은 소유자 변경·지난 기록)예요. 계약서로 고칠 수 없으니 이 집을 고를지, 가격이 맞는지 판단할 때 참고하세요.' }),
+        h('p', { class: 'muted small', text: '동네·단지에서 "주의"로 표시한 항목과, 특약으로 풀 수 없는 등기부 주의 신호(잦은 소유자 변경·지난 기록)예요. 지워진 기록이 모두 지금 소유자가 사기 전 일이면 "참고"로 따로 표시해요. 계약서로 고칠 수 없으니 이 집을 고를지, 가격이 맞는지 판단할 때 참고하세요.' }),
         h('ul', { class: 'sum-list' }, refRows)
       ], ''));
     }
@@ -6669,11 +6961,12 @@
     loadPhotosInto(v, prop.id);
   }
 
-  /** 요약 목록의 한 줄: 섹션 이름, 항목, 메모, (사진) */
-  function sumRow(r, cls, tag, withPhotos) {
+  /** 요약 목록의 한 줄: 섹션 이름, 항목, (1.8.0: 앱이 붙인 안내 r.notes — noNotes 면 뺌), 메모, (사진) */
+  function sumRow(r, cls, tag, withPhotos, noNotes) {
     return h('li', { class: 'sum-item ' + (cls || '') },
       h('p', { class: 'sum-item-sec', text: r.sec.title + (r.it.group ? ' · ' + r.it.group : '') }),
-      h('p', { class: 'sum-item-title' }, tag ? h('span', { class: 'sev ' + (cls === 'is-stop' ? 'sev-stop' : 'sev-caution'), style: 'margin-right:6px', text: tag }) : null, r.it.text),
+      h('p', { class: 'sum-item-title' }, tag ? h('span', { class: 'sev ' + (cls === 'is-stop' ? 'sev-stop' : cls === 'is-ref' ? 'sev-ref' : 'sev-caution'), style: 'margin-right:6px', text: tag }) : null, r.it.text),
+      noNotes ? null : (r.notes || []).map(function (n) { return h('p', { class: 'sum-item-note', text: n }); }),
       r.st.memo ? h('p', { class: 'sum-item-memo', text: '메모: ' + r.st.memo }) : null,
       withPhotos ? photoStrip('i:' + r.it.id, r.it.text) : null
     );
@@ -6691,6 +6984,8 @@
     }
     function memoText(m) { return str(m).trim().replace(/\r?\n/g, '\n    '); } // 여러 줄 메모는 들여쓰기
     function withMemo(r) { return r.st.memo && r.st.memo.trim() ? ' — ' + memoText(r.st.memo) : ''; }
+    // 1.8.0: 앱이 붙인 안내(지난 기록의 시기·잔금 전 재열람·해제 특약). 사람 이름 없음
+    function withNotes(r) { return (r.notes || []).map(function (n) { return '\n    → ' + n; }).join(''); }
 
     var lines = [];
     lines.push('[임장 요약] ' + prop.name + (unit ? ' ' + unit : ''));
@@ -6716,9 +7011,9 @@
     block('위험 신호', S.stops.map(function (r) { return '- [멈춤 신호] ' + r.it.text + withMemo(r); })
       .concat(S.cautionFlags.map(function (r) { return '- [주의 신호] ' + r.it.text + withMemo(r); })));
     // 1.5.0(L37): 협상·특약 후보에는 특약으로 풀 수 있는 주의 신호만(contractFlags). 참고용 주의 신호(refFlags)는 가격 판단 참고로
-    block('협상·특약 후보', S.contractFlags.map(function (r) { return '- [등기부] ' + r.it.text + withMemo(r) + photoNote(r); })
+    block('협상·특약 후보', S.contractFlags.map(function (r) { return '- [등기부] ' + r.it.text + withMemo(r) + photoNote(r) + withNotes(r); })
       .concat(S.contractCautions.map(function (r) { return '- ' + r.it.text + withMemo(r) + photoNote(r); })));
-    block('가격 판단 참고 (특약 대상 아님)', S.refFlags.map(function (r) { return '- [등기부] ' + r.it.text + withMemo(r) + photoNote(r); })
+    block('가격 판단 참고 (특약 대상 아님)', S.refFlags.map(function (r) { return '- [등기부' + (r.ref ? '·참고' : '') + '] ' + r.it.text + withMemo(r) + photoNote(r) + withNotes(r); })
       .concat(S.refCautions.map(function (r) { return '- ' + r.it.text + withMemo(r) + photoNote(r); })));
     block('질문과 답변', S.answered.map(function (r) { return '- Q. ' + r.it.text + '\n  A. ' + r.st.answer.trim().replace(/\r?\n/g, '\n     '); }));
     // 1.5.0(L33): 미답 질문은 16줄 대신 한 줄(가족에게 보내는 글에 질문 목록은 필요 없음. 앱의 요약 화면에 접힌 목록이 있음)
@@ -7807,7 +8102,7 @@
       tableWrap,
       h('div', { class: 'card', style: 'margin-top:14px' },
         h('p', { class: 'small muted', text: '실거래 대비: 호가가 최근 실거래가보다 몇 % 높은지(+) 낮은지(−). 실거래가는 한 건의 거래라 층·향·수리 상태에 따라 차이가 날 수 있어요.' }),
-        h('p', { class: 'small muted', text: '주의: 현장 평가에서 "주의"로 표시한 항목 + 등기부에서 "주의" 신호가 있다고 표시한 항목 수.' }),
+        h('p', { class: 'small muted', text: '주의: 현장 평가에서 "주의"로 표시한 항목 + 등기부에서 "주의" 신호가 있다고 표시한 항목 수. 참고: 지워진 지난 기록이 모두 지금 소유자가 사기 전 일이라 주의에서 뺀 것(등기부 기록으로 앱이 나눔).' }),
         // 1.7.0
         h('p', { class: 'small muted', text: '대출 한도·월 상환(첫 달)·필요 현금·1년 보유비용: 매물 상세 "대출·비용" 카드의 조건으로 계산한 추정이에요. 계산 매매가는 협상가가 있으면 협상가, 없으면 호가예요. 실제 한도는 소득(DSR)·은행 심사로, 세금은 위택스·구청에서 확인하세요.' })
       )
@@ -7948,7 +8243,7 @@
           h('td', {}, statusChip(p.status)),
           h('td', { class: 'num', text: p.askPrice ? formatManwon(p.askPrice) : '-' }),
           h('td', { class: 'num' + (diff !== null ? (diff > 0 ? ' diff-up' : ' diff-down') : ''), text: pctText(diff) }),
-          h('td', { class: 'num', text: String(cautionCount(p)) }),
+          h('td', { class: 'num', text: String(cautionCount(p)) + (reg.refs ? ' · 참고 ' + reg.refs : '') }), // 1.8.0: '참고'로 돌린 지난 기록은 따로
           h('td', {}, h('span', { class: 'mini-bar' }, makeBar(prog.pct, null, { thin: true, ariaLabel: p.name + ' 진행률' }).el), prog.pct + '%'),
           h('td', { class: 'num', text: p.realPrice ? formatManwon(p.realPrice) : '-' }),
           h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' }),

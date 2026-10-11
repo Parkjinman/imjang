@@ -1,5 +1,5 @@
 /*
- * 임장 체크리스트 — registry-parser.js (1.6.0)
+ * 임장 체크리스트 — registry-parser.js (1.6.0, 1.8.0 지난 기록 시기 구분)
  * 인터넷등기소에서 저장한 등기사항전부증명서(집합건물) PDF 의 글자를 읽어, 등기부 섹션 항목의 답 후보를 만든다.
  *
  * - 브라우저: window.ImjangRegistry (vendor/pdfjs/pdf.min.js 가 만든 window.pdfjsLib 와 함께 쓴다)
@@ -15,6 +15,8 @@
  *   parseRegistry(rows|글)      표제부·갑구·을구를 읽어 소유자, 살아 있는 권리, 지난(말소) 기록, 답 후보를 만든다.
  *   parsePdf(pdfjsLib, 바이트)  위 셋을 차례로(Promise)
  *   diffRegistry(prev, next)    다시 뗀 등기부를 처음 등기부와 순위번호·접수번호로 비교한다(계약 전 재열람).
+ *   classifyHistory(기록)       1.8.0: 지워진 지난 기록(reg-history 종류)을 지금 소유자가 산 날 전/후로 나눈다.
+ *                               parseRegistry 결과·등기부 코드 기록·앱 저장 기록 모두 받는다(저장하지 않고 매번 계산).
  *   estimatePrincipal(최고액)   채권최고액을 110·120·130%로 나눠 원금을 짐작한다.
  *
  * 말소 판정(중요): 등기부의 빨간 실선은 글자가 아니라 그림이라 글자로는 보이지 않는다. 그래서
@@ -692,14 +694,21 @@
   }
 
   // 소유자 계산(말소된 소유권 기록은 건너뜀)
+  // 1.8.0 검토 반영: firstOf = 이름마다 소유자(지분 포함)가 된 가장 이른 접수일. 지금 소유자가 예전에도 이 집을 가졌으면
+  // (담보신탁 뒤 신탁재산의 귀속으로 돌아옴, 팔았다가 다시 삼 등) owners[].firstSince 에 그 날을 둔다(since 는 마지막 취득일 그대로)
   function computeOwners(gap, warn) {
-    var owners = [], uncertain = false, seen = false;
+    var owners = [], uncertain = false, seen = false, firstOf = {};
+    function noteFirst(h, e) {
+      var k = compact(h.name);
+      if (k && e.receiptDate && (!firstOf[k] || e.receiptDate < firstOf[k])) firstOf[k] = e.receiptDate;
+    }
     for (var i = 0; i < gap.length; i++) {
       var e = gap[i];
       if (e.cancelled) continue;
-      if (e.kind === 'nameChange') { applyRename(owners, e, warn); continue; }
+      if (e.kind === 'nameChange') { applyRename(owners, e, warn, firstOf); continue; }
       if (!e.op) continue;
       var hs = parseHolders(e.detail), list = hs.list, op = e.op.op;
+      each(list, function (h) { noteFirst(h, e); });
       if (op === 'preserve' || op === 'transfer' || op === 'all') {
         if (!list.length) { uncertain = true; warn('갑구 ' + e.rank + '번에서 새 소유자 이름을 찾지 못했어요.'); owners = []; continue; }
         if (list.length === 1 && !list[0].share) list[0].share = frac(1, 1);
@@ -739,6 +748,10 @@
         if (o.since && (!m.since || o.since < m.since)) { m.since = o.since; m.cause = o.cause; m.price = o.price; m.rank = o.rank; }
       } else { byName[k] = o; merged.push(o); }
     });
+    each(merged, function (o) {
+      var f = firstOf[compact(o.name)];
+      if (f && o.since && f < o.since) o.firstSince = f;
+    });
     var total = null, ok = true;
     each(merged, function (o) { if (!o.share) ok = false; else total = total ? fracAdd(total, o.share) : o.share; });
     if (seen && merged.length && !uncertain && (!ok || !total || total.n !== total.d)) {
@@ -766,12 +779,15 @@
     owners.splice(owners.indexOf(o), 1);
     return o.share || frac(1, 1);
   }
-  function applyRename(owners, e, warn) {
+  function applyRename(owners, e, warn, firstOf) {
     var t = e.detail.join(' ');
     if (!/성명/.test(t)) return; // 주소만 바뀐 것
     var m = /(\S+?)의\s*성명\s*(?:\(\s*명칭\s*\))?\s*(\S+)/.exec(t);
     if (!m) { warn('갑구 ' + e.rank + '번 이름 변경을 읽지 못했어요.'); return; }
     var from = compact(m[1]), to = clean(m[2]);
+    // 1.8.0 검토 반영: 바뀐 이름으로도 처음 소유자가 된 날을 찾게
+    var tk = compact(to);
+    if (firstOf && firstOf[from] && (!firstOf[tk] || firstOf[from] < firstOf[tk])) firstOf[tk] = firstOf[from];
     each(owners, function (o) { if (compact(o.name) === from && (!e.parent || o.rank === e.parent)) o.name = to; });
     each(owners, function (o) { if (compact(o.name) === from) o.name = to; });
   }
@@ -791,7 +807,8 @@
   /**
    * parseRegistry(rowsOrText, opts) → { ok, error, source, docType:'열람용'|'제출용'|null, includesCancelled, viewedAt,
    *     uniqueNo, address, dong, floor, ho, area, landShare:{num,den}, landSeparate, complete, owners:[{ name, share:'1/2',
-   *     since, cause, price, rank }], ownersUncertain(소유자 계산이 불확실: 지분·이름·놓친 갑구 줄·모르는 소유권 말소),
+   *     since, cause, price, rank, firstSince?(1.8.0: 예전에도 이 집 소유자였으면 처음 소유자가 된 접수일) }],
+   *     ownersUncertain(소유자 계산이 불확실: 지분·이름·놓친 갑구 줄·모르는 소유권 말소),
    *     gap:[기록], eul:[기록 + maxAmount·holder·debtor], live:{종류:[…]}, history:{종류:[…]},
    *     answers:{ 'reg-xxx': 'yes'|'no'|true }, confidence:{ 'reg-xxx': 'high'|'low' }, notes:[], warnings:[] }
    *   rowsOrText: extractRows 결과 | readPdf 결과 | pages 배열 | 등기부 글(string, 신뢰도 낮음)
@@ -968,6 +985,7 @@
       var x = { name: o.name, share: fracStr(o.share), since: o.since || '', cause: o.cause || '', price: o.price || null, rank: o.rank };
       if (o.foreign) x.foreign = o.foreign;
       if (o.trustee) x.trustee = true;
+      if (o.firstSince) x.firstSince = o.firstSince; // 1.8.0 검토 반영: 예전에도 이 집 소유자였음(처음 소유자가 된 접수일)
       return x;
     });
 
@@ -1213,6 +1231,171 @@
     };
   }
 
+  // ---------- 3'. 지난 기록의 시기(1.8.0) ----------
+
+  // 지워진 지난 기록(reg-history 로 세는 압류·가압류·가처분·경매개시결정·가등기·주택임차권등기)이 지금 소유자가 사기 전 일인지,
+  // 지금 소유자 때 일인지. 사기 전이면 예전 주인의 일이라 참고만, 지금 소유자 때면 매도인의 돈 문제 흔적이라 잔금 전 새 압류 위험.
+  var ERA_LABEL = { before: '지금 소유자 전', current: '지금 소유자 때', unknown: '확인 필요' };
+  var ERA_CHECK = ' 갑구 마지막 소유권이전 접수일과 기록 접수일을 직접 비교하세요.';
+  function dotDate(d) { return d ? String(d).replace(/-/g, '.') : ''; }
+  /**
+   * 지난 기록 → [{ kind, section, rank, purpose, date, gone? }]. { 종류: [기록] }(해석기·등기부 코드) 또는 [{ kind, … }](앱 저장 기록).
+   * 근저당·신탁·전세권·그 밖은 뺀다. gone: 앱이 붙인 표시(앞 등기부에 살아 있다가 나중 등기부에서 사라진 기록)
+   */
+  function historyRecords(h) {
+    var out = [];
+    function add(e, k) {
+      if (HISTORY_KINDS.indexOf(k) < 0) return;
+      var o = e && typeof e === 'object' ? e : {};
+      var sec = o.section || o.part || '';
+      var r = {
+        kind: k, section: sec === 'gap' || sec === 'eul' ? sec : '', rank: clean(o.rank).slice(0, 12),
+        purpose: clean(o.purpose).slice(0, 80), date: kDate(o.receiptDate || o.date), era: 'unknown', i: out.length
+      };
+      if (o.gone === true) r.gone = true;
+      out.push(r);
+    }
+    if (isArray(h)) each(h, function (e) { if (e && typeof e === 'object') add(e, e.kind); });
+    else if (h && typeof h === 'object') each(HISTORY_KINDS, function (k) { if (isArray(h[k])) each(h[k], function (e) { add(e, k); }); });
+    return out;
+  }
+  /** 신탁 중인지(살아 있는 신탁 기록·수탁자 소유자·reg-trust 있음). 그때 등기부의 소유자는 수탁자라 '지금 소유자'로 나눌 수 없다 */
+  function inTrust(x) {
+    var live = x.live;
+    if (isArray(live) && some(live, function (e) { return e && e.kind === 'trust'; })) return true;
+    if (live && !isArray(live) && typeof live === 'object' && isArray(live.trust) && live.trust.length) return true;
+    if (isArray(x.owners) && some(x.owners, function (o) { return o && o.trustee === true; })) return true;
+    return !!(x.answers && x.answers['reg-trust'] === 'yes');
+  }
+
+  /**
+   * classifyHistory(input) → { ok, ownerSince:'YYYY-MM-DD'|'', ownerSinceBasis, records:[{ kind, section, rank, purpose, date, era }],
+   *     counts:{ before, current, unknown, total }, verdict, reason, unsure, summary, notes:[] }
+   *   input: parseRegistry 결과 | 등기부 코드 기록(import-parser parseRegistryBlock 의 snapshot) | 앱 저장 기록(normalizeSnapshot)
+   *     — 쓰는 값: owners[{ name, since, firstSince? }], history({ 종류:[{ receiptDate|date }] } | [{ kind, date }]), ownersUncertain,
+   *       includesCancelled, live(신탁 확인), answers·confidence·complete·unsure(다 읽었는지: diffRegistry 의 nextUnsure 와 같은 기준),
+   *       truncated(1.8.0 검토 반영: 앱이 기록 수 상한으로 일부를 버렸을 수 있음), ownerChanged(더 최근 등기부에서 소유자가 바뀜)
+   *   기준일(ownerSince): 지금 소유자가 소유권을 얻은 접수일. 공동 소유자의 날이 다르면 가장 이른 날(그 뒤는 지금 소유자 중 누군가의 때).
+   *     1.8.0 검토 반영: 지금 소유자가 예전에도 이 집 소유자였으면(firstSince: 신탁 뒤 돌아옴·되사기) 그 처음 날.
+   *   기록일: 그 기록의 접수일. 기록일 >= 기준일 → 'current'(같은 날도 지금 소유자 때로 봄), < → 'before', 어느 쪽이든 모르면 'unknown'.
+   *     1.8.0 검토 반영: 등기목적에 지금 소유자 이름이 있는 기록("2번○○지분가압류")은 날짜와 관계없이 'current'.
+   *   ownerSinceBasis: 'owner'(한 날) | 'earliest'(공동 소유자 날이 다름) | 'no-owner' | 'no-date'(취득일 없는 소유자가 있음)
+   *     | 'uncertain'(ownersUncertain: 지분 일부 이전 등) | 'trust'(신탁 중) | 'owner-changed'. 뒤의 다섯이면 기록이 'unknown'.
+   *   verdict: 'none'(지워진 기록 없음) | 'before-only'(모두 지금 소유자 전, 등기부를 다 읽음) | 'has-current'(지금 소유자 때가 하나라도)
+   *     | 'unknown'(그 밖: 기준일·기록일을 모름, 다 읽지 못함(unsure), 말소사항 포함이 아님(not-included — 기록이 적혀 있어도),
+   *       기록이 잘렸을 수 있음(truncated)). reason 에 까닭. 'before-only' 는 이런 까닭이 하나도 없을 때만 낸다.
+   *   summary: 화면·메모에 쓰는 한 줄(사람 이름 없음). 기록의 purpose 에는 이름이 들어갈 수 있다(이 기기 화면에서만 쓸 것).
+   */
+  function classifyHistory(input) {
+    try { return classifyInner(input || {}); }
+    catch (e) { return fail('internal', e); }
+  }
+  function classifyInner(x) {
+    var owners = isArray(x.owners) ? filter(x.owners, function (o) { return o && typeof o === 'object' && (o.name || o.since || o.share); }) : [];
+    // 1.8.0 검토 반영: 예전에도 이 집 소유자였던 사람(firstSince < since)은 처음 소유자가 된 날부터를 지금 소유자 때로 본다
+    var returned = 0;
+    var dates = map(owners, function (o) {
+      var s = kDate(o.since), f = kDate(o.firstSince);
+      if (s && f && f < s) { returned++; return f; }
+      return s;
+    });
+    var since = '', basis;
+    if (!owners.length) basis = 'no-owner';
+    else if (some(dates, function (d) { return !d; })) basis = 'no-date';
+    else {
+      since = dates.slice().sort()[0];
+      basis = some(dates, function (d) { return d !== since; }) ? 'earliest' : 'owner';
+    }
+    var ok = !!since;
+    if (owners.length && x.ownerChanged === true) { ok = false; basis = 'owner-changed'; }
+    else if (ok && x.ownersUncertain === true) { ok = false; basis = 'uncertain'; }
+    else if (ok && inTrust(x)) { ok = false; basis = 'trust'; }
+    var unsure = nextUnsure(x);
+    var recs = historyRecords(x.history);
+    var c = { before: 0, current: 0, unknown: 0, total: recs.length };
+    var sameDay = 0, named = 0;
+    // 1.8.0 검토 반영: 등기목적에 지금 소유자 이름이 있으면("2번○○지분가압류") 그 사람의 일 → 지금 소유자 때(날짜·기준일과 관계없이).
+    // 소유자가 바뀌었거나 신탁 중이면(등기부의 소유자가 지금 소유자가 아님) 쓰지 않는다
+    var names = basis === 'owner-changed' || basis === 'trust' ? [] :
+      filter(map(owners, function (o) { return compact(o.name); }), function (k) { return k.length >= 2; });
+    each(recs, function (r) {
+      r.era = !ok || !r.date ? 'unknown' : (r.date >= since ? 'current' : 'before');
+      if (r.era !== 'current' && names.length) {
+        var pc = compact(r.purpose);
+        if (pc && some(names, function (k) { return pc.indexOf(k) >= 0; })) { r.era = 'current'; named++; }
+      }
+      if (ok && r.date && r.date === since) sameDay++;
+      c[r.era]++;
+    });
+    // 날짜 순(모르는 날짜는 뒤로), 같으면 들어온 순서
+    recs.sort(function (a, b) {
+      if (a.date !== b.date) return !a.date ? 1 : !b.date ? -1 : (a.date < b.date ? -1 : 1);
+      return a.i - b.i;
+    });
+    each(recs, function (r) { delete r.i; });
+
+    // 1.8.0 검토 반영: 'before-only'(→ 앱이 '참고'로 셈)는 의심할 까닭이 하나도 없을 때만. 현재 유효사항(기록이 적혀 있어도),
+    // 기록이 잘렸을 수 있음(truncated)도 'unknown' 이다. 지금 소유자 때 기록이 하나라도 보이면 늘 'has-current'
+    var verdict, reason = '';
+    if (!recs.length) {
+      if (x.includesCancelled === false) { verdict = 'unknown'; reason = 'not-included'; }
+      else if (x.truncated === true) { verdict = 'unknown'; reason = 'truncated'; }
+      else if (x.includesCancelled !== true) { verdict = 'unknown'; reason = 'cancelled-unknown'; }
+      else if (unsure) { verdict = 'unknown'; reason = 'unsure'; }
+      else verdict = 'none';
+    } else if (c.current) verdict = 'has-current';
+    else if (x.includesCancelled === false) { verdict = 'unknown'; reason = 'not-included'; }
+    else if (!ok) { verdict = 'unknown'; reason = basis; }
+    else if (c.unknown) { verdict = 'unknown'; reason = 'no-record-date'; }
+    else if (x.truncated === true) { verdict = 'unknown'; reason = 'truncated'; }
+    else if (unsure) { verdict = 'unknown'; reason = 'unsure'; }
+    else verdict = 'before-only';
+
+    var D = dotDate(since), n = c.total, s;
+    // 이름으로 '때'가 된 기록이 기준일보다 앞이면 "(기준일부터)"를 붙이지 않는다(날짜와 꼬리표가 어긋나 보이지 않게)
+    var earlyCurrent = some(recs, function (r) { return r.era === 'current' && r.date && since && r.date < since; });
+    if (verdict === 'before-only') {
+      s = '지워진 기록 ' + n + '건' + (n > 1 ? ' 모두' : '은') + ' 지금 소유자가 사기 전(' + D + ' 전) 일이에요. 참고만 하면 돼요.';
+    } else if (verdict === 'has-current') {
+      s = (n === 1 ? '지워진 기록 1건은' : c.current === n ? '지워진 기록 ' + n + '건 모두' : '지워진 기록 ' + n + '건 중 ' + c.current + '건은') +
+        ' 지금 소유자 때' + (D && !earlyCurrent ? '(' + D + '부터)' : '') + ' 생겼어요. 잔금 당일 등기부를 다시 떼고 "잔금 전 새 권리가 생기면 해제" 특약을 넣으세요.' +
+        (c.unknown ? ' 접수일을 모르는 ' + c.unknown + '건은 직접 보세요.' : '');
+    } else if (verdict === 'none') {
+      s = '압류·가압류·가처분·경매·가등기·임차권의 지워진 기록이 없어요.';
+    } else if (reason === 'not-included') {
+      s = n ? '현재 유효사항 등기부인데 지워진 기록 ' + n + '건이 적혀 있어요. 누구 때 일인지 정하지 않았어요. 원본 제목이 "말소사항 포함"인지 보세요.'
+        : '현재 유효사항 등기부라 지워진 지난 기록이 보이지 않아요. "말소사항 포함"으로 열람해야 볼 수 있어요.';
+    } else if (reason === 'truncated') {
+      s = n ? '기록이 많아 앱이 일부만 남겼어요. 남은 지워진 기록 ' + n + '건은 지금 소유자가 사기 전(' + D + ' 전) 일이지만, 빠진 기록이 있을 수 있어 단정할 수 없어요. 원본을 직접 보세요.'
+        : '기록이 많아 앱이 일부만 남겨, 지워진 지난 기록이 없는지 확실하지 않아요. 원본을 직접 보세요.';
+    } else if (reason === 'cancelled-unknown') {
+      s = '말소사항 포함 등기부인지 몰라 지워진 지난 기록이 없는지 확실하지 않아요.';
+    } else if (reason === 'unsure') {
+      s = n ? '보이는 지워진 기록 ' + n + '건은 지금 소유자가 사기 전(' + D + ' 전) 일이지만, 앱이 확실히 읽지 못한 부분이 있어 단정할 수 없어요. 원본을 직접 보세요.'
+        : '보이는 지워진 기록은 없지만 앱이 확실히 읽지 못한 부분이 있어 단정할 수 없어요.';
+    } else if (reason === 'no-record-date') {
+      s = '지워진 기록 ' + n + '건 중 ' + c.unknown + '건은 접수일을 몰라 누구 때 일인지 정하지 못했어요.' +
+        (c.before ? ' 나머지 ' + c.before + '건은 지금 소유자가 사기 전(' + D + ' 전) 일이에요.' : '') + ERA_CHECK;
+    } else {
+      s = ({
+        'no-owner': '지금 소유자를 읽지 못해',
+        'no-date': '지금 소유자가 언제 샀는지(접수일) 몰라',
+        uncertain: '소유자 계산이 확실하지 않아(지분 일부 이전 등)',
+        trust: '신탁된 집이라(등기부의 소유자는 수탁자)',
+        'owner-changed': '더 최근 등기부에서 소유자가 바뀌어'
+      }[reason] || '기준일을 정하지 못해') + ' 지워진 기록 ' + n + '건이 누구 때 일인지 정하지 못했어요.' + ERA_CHECK;
+    }
+    var notes = [];
+    if (ok && basis === 'earliest' && n) notes.push('공동 소유자가 산 날이 달라 가장 이른 날(' + D + ')을 기준으로 나눴어요.');
+    if (ok && returned && n) notes.push('지금 소유자가 예전에도 이 집을 가진 적이 있어(신탁 뒤 돌려받음·다시 삼 등) 처음 소유자가 된 날(' + D + ')부터를 지금 소유자 때로 봤어요.');
+    if (named) notes.push('등기목적에 지금 소유자 이름이 나오는 기록 ' + named + '건은 지금 소유자의 일이라 지금 소유자 때로 봤어요.');
+    if (sameDay) notes.push('지금 소유자가 산 날과 같은 날 접수된 기록 ' + sameDay + '건은 지금 소유자 때로 봤어요(같은 날은 접수번호로 앞뒤를 봐야 해요).');
+    return {
+      ok: true, ownerSince: since, ownerSinceBasis: basis, records: recs, counts: c,
+      verdict: verdict, reason: reason, unsure: !!unsure, summary: s, notes: notes
+    };
+  }
+
   // ---------- 4. 채권최고액 → 원금 짐작 ----------
 
   /**
@@ -1334,6 +1517,8 @@
     extractRows: extractRows,
     parseRegistry: parseRegistry,
     diffRegistry: diffRegistry,
+    classifyHistory: classifyHistory, // 1.8.0
+    ERA_LABEL: ERA_LABEL,             // 1.8.0
     estimatePrincipal: estimatePrincipal,
     formatWon: formatWon,
     parseDate: kDate
