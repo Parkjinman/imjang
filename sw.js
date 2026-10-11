@@ -8,11 +8,12 @@
 'use strict';
 
 var CACHE_PREFIX = 'imjang-static-';
-var CACHE_VERSION = CACHE_PREFIX + 'v1.6.0';
+var CACHE_VERSION = CACHE_PREFIX + 'v1.7.0';
 
 // 사전 캐시 목록 — 실제 파일과 반드시 일치해야 한다(하나라도 없으면 설치 실패).
 // tools/make-dist.js 가 이 목록의 파일만 배포 폴더로 복사한다.
 // 1.6.0: 등기부 PDF 해석기와 PDF 읽기 도구(pdf.js, 약 1.5MB)도 미리 저장한다 → 현장에서 인터넷이 끊겨도 PDF 를 읽는다
+// 1.7.0: 대출·비용 추정(finance.js)
 var PRECACHE = [
   './',
   './index.html',
@@ -21,6 +22,7 @@ var PRECACHE = [
   './import-parser.js',
   './registry-parser.js',
   './merge.js',
+  './finance.js',
   './app.js',
   './manifest.webmanifest',
   './icons/apple-touch-icon-180.png',

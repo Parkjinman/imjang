@@ -1711,3 +1711,115 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 .rp-dialog .modal-actions .btn:first-child,
 .rp-dialog .modal-actions .btn:last-child:nth-child(2) { grid-column: 1 / -1; }
 .rp-stage .rp-check + .rp-check { margin-top: 4px; }
+
+/* ---------- 1.7.0 대출·비용(추정) ---------- */
+/* 홈 카드 가격 줄의 작은 KB시세 칩(줄이 좁으면 칩째 다음 줄로) */
+.kb-chip { display: inline-block; margin-left: 2px; padding: 0 7px; border-radius: 6px; background: var(--teal-soft); color: var(--teal-ink); font-size: 0.7647rem; font-weight: 700; line-height: 1.6; white-space: nowrap; vertical-align: 1px; }
+
+/* 상세 '대출·비용' 카드(접힘). 머리 줄: 제목 + 요약 줄(필요 현금·대출) + 펼침 표시 */
+.fin-card > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 10px; min-height: 44px; }
+.fin-card > summary::-webkit-details-marker { display: none; }
+.fin-title { grid-column: 1; font-size: 1.0588rem; font-weight: 800; letter-spacing: -0.01em; }
+.fin-est { color: var(--muted); font-weight: 600; font-size: 0.8824rem; }
+.fin-sum-line { grid-column: 1; grid-row: 2; color: var(--teal-ink); font-size: 0.8824rem; font-weight: 700; overflow-wrap: anywhere; }
+.fin-sum-line:empty { display: none; }
+.fin-chev { grid-column: 2; grid-row: 1 / span 2; color: var(--muted); transition: transform 0.15s; }
+.fin-card[open] .fin-chev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .fin-chev { transition: none; } }
+.fin-body > * + * { margin-top: 14px; }
+/* 1.7.0 검토 반영: 카드 안 폭을 글자 크기(em)로 재는 기준(container). 큰 글자에서 좁아지면 이름·값을 위아래로 쌓는다 */
+.fin-body { margin-top: 10px; container-type: inline-size; container-name: fin; }
+.fin-sec > * + * { margin-top: 8px; }
+.fin-sec:focus { outline: none; }
+.fin-h { font-size: 0.9412rem; font-weight: 800; color: var(--text); }
+/* 이름 칸은 많아야 45%(전에는 minmax(6.5em, auto)라 큰 글자에서 이름 칸이 171px, 값 칸이 71px 까지 좁아졌음) */
+.fin-kv { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.fin-kv dd { min-width: 0; overflow-wrap: anywhere; }
+.fin-num { font-variant-numeric: tabular-nums; }
+/* 금액은 숫자 중간에서 줄을 바꾸지 않는다('1억 8,250만원'은 띄어쓰기에서만. 전에는 '8,00 / 0만원'처럼 끊겼음) */
+.fin-kv dd > .fin-num, .fin-timeline .fin-num, .fin-items .fin-num, .fin-big .fin-num, .fin-cash-sum .fin-num { overflow-wrap: normal; word-break: keep-all; }
+@container fin (max-width: 14em) {
+  .fin-kv { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
+  .fin-kv dt + dd { margin-bottom: 8px; }
+  .fin-timeline li, .fin-items li { flex-wrap: wrap; }
+}
+.fin-big { font-size: 1.4118rem; font-weight: 800; letter-spacing: -0.01em; color: var(--teal-ink); overflow-wrap: anywhere; }
+/* 맨 위 핵심 숫자(필요한 현금·대출 한도·첫 달 상환) */
+.fin-top { padding: 12px 14px; border-radius: var(--radius-sm); background: var(--card-2); border: 1px solid var(--line); }
+.fin-top:empty { display: none; }
+.fin-top > * + * { margin-top: 4px; }
+.fin-top .kv { margin-top: 8px; }
+.fin-top-k { font-size: 0.8824rem; font-weight: 700; color: var(--muted); }
+.fin-cash-sum { font-size: 0.8824rem; color: var(--muted); overflow-wrap: anywhere; }
+.fin-cash-sum .fin-num { color: var(--text); font-weight: 800; }
+.fin-kb-btns { margin-top: 8px; }
+.fin-kb-btns > .btn { flex: 0 1 auto; }
+.fin-kb-none { margin-bottom: 0; }
+.fin-kb-none .btn { margin-top: 8px; }
+.fin-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 4px 12px; }
+.fin-inputs > * + * { margin-top: 0; }
+.fin-field { margin: 0; }
+/* 돈이 나가는 때: 폰에서는 한 줄에 하나(이름 왼쪽·금액 오른쪽, 큰 숫자가 중간에 끊기지 않게), 넓은 화면(iPad)에서는 세 칸 */
+.fin-timeline { list-style: none; display: grid; gap: 6px; }
+.fin-timeline li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--card-2); border: 1px solid var(--line); min-width: 0; }
+.fin-when { color: var(--muted); font-size: 0.8235rem; font-weight: 700; }
+.fin-timeline .fin-num { font-weight: 800; font-size: 0.9412rem; text-align: right; overflow-wrap: anywhere; }
+@media (min-width: 560px) {
+  .fin-timeline { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .fin-timeline li { display: grid; gap: 2px; padding: 8px 10px; }
+  .fin-timeline .fin-num { text-align: left; }
+}
+.fin-items { list-style: none; border-top: 1px solid var(--line); }
+.fin-items li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 0.8824rem; }
+.fin-item-l { min-width: 0; overflow-wrap: anywhere; }
+.fin-item-w { color: var(--muted); font-size: 0.7647rem; }
+.fin-items .fin-num { flex: none; font-weight: 700; text-align: right; }
+.fin-notes, .fin-naver { font-size: 0.8235rem; color: var(--muted); }
+.fin-notes > summary, .fin-naver > summary { min-height: 44px; display: flex; align-items: center; gap: 8px; font-weight: 700; cursor: pointer; list-style: none; color: var(--teal-ink); }
+.fin-notes > summary::-webkit-details-marker, .fin-naver > summary::-webkit-details-marker { display: none; }
+.fin-notes > summary::before, .fin-naver > summary::before { content: ""; flex: none; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); }
+.fin-notes[open] > summary::before, .fin-naver[open] > summary::before { transform: rotate(45deg); }
+.fin-notes ul { padding-left: 18px; display: grid; gap: 4px; }
+.fin-naver .kv { color: var(--text); font-size: 0.8824rem; margin-bottom: 6px; }
+.fin-cond-line { font-size: 0.8824rem; color: var(--muted); overflow-wrap: anywhere; }
+.fin-foot { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--yellow-soft); color: var(--yellow-ink); font-size: 0.8235rem; font-weight: 600; }
+.fin-hist { list-style: none; margin: 4px 0 10px; }
+.fin-hist li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.fin-hist-v { font-weight: 800; font-variant-numeric: tabular-nums; }
+.fin-hist-sub { color: var(--muted); font-size: 0.8235rem; }
+.fin-hist-box > * + * { margin-top: 6px; }
+.fin-set > * + * { margin-top: 12px; }
+.fin-set .field-row { align-items: start; }
+.fin-set .select { width: 100%; }
+.fin-region { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px 10px; margin: 12px 0 0; min-width: 0; }
+.fin-region legend { font-weight: 700; font-size: 0.9412rem; padding: 0 4px; }
+.fin-set .toggle { display: flex; }
+.fin-set .fin-ltv-warn { margin-top: 6px; }
+.fin-reset-note:empty { display: none; }
+@media (max-width: 359px) { .fin-set .field-row { grid-template-columns: 1fr; } }
+
+/* 1.7.0 검토 반영: 비교 표를 옆으로 밀다 멈출 때 칸 시작에 맞춘다(고정 '매물' 열에 칸이 반쯤 가려 오른쪽 정렬 금액의 앞자리가
+   안 보이던 일). 맞출 자리(scroll-padding-left)는 app.js 가 고정 열 폭으로 바꾼다. 고정 열 오른쪽 그림자로 겹친 것을 보인다 */
+.table-scroll { scroll-snap-type: x mandatory; scroll-padding-left: 128px; }
+.ctable thead th:not(.sticky-col) { scroll-snap-align: start; }
+.ctable .sticky-col { box-shadow: 1px 0 0 var(--line), 6px 0 8px -6px rgba(0, 0, 0, 0.35); }
+.compare-tools .cmp-fin-jump { flex: 0 0 auto; }
+
+/* 가져오기: "이미 담은 매물이에요" 상자(미리보기 카드 바로 아래) */
+.imp-update { margin-top: -4px; padding: 12px 14px; border-radius: var(--radius); border: 2px solid var(--orange); background: var(--orange-soft); color: var(--text); }
+.imp-update > * + * { margin-top: 8px; }
+.imp-update.is-done { border-color: var(--green); background: var(--green-soft); }
+.imp-update.is-off { border-style: dashed; border-color: var(--line); background: var(--card-2); }
+.imp-up-title { display: block; color: var(--orange-ink); font-size: 0.9412rem; }
+.imp-update.is-done .imp-up-title { color: var(--green-ink); }
+.imp-up-title:focus { outline: none; }
+.imp-up-sub { font-size: 0.8235rem; font-weight: 700; color: var(--muted); }
+.imp-up-list { list-style: none; display: grid; gap: 6px; }
+.imp-up-list li { display: grid; gap: 1px; padding: 6px 10px; border-radius: 10px; background: var(--card); font-size: 0.8824rem; overflow-wrap: anywhere; }
+.imp-up-k { color: var(--muted); font-size: 0.7647rem; font-weight: 700; }
+.imp-up-from { color: var(--muted); }
+.imp-up-hand { justify-self: start; padding: 0 7px; border-radius: 6px; background: var(--yellow-soft); color: var(--yellow-ink); font-size: 0.7647rem; font-weight: 700; }
+.imp-up-btns > .btn { flex: 1 1 90px; }
+/* 1.7.0 검토 반영: 같은 집인지 확실하지 않은 상자(까닭 + "같은 집이 맞아요" 체크) */
+.imp-up-why { font-size: 0.8824rem; font-weight: 700; color: var(--orange-ink); }
+.imp-up-same { display: flex; font-size: 0.8824rem; }

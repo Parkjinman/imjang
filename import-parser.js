@@ -27,6 +27,10 @@
  *   parseRegistryBlock 으로 검사해 등기부 기록(snapshot: { id, source:'code', viewedAt, docType, includesCancelled, uniqueNo, area,
  *   owners, live, history, mortgages, answers, match, notes })으로 바꿔 결과의 registry 에 넣는다. properties 와 함께 와도 되고
  *   registry 만 와도 된다(그때 entries 는 빈 배열). 요청문은 REGISTRY_PROMPT. 주민등록번호처럼 보이는 글은 가린다.
+ * 1.7.0: 대출·관리비·세금 참고값도 읽는다(네이버 글의 '대출 정보'·'대출 계산기'·'관리비'·'세금' 묶음, 가져오기 코드의 같은 이름 필드).
+ *   kbPrice(만원)·kbAt('YYYY-MM-DD')·naverLoanLimit(만원)·naverRate({min,max,bank})·feeMonthly·feeAvg·feeSummer·feeWinter(원)·
+ *   feeRecent({month:'YYYY-MM',amount:원})·acqTaxNaver·propertyTaxNaver(원). 모두 네이버의 단순 계산·추정값이다(앱이 '추정'으로만 보여 줌).
+ *   값이 있을 때만 매물(prop)에 키를 넣는다(없으면 키가 없음 → 예전 결과와 같은 모양). 자세한 규칙은 cleanFinance·naverFinance.
  *
  * 보안: 붙여 넣은 글은 믿지 않는다. 아는 필드만 골라 읽고(길이·범위 검사), __proto__·constructor·prototype 키는
  *       버리고, 링크는 http/https 만 남긴다. 결과는 문자열·숫자뿐이며 화면에는 textContent 로만 넣는다.
@@ -76,6 +80,10 @@
     '- 가격은 만원 단위 숫자 (예: 5억 2,000 → 52000).',
     '- 면적은 ㎡ 숫자 (전용면적은 area, 공급면적은 supplyArea).',
     '- 호수(ho)는 넣지 마. 동은 숫자만.',
+    '- 대출·관리비·세금 칸이 보이면 그 값도 넣어 줘(안 보이면 빼):',
+    '  kbPrice(KB시세, 만원), naverLoanLimit(대출 한도의 "최대" 금액, 만원), naverRate(최저 금리 %. 범위면 {"min":3.5,"max":4.5}),',
+    '  feeMonthly(기본 정보의 관리비), feeAvg·feeSummer·feeWinter(관리비의 월 평균·여름 평균·겨울 평균), feeRecent(관리비 맨 위의 달과 금액: {"month":"2026-07","amount":123450}),',
+    '  acqTaxNaver(취득세 합계), propertyTaxNaver(재산세 합계). 관리비·세금은 원 단위 숫자 (예: 12만 3,450원 → 123450).',
     '- 매물이 여러 개면 properties에 모두 넣어 줘.',
     '```json',
     '{"imjang":1,"properties":[{"name":"단지명","dong":"101","area":84.97,"supplyArea":112.4,"askPrice":52000,"tradeType":"매매","floor":"12/25","direction":"남향","agentName":"","agentPhone":"","sourceUrl":"","articleNo":"","confirmedAt":"","memo":""}]}',
@@ -532,7 +540,7 @@
   var PHONE_RE = /(?:\+82[\s.-]?0?|\(0|\b0)\d{1,3}[\s.)-]{0,2}\d{3,4}[\s.-]{0,2}\d{4}(?!\d)|\b1[5-9]\d{2}[\s.-]?\d{4}(?!\d)/g;
 
   /**
-   * 사이 없이 붙은 번호를 띄운다(1.4.0). 네이버 중개사 전화 칸을 복사하면 "032-551-4700010-8973-4700"처럼 붙어 온다.
+   * 사이 없이 붙은 번호를 띄운다(1.4.0). 네이버 중개사 전화 칸을 복사하면 "032-000-1001010-0000-1001"(합성 예)처럼 붙어 온다.
    * 끝 네 자리 바로 뒤에 새 번호의 시작(0으로 시작하는 국번 + 구분 기호, 휴대폰 11자리, 15xx-)이 오면 그 사이를 띄운다
    */
   function splitGluedPhones(s) {
@@ -563,8 +571,205 @@
     return { phone: list[0], others: list.slice(1) };
   }
 
-  /** 매물 하나 정리 → { prop, notes, warnings } (아는 필드만, 알 수 없는 필드는 무시) */
-  function cleanProperty(raw) {
+  // ---------------- 대출·관리비·세금 참고값 (1.7.0) ----------------
+  // 네이버 매물 화면(대출 정보·대출 계산기·관리비·세금 묶음)이나 가져오기 코드에 있는 참고값. 모두 네이버의 단순 계산·추정이라
+  // 앱은 "추정, 은행·구청·위택스 확인 필요"로만 보여 준다. 값이 있을 때만 매물(prop)에 키를 넣는다(없으면 키가 없음).
+  //   kbPrice: KB시세(만원 정수)   kbAt: KB시세를 본 날 'YYYY-MM-DD'(글·코드에 날짜가 없으면 opts.today, 그것도 없으면 키 없음 → 앱이 채움)
+  //   naverLoanLimit: 대출 한도의 '최대' 금액(만원 정수. 네이버 단순 계산 — 은행 한도 아님)
+  //   naverRate: 최저 금리 { min: 연 %, max: 연 % | null, bank: '은행 이름' | '' }
+  //   feeMonthly: 기본 정보의 관리비(원 정수)   feeAvg·feeSummer·feeWinter: 관리비 묶음의 월 평균·여름 평균·겨울 평균(원 정수, 국토교통부 기준)
+  //   feeRecent: 관리비 묶음 맨 위의 달과 그 달 금액 { month: 'YYYY-MM', amount: 원 정수 }
+  //   acqTaxNaver: 세금 묶음의 취득세 합계(원 정수. "약 150만원" → 1500000)   propertyTaxNaver: 재산세 합계(원 정수)
+  var FIN_FIELDS = ['kbPrice', 'kbAt', 'naverLoanLimit', 'naverRate', 'feeMonthly', 'feeAvg', 'feeSummer', 'feeWinter', 'feeRecent',
+    'acqTaxNaver', 'propertyTaxNaver'];
+  var FIN_RANGE = {
+    kbPrice: [1000, 10000000],      // 만원 (1천만원 ~ 1천억원)
+    loanLimit: [100, 10000000],     // 만원 (1백만원 ~ 1천억원)
+    rate: [0.1, 30],                // 연 %
+    fee: [1000, 5000000],           // 원 (관리비 한 달: 1천원 ~ 500만원)
+    acqTax: [10000, 10000000000],   // 원 (1만원 ~ 100억원)
+    propertyTax: [1000, 1000000000] // 원 (1천원 ~ 10억원)
+  };
+  var FIN_LABEL = { feeMonthly: '관리비', feeAvg: '관리비 월 평균', feeSummer: '관리비 여름 평균', feeWinter: '관리비 겨울 평균' };
+
+  /** 쉼표가 있으면 천 단위 모양("1,234", "12,345.6")만 숫자로. 아니면 NaN */
+  function groupNum(g) {
+    if (/,/.test(g) && !/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(g)) return NaN;
+    return parseFloat(g.replace(/,/g, ''));
+  }
+  /**
+   * 원 단위 금액 글 → 원 정수(또는 null). "15만원", "12만 3,450원", "11만 500원", "약 150만원상세내역 보기", "1,234원",
+   * "2억 1,000만원", "123450". 억·만·원 단위가 없으면 숫자(천 단위 쉼표 허용)만 있는 글일 때만 읽는다. 만 뒤의 원 자리는 9,999까지
+   */
+  function wonFromText(s) {
+    var t = String(s === null || s === undefined ? '' : s).replace(/\s+/g, ' ').trim().replace(/^(?:약|금)\s*/, '');
+    var n;
+    if (/^\d[\d,]*(?:\s*원)?$/.test(t)) {
+      n = groupNum(t.replace(/\s*원$/, ''));
+      return isFinite(n) && n > 0 ? Math.round(n) : null;
+    }
+    var m = /^(?:(\d[\d,]*(?:\.\d+)?)\s*억\s*)?(?:(\d[\d,]*(?:\.\d+)?)\s*만\s*)?(?:(\d[\d,]*)\s*)?(원)?/.exec(t);
+    if (!m || !(m[1] || m[2])) return null;
+    if (m[3] && (!m[4] || !m[2])) return null; // "13만 8552"(원 없음), "2억 5000원"(만 없음)은 모양이 애매해 읽지 않음
+    if (/^[\d.,%~억만]/.test(t.slice(m[0].length))) return null;
+    var eok = m[1] ? groupNum(m[1]) : 0;
+    var man = m[2] ? groupNum(m[2]) : 0;
+    var won = m[3] ? groupNum(m[3]) : 0;
+    if (!isFinite(eok) || !isFinite(man) || !isFinite(won) || won >= 10000 || (m[1] && man >= 10000)) return null;
+    n = Math.round(eok * 100000000 + man * 10000 + won);
+    return n > 0 ? n : null;
+  }
+  /** opts.today('YYYY-MM-DD') → 그 날짜. 없거나 모양이 다르면 '' */
+  function todayOf(opts) { return opts && typeof opts.today === 'string' ? regDate(opts.today) : ''; }
+  /** 달 → 'YYYY-MM'. "2026-07", "2026. 07.", "2026.7", "2026년 7월". 없는 달·범위 밖(2000~2100)은 '' */
+  function monthOf(v) {
+    var m = /^(\d{4})\s*(?:[.\-\/]|년)\s*(\d{1,2})\s*(?:\.|월)?$/.exec(oneLine(v, 20));
+    if (!m) return '';
+    var y = +m[1];
+    var mo = +m[2];
+    return y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12 ? y + '-' + pad2(mo) : '';
+  }
+  /** 만원 필드(KB시세·대출 한도) → { n: 만원 정수 | null, guessed: 억 단위로 짐작한 원래 값 | null }. priceOf 와 같은 규칙, 이상하면 notes */
+  function finManwon(v, label, range, notes) {
+    var out = { n: null, guessed: null };
+    if (v === null || v === undefined || v === '') return out;
+    var n = typeof v === 'number' ? v : (typeof v === 'string' ? parseMoneyText(v) : null);
+    if (n === null || !isFinite(n) || n <= 0) { addNote(notes, label + ': 값을 읽지 못해 뺐어요'); return out; }
+    if (n >= RANGE.price[1]) { // 1천억(만원) 이상이면 원 단위로 적은 것으로 본다
+      n = n / 10000;
+      addNote(notes, label + ': 원 단위로 보여 만원으로 바꿨어요');
+    } else if (n < 100 && n !== Math.floor(n)) { // 1.825 처럼 100 미만 소수: 억 단위로 적은 것으로 본다
+      out.guessed = n;
+      n = n * 10000;
+    }
+    n = Math.round(n);
+    if (n < range[0] || n > range[1]) { addNote(notes, label + ': 값이 이상해서 뺐어요'); out.guessed = null; return out; }
+    out.n = n;
+    return out;
+  }
+  /** 원 필드(관리비·세금) → 원 정수 또는 null. 숫자 또는 글("12만 3,450원"). 너무 작으면 만원으로 적은 실수로 보고 뺀다 */
+  function finWon(v, label, range, notes) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = typeof v === 'number' ? v : (typeof v === 'string' ? wonFromText(v) : null);
+    if (n === null || !isFinite(n) || n <= 0) { addNote(notes, label + ': 값을 읽지 못해 뺐어요'); return null; }
+    n = Math.round(n);
+    if (n < range[0]) { addNote(notes, label + ': 원 단위 숫자가 아닌 것 같아 뺐어요'); return null; }
+    if (n > range[1]) { addNote(notes, label + ': 값이 이상해서 뺐어요'); return null; }
+    return n;
+  }
+  /** 금리 숫자: 3.5, "3.5", "3.5%" → 3.5. 아니면 NaN */
+  function rateNum(v) {
+    if (typeof v === 'number') return isFinite(v) ? v : NaN;
+    var m = /^\s*(\d{1,2}(?:\.\d{1,3})?)\s*%?\s*$/.exec(typeof v === 'string' ? v : '');
+    return m ? parseFloat(m[1]) : NaN;
+  }
+  // 금리 글: "3.5%", "3.5%~4.5%", "가나은행3.5%"(앞 글자는 은행 이름). 앞 글자가 숫자·점이면 금리의 시작이 아님
+  var RATE_RE = /(^|[^\d.])(\d{1,2}(?:\.\d{1,3})?)\s*%(?:\s*[~∼～-]\s*(\d{1,2}(?:\.\d{1,3})?)\s*%?)?/;
+  /** 은행 이름으로 쓸 수 있는 글(한글이 있고 2~20자, 밑줄·Profile 이 든 은행 로고 이미지 이름은 아님). 아니면 '' */
+  function bankOf(v) {
+    var s = oneLine(v, 40);
+    return /^[가-힣A-Za-z][가-힣A-Za-z0-9 ]{1,19}$/.test(s) && /[가-힣]/.test(s) && !/profile|이미지/i.test(s) ? s : '';
+  }
+  /** 금리 → { min, max, bank } 또는 null. 숫자(3.5), 글("가나은행 3.5%~4.5%"), 객체({ min, max, bank }) */
+  function rateOf(v, notes) {
+    if (v === null || v === undefined || v === '') return null;
+    var min = NaN;
+    var max = NaN;
+    var bank = '';
+    if (typeof v === 'number') min = v;
+    else if (typeof v === 'string') {
+      var t = oneLine(v, 80);
+      var m = RATE_RE.exec(t);
+      if (m) {
+        min = parseFloat(m[2]);
+        if (m[3]) max = parseFloat(m[3]);
+        bank = bankOf(t.slice(0, m.index + m[1].length));
+      } else min = rateNum(t);
+    } else if (isObj(v)) {
+      min = rateNum(get(v, 'min'));
+      var mx = get(v, 'max');
+      if (mx !== undefined && mx !== null && mx !== '') {
+        max = rateNum(mx);
+        if (isNaN(max)) addNote(notes, '대출 금리: 최고 금리를 읽지 못해 뺐어요');
+      }
+      bank = bankOf(get(v, 'bank'));
+    }
+    var R = FIN_RANGE.rate;
+    if (!(min >= R[0] && min <= R[1])) { addNote(notes, '대출 금리: 값이 이상해서 뺐어요'); return null; }
+    min = Math.round(min * 1000) / 1000;
+    if (!isNaN(max)) {
+      if (max >= min && max <= R[1]) max = Math.round(max * 1000) / 1000;
+      else { addNote(notes, '대출 금리: 최고 금리가 이상해서 뺐어요'); max = NaN; }
+    }
+    return { min: min, max: isNaN(max) ? null : max, bank: bank };
+  }
+
+  /**
+   * 대출·관리비·세금 참고값 정리(1.7.0). raw: 가져오기 코드의 매물 객체 또는 네이버 글에서 읽은 후보(같은 이름의 필드).
+   * base: 정리한 매물({ askPrice, tradeType }) — KB시세·대출 한도를 호가와 견줘 본다. opts.today: KB시세 기준일이 없을 때 쓸 날짜.
+   * 결과: 값이 있는 필드만 담은 새 객체(FIN_FIELDS 순서). 이상한 값은 빼고 notes 에 이유(참고 문구, 기본 체크는 그대로).
+   * warnings code 'kbprice': KB시세를 억 단위로 짐작했거나(2.35 → 23500) 매매 호가와 2배 넘게 다름 → 기본 해제(대출 계산에 쓰는 값이라 사람이 확인)
+   */
+  function cleanFinance(raw, base, opts, notes, warnings) {
+    var out = {};
+    var today = todayOf(opts);
+    var ask = isObj(base) && typeof base.askPrice === 'number' && isFinite(base.askPrice) ? base.askPrice : null;
+    var trade = isObj(base) ? tradeTypeOf(base.tradeType) : '';
+    var sale = !trade || trade === '매매';
+    var kb = finManwon(get(raw, 'kbPrice'), 'KB시세', FIN_RANGE.kbPrice, notes);
+    if (kb.n !== null) {
+      out.kbPrice = kb.n;
+      if (kb.guessed !== null) {
+        warnings.push({ code: 'kbprice', text: 'KB시세 ' + kb.guessed + ' → ' + manwonText(kb.n) + '으로 읽었어요(억 단위로 봄). 맞는지 확인하세요' });
+      } else if (ask && sale && (kb.n > ask * 2 || kb.n * 2 < ask)) {
+        warnings.push({ code: 'kbprice', text: 'KB시세 ' + manwonText(kb.n) + '이 호가와 많이 달라요. 화면에서 확인하세요' });
+      }
+      var rawAt = get(raw, 'kbAt');
+      var at = '';
+      if (rawAt !== undefined && rawAt !== null && rawAt !== '') {
+        at = regDate(rawAt);
+        if (!at) addNote(notes, 'KB시세 기준일: 날짜를 읽지 못해 뺐어요');
+        else if (today && at > today) { addNote(notes, 'KB시세 기준일: 오늘보다 뒤라 뺐어요'); at = ''; }
+      }
+      if (!at) at = today;
+      if (at) out.kbAt = at;
+    }
+    var lim = finManwon(get(raw, 'naverLoanLimit'), '대출 한도', FIN_RANGE.loanLimit, notes);
+    if (lim.n !== null) {
+      // 네이버 한도는 KB시세(없으면 매매 호가) × LTV 라서 그보다 클 수 없다. 크면 다른 숫자를 읽은 것
+      var cap = has(out, 'kbPrice') ? out.kbPrice : (sale ? ask : null);
+      if (cap && lim.n > cap) addNote(notes, '대출 한도: ' + (has(out, 'kbPrice') ? 'KB시세' : '호가') + '보다 커서 뺐어요');
+      else {
+        if (lim.guessed !== null) addNote(notes, '대출 한도 ' + lim.guessed + ' → ' + manwonText(lim.n) + '으로 읽었어요(억 단위로 봄)');
+        out.naverLoanLimit = lim.n;
+      }
+    }
+    var rate = rateOf(get(raw, 'naverRate'), notes);
+    if (rate) out.naverRate = rate;
+    ['feeMonthly', 'feeAvg', 'feeSummer', 'feeWinter'].forEach(function (k) {
+      var n = finWon(get(raw, k), FIN_LABEL[k], FIN_RANGE.fee, notes);
+      if (n !== null) out[k] = n;
+    });
+    var fr = get(raw, 'feeRecent');
+    if (fr !== undefined && fr !== null && fr !== '') {
+      if (!isObj(fr)) addNote(notes, '관리비 최근 달: 모양이 달라 뺐어요');
+      else {
+        var mon = monthOf(get(fr, 'month'));
+        var amt = finWon(get(fr, 'amount'), '관리비 최근 달', FIN_RANGE.fee, notes);
+        if (!mon) addNote(notes, '관리비 최근 달: 달을 읽지 못해 뺐어요');
+        else if (today && mon > today.slice(0, 7)) addNote(notes, '관리비 최근 달: 오늘보다 뒤라 뺐어요');
+        else if (amt !== null) out.feeRecent = { month: mon, amount: amt };
+      }
+    }
+    var acq = finWon(get(raw, 'acqTaxNaver'), '취득세 합계', FIN_RANGE.acqTax, notes);
+    if (acq !== null) out.acqTaxNaver = acq;
+    var ptax = finWon(get(raw, 'propertyTaxNaver'), '재산세 합계', FIN_RANGE.propertyTax, notes);
+    if (ptax !== null) out.propertyTaxNaver = ptax;
+    return out;
+  }
+
+  /** 매물 하나 정리 → { prop, notes, warnings } (아는 필드만, 알 수 없는 필드는 무시). opts.today(1.7.0): KB시세 기준일 */
+  function cleanProperty(raw, opts) {
     var notes = [];
     var warnings = [];
     var phone = phoneOf(get(raw, 'agentPhone'));
@@ -605,6 +810,9 @@
     if (p.area && p.supplyArea && p.area >= p.supplyArea) {
       warnings.push({ code: 'swap', text: '전용면적이 공급면적보다 크거나 같아요. 화면에서 확인하세요' });
     }
+    // 1.7.0: 대출·관리비·세금 참고값. 값이 있는 것만 키로 넣는다(없으면 예전과 같은 모양)
+    var fin = cleanFinance(raw, p, opts, notes, warnings);
+    for (var fk in fin) if (has(fin, fk)) p[fk] = fin[fk];
     return { prop: p, notes: notes, warnings: warnings };
   }
 
@@ -1318,7 +1526,7 @@
     list.slice(0, LIMITS.properties).forEach(function (raw, i) {
       if (!isObj(raw)) { res.skipped++; return; }
       var x = extras && extras[i] ? extras[i] : null;
-      var c = cleanProperty(raw);
+      var c = cleanProperty(raw, opts);
       var p = c.prop;
       if (x && x.notes && x.notes.length) {
         var notes = x.notes.slice();
@@ -1457,7 +1665,7 @@
   var PRICE_PART = '\\d[\\d,]*(?:\\.\\d+)?\\s*억(?:\\s*\\d[\\d,]*)?|\\d[\\d,]*';
   var PRICE_HEAD_RE = new RegExp('^(' + PRICE_PART + ')(?:\\s*\\/\\s*(' + PRICE_PART + '))?');
   /**
-   * 가격으로 시작하는 글 → { deposit, monthly, rest }. "1억 9,000변동상승내역 보기" → deposit '1억 9,000', rest '변동상승내역 보기'.
+   * 가격으로 시작하는 글 → { deposit, monthly, rest }. "2억 3,450변동상승내역 보기" → deposit '2억 3,450', rest '변동상승내역 보기'.
    * "2,000/85"(월세) → deposit '2,000', monthly '85'. "1억 5,000 ~ 4억"(단지 카드의 가격 범위)는 rest 가 '~'로 시작. 숫자로 시작하지 않으면 null
    */
   function priceHead(s) {
@@ -1478,7 +1686,7 @@
   }
 
   var AREA_RE = /(\d+(?:\.\d+)?)\s*(평|㎡|m²|m2|제곱미터)/g;
-  /** "15.55평면적 단위 변경㎡" → [{ m2: 51.4, py: '15.55' }], "51.4㎡" → [{ m2: 51.4, py: '' }]. 단위가 붙은 숫자만 */
+  /** "20.5평면적 단위 변경㎡"(합성 예) → [{ m2: 67.77, py: '20.5' }], "67.77㎡" → [{ m2: 67.77, py: '' }]. 단위가 붙은 숫자만 */
   function areaValues(s) {
     var out = [];
     var t = String(s || '').replace(/,/g, '');
@@ -1491,7 +1699,7 @@
     return out;
   }
 
-  /** "2026. 10. 02." / "2026.10.02" / "26.10.02." → "2026-10-02". 아니면 '' */
+  /** "2026. 9. 30." / "2026.09.30" / "26.09.30." → "2026-09-30". 아니면 '' */
   function naverDate(s) {
     var m = /(\d{4}|\d{2})\s*[.\-\/]\s*(\d{1,2})\s*[.\-\/]\s*(\d{1,2})(?!\d)/.exec(String(s || ''));
     if (!m) return '';
@@ -1502,7 +1710,7 @@
   }
 
   /**
-   * 제목·카드 이름 "용종마을신대진 204동" → { name: '용종마을신대진', dong: '204' }. 동이 없으면 dong ''.
+   * 제목·카드 이름 "합성마을 101동" → { name: '합성마을', dong: '101' }. 동이 없으면 dong ''.
    * 1.4.1: 이름 부분이 숫자가 아닌 글자로 끝나고 글자(한글·영문)가 있어야 한다("204동" → 이름 '2', 동 '04'가 되지 않게)
    */
   function nameDong(s) {
@@ -1602,10 +1810,155 @@
     return { price: price, same: same, memo: '최근 실거래' + (same ? '(같은 면적)' : '(면적 확인 필요)') + ': ' + bits.filter(Boolean).join(' · ') };
   }
 
+  // ---- 대출·관리비·세금 묶음 (1.7.0) ----
+  // 같은 이름표('관리비')가 기본 정보 묶음에도 있으므로, 기본 정보 묶음이 끝난 뒤에서 묶음 제목('대출 정보'·'대출 계산기'·'관리비'·'세금')을
+  // 찾고 다음 묶음 제목 앞까지만 읽는다(DEAL_END_RE·COMPLEX_END_RE 와 같은 방식). 이름표가 값 앞에 온다("월 평균 ↵ 12만 3,450원").
+  var FIN_END_RE = /^(매물 ?소개|대출 ?정보|대출 ?계산기|매물 ?분포|실거래가|단지 ?정보|중개사|중개 ?보수|세금|관리비|주변 ?대중교통|학군 ?정보|배정 ?(?:초등|중|고등)?학교|내 ?생활거점 ?거리|시세)$/;
+  var LOAN_HEAD_RE = /^(대출 ?정보|대출 ?계산기)$/;
+  var TAX_HEAD_RE = /^(세금|세금 ?정보|보유세|재산세)$/;
+  var KB_RE = /^KB\s*시세\s*(.*)$/i;
+  var RATE_HEAD_RE = /^(최저 ?금리|금리 ?정보)\s*(.*)$/;
+  // 대출 묶음 안의 다른 이름표(값을 찾다가 여기서 멈춘다)
+  var LOAN_LABEL_RE = /^(최저 ?금리|금리 ?정보|대출 ?한도|대출 ?금액|대출 ?기간|대출 ?계산하기|상환 ?방법|월 ?원리금|내 ?금리|KB\s*시세)/i;
+  var FEE_MONTH_RE = /^(\d{4})\s*(?:[.\-\/]|년)\s*(\d{1,2})\s*(?:\.|월)?\s*(.*)$/;
+
+  /** 이름표 줄(k)의 값: 같은 줄 나머지(rest)가 있으면 그것, 없으면 다음 줄(2줄 아래까지)이 금액으로 시작할 때 그 줄 → 원 정수 또는 null */
+  function wonAfter(L, k, end, rest) {
+    if (rest) return wonFromText(rest);
+    var j = nextFilled(L, k + 1, Math.min(end, k + 3));
+    if (j < 0) return null;
+    var g = flat(L[j]);
+    return /^(?:약\s*)?\d/.test(g) ? wonFromText(g) : null;
+  }
+  /** 만원 금액 글("1억 2,000만원", "2억원", "9,500만원") → 만원 정수. 범위('~')·월세 모양·뒤에 다른 숫자가 붙으면 null */
+  function manwonHead(s) {
+    var ph = priceHead(s);
+    if (!ph || ph.monthly || /\d|~/.test(ph.rest)) return null;
+    return moneyOf(ph.deposit);
+  }
+  /** 'KB시세 …' 줄(k) → { price: 만원, date: 'YYYY-MM-DD' | '' } 또는 null. 값이 다음 줄에 있어도 읽는다. 날짜가 같은 줄에 있으면 기준일 */
+  function kbValue(L, k, end, rest) {
+    var t = rest || '';
+    var date = '';
+    var dm = /\(?\s*(\d{4}\s*[.\-\/]\s*\d{1,2}\s*[.\-\/]\s*\d{1,2})\s*\.?\s*(?:기준)?\s*\)?/.exec(t);
+    if (dm) {
+      date = naverDate(dm[1]);
+      t = t.slice(0, dm.index) + ' ' + t.slice(dm.index + dm[0].length);
+    }
+    t = flat(t).replace(/^[:：]\s*/, '').replace(/^\([^)]{0,20}\)\s*/, '').replace(/^(?:일반\s*)?(?:평균가|매매가)\s*[:：]?\s*/, '');
+    if (!t) {
+      var j = nextFilled(L, k + 1, Math.min(end, k + 3));
+      t = j >= 0 && !LOAN_LABEL_RE.test(flat(L[j])) ? flat(L[j]) : '';
+    }
+    var price = t ? manwonHead(t) : null;
+    return price ? { price: price, date: date } : null;
+  }
+  /** '대출 한도' 줄(k)부터 6줄 안의 '최대 1억 2,000만원' → 만원 정수 또는 null(다른 이름표가 나오면 멈춤) */
+  function loanLimitValue(L, k, end) {
+    for (var j = k; j < end && j <= k + 6; j++) {
+      var g = flat(L[j]);
+      if (j > k && LOAN_LABEL_RE.test(g)) break;
+      var m = /(?:^|\s)최대\s*(\d.*)$/.exec(g);
+      if (m) return manwonHead(m[1]);
+    }
+    return null;
+  }
+  /**
+   * '최저 금리'·'금리 정보' 줄(k)부터 4줄 안의 금리 → { min, max, bank } 또는 null.
+   * "최저 금리 ↵ (은행 로고 이미지 이름) ↵ 가나은행3.5%", "금리 정보 ↵ 가나은행 ↵ 3.5%~4.5%" 모두. 은행 이름은 금리 앞 글자나 그 위 줄
+   */
+  function rateValue(L, k, end, rest) {
+    var bankLine = '';
+    for (var j = rest ? k : k + 1; j < end && j <= k + 4; j++) {
+      var g = j === k ? flat(rest) : flat(L[j]);
+      if (!g) continue;
+      if (j > k && (LOAN_LABEL_RE.test(g) || FIN_END_RE.test(g))) break;
+      var m = RATE_RE.exec(g);
+      if (m) {
+        var min = parseFloat(m[2]);
+        var max = m[3] ? parseFloat(m[3]) : null;
+        return { min: min, max: max, bank: bankOf(g.slice(0, m.index + m[1].length)) || bankLine };
+      }
+      if (!bankLine) bankLine = bankOf(g);
+    }
+    return null;
+  }
+  /** '대출 정보'·'대출 계산기' 묶음 [from, to) → out 의 kbPrice·kbAt·naverLoanLimit 와 금리 후보(rates) */
+  function naverLoanBlock(L, from, to, out, rates) {
+    for (var k = from; k < to; k++) {
+      var f = flat(L[k]);
+      var m;
+      if ((m = KB_RE.exec(f))) {
+        if (out.kbPrice === null) {
+          var kb = kbValue(L, k, to, m[1]);
+          if (kb) { out.kbPrice = kb.price; out.kbAt = kb.date; }
+        }
+      } else if (/^대출 ?한도/.test(f)) {
+        if (out.naverLoanLimit === null) out.naverLoanLimit = loanLimitValue(L, k, to);
+      } else if ((m = RATE_HEAD_RE.exec(f))) {
+        var r = rateValue(L, k, to, m[2] || '');
+        if (r) rates.push(r);
+      }
+    }
+  }
+  /** '관리비' 묶음(국토교통부 기준) [from, to) → feeRecent·feeAvg·feeSummer·feeWinter */
+  function naverFeeBlock(L, from, to, out) {
+    for (var k = from; k < to; k++) {
+      var f = flat(L[k]);
+      if (!f) continue;
+      var m;
+      if ((m = /^월\s*평균\s*(.*)$/.exec(f))) { if (out.feeAvg === null) out.feeAvg = wonAfter(L, k, to, m[1]); continue; }
+      if ((m = /^여름\s*(?:\([^)]*\))?\s*평균\s*(.*)$/.exec(f))) { if (out.feeSummer === null) out.feeSummer = wonAfter(L, k, to, m[1]); continue; }
+      if ((m = /^겨울\s*(?:\([^)]*\))?\s*평균\s*(.*)$/.exec(f))) { if (out.feeWinter === null) out.feeWinter = wonAfter(L, k, to, m[1]); continue; }
+      if (out.feeRecent || !(m = FEE_MONTH_RE.exec(f))) continue;
+      var mon = monthOf(m[1] + '-' + m[2]);
+      if (!mon || (m[3] && wonFromText(m[3]) === null)) continue; // "2026. 07. 15." 같은 날짜는 달 이름표가 아님
+      var amt = wonAfter(L, k, to, m[3]);
+      if (amt !== null) out.feeRecent = { month: mon, amount: amt };
+    }
+  }
+  /** '세금' 묶음 [from, to) → acqTaxNaver(취득세 합계)·propertyTaxNaver(재산세 합계). "약 150만원상세내역 보기" → 1500000 */
+  function naverTaxBlock(L, from, to, out) {
+    for (var k = from; k < to; k++) {
+      var f = flat(L[k]);
+      var m;
+      if ((m = /^취득세\s*합계\s*(.*)$/.exec(f))) { if (out.acqTaxNaver === null) out.acqTaxNaver = wonAfter(L, k, to, m[1]); }
+      else if ((m = /^재산세\s*합계\s*(.*)$/.exec(f))) { if (out.propertyTaxNaver === null) out.propertyTaxNaver = wonAfter(L, k, to, m[1]); }
+    }
+  }
+  /**
+   * 상세 화면의 대출·관리비·세금 참고값(1.7.0). from: 기본 정보 묶음이 끝난 줄(그 앞의 '관리비'는 기본 정보 이름표).
+   * feeText: 기본 정보의 관리비 글("15만원"). 결과 필드는 cleanFinance 에 넘길 후보(없으면 null, kbAt 은 '')
+   */
+  function naverFinance(L, from, feeText) {
+    var out = { kbPrice: null, kbAt: '', naverLoanLimit: null, naverRate: null, feeMonthly: feeText ? wonFromText(feeText) : null,
+      feeAvg: null, feeSummer: null, feeWinter: null, feeRecent: null, acqTaxNaver: null, propertyTaxNaver: null };
+    var rates = [];
+    for (var i = Math.max(0, from); i < L.length; i++) {
+      var f = flat(L[i]);
+      var end;
+      if (LOAN_HEAD_RE.test(f)) {
+        end = blockEnd(L, i + 1, FIN_END_RE, 40);
+        naverLoanBlock(L, i + 1, end, out, rates);
+      } else if (f === '관리비' && out.feeAvg === null && out.feeRecent === null) {
+        end = blockEnd(L, i + 1, FIN_END_RE, 30);
+        naverFeeBlock(L, i + 1, end, out);
+      } else if (TAX_HEAD_RE.test(f) && (out.acqTaxNaver === null || out.propertyTaxNaver === null)) {
+        end = blockEnd(L, i + 1, FIN_END_RE, 30);
+        naverTaxBlock(L, i + 1, end, out);
+      } else continue;
+      i = end - 1; // 묶음 안쪽은 다시 보지 않는다(다음 묶음 제목부터)
+    }
+    // 금리: 범위(최저~최고)가 있는 것을 먼저, 없으면 처음 찾은 것
+    for (var r = 0; r < rates.length; r++) if (rates[r].max !== null) { out.naverRate = rates[r]; break; }
+    if (!out.naverRate && rates.length) out.naverRate = rates[0];
+    return out;
+  }
+
   /**
    * 상세 매물 → { raw(cleanProperty 에 넘길 후보), notes, approx } 또는 null.
    * 기준 줄·제목·가격을 찾지 못하거나, 제목 줄 가격과 '기본 정보'의 가격이 다르면(다른 줄을 제목으로 잘못 봄) null.
-   * 1.4.1: 요약 줄("아파트15평 (전용11)16/16층동향")의 층·향이 '해당층/총층'·'향'과 다르거나, 머리 줄(창닫기 위의 이름)이
+   * 1.4.1: 요약 줄("아파트20평 (전용15)7/15층남향")의 층·향이 '해당층/총층'·'향'과 다르거나, 머리 줄(창닫기 위의 이름)이
    * 제목과 다르면 null(다른 매물의 줄을 제목으로 잘못 봄)
    */
   function naverDetail(L) {
@@ -1641,7 +1994,7 @@
     var nd;
     var dongOnly = /^제?\s*(\d{1,4})\s*동$/.exec(flat(L[ti]));
     if (dongOnly) {
-      // 1.4.1: 단지명과 동이 두 줄로 나뉜 화면("용종마을신대진 ↵ 204동")
+      // 1.4.1: 단지명과 동이 두 줄로 나뉜 화면("합성마을 ↵ 101동")
       var ni = prevFilled(L, ti - 1, ti - 2);
       if (ni < 0 || !titleOk(L[ni])) return null;
       nd = { name: flat(L[ni]), dong: dongOnly[1] };
@@ -1781,6 +2134,11 @@
       }
     }
 
+    // 1.7.0: 대출·관리비·세금 참고값(기본 정보 묶음 뒤의 묶음에서만. 기본 정보의 관리비는 위 fee 글).
+    // 참고값이라 읽다가 뜻밖의 오류가 나도 매물 가져오기(1.6.0 까지의 값)는 그대로 되게 한다
+    var fin;
+    try { fin = naverFinance(L, bEnd, fee ? fee[1] : ''); } catch (finErr) { fin = naverFinance([], 0, ''); }
+
     return {
       notes: notes,
       approx: { area: !!(excl && excl.py), supplyArea: !!(supply && supply.py) },
@@ -1798,7 +2156,19 @@
         agentPhone: agentPhone, // 번호가 붙어 있어도 cleanProperty(phoneOf)가 나눠 첫 번호만 넣고 나머지는 메모로
         articleNo: an ? an[0] : '',
         confirmedAt: confirmedAt,
-        memo: memo.join('\n')
+        memo: memo.join('\n'),
+        // 1.7.0: cleanProperty(cleanFinance)가 범위를 다시 검사하고 값이 있는 것만 매물에 넣는다
+        kbPrice: fin.kbPrice,
+        kbAt: fin.kbAt,
+        naverLoanLimit: fin.naverLoanLimit,
+        naverRate: fin.naverRate,
+        feeMonthly: fin.feeMonthly,
+        feeAvg: fin.feeAvg,
+        feeSummer: fin.feeSummer,
+        feeWinter: fin.feeWinter,
+        feeRecent: fin.feeRecent,
+        acqTaxNaver: fin.acqTaxNaver,
+        propertyTaxNaver: fin.propertyTaxNaver
       }
     };
   }
@@ -1963,10 +2333,11 @@
    * 정리된 매물들 → 코드 객체(빈 값은 뺌, 호수 없음). tools/make-import-code.js 가 쓴다.
    * opts.from: 'naver-text'(1.4.1) 이면 최상위에 "from" 을 넣는다. 앱(parse)이 보고 네이버 글 주의·출처를 쓴다
    * opts.registry(1.6.0): 등기부 기록(snapshot)이면 "registry" 로 넣는다(registryToCode). 매물이 없으면 properties 는 뺀다
+   * 1.7.0: 대출·관리비·세금 참고값(FIN_FIELDS)은 confirmedAt 다음, memo 앞에 넣는다(값이 있을 때만. naverRate·feeRecent 는 객체 사본)
    */
   function toCode(props, opts) {
     var order = ['name', 'dong', 'area', 'supplyArea', 'askPrice', 'realPrice', 'tradeType', 'floor', 'direction',
-      'agentName', 'agentPhone', 'sourceUrl', 'articleNo', 'confirmedAt', 'memo'];
+      'agentName', 'agentPhone', 'sourceUrl', 'articleNo', 'confirmedAt'].concat(FIN_FIELDS, ['memo']);
     var code = { imjang: CODE_VERSION };
     if (opts && opts.from === NAVER_SOURCE_ID) code.from = NAVER_SOURCE_ID;
     code.properties = (props || []).map(function (p) {
@@ -1974,7 +2345,7 @@
       order.forEach(function (k) {
         var v = p[k];
         if (v === null || v === undefined || v === '') return;
-        o[k] = v;
+        o[k] = isObj(v) ? copyJson(v) : v;
       });
       return o;
     });
@@ -2063,6 +2434,19 @@
     REGISTRY_ANSWERS: REG_ANSWERS.map(function (a) { return { id: a[0], type: a[1], label: a[2] }; }),
     REGISTRY_CATEGORIES: REG_CATS.map(function (c) {
       return { key: c, label: REG_CAT_LABEL[c], item: has(REG_CAT_ITEM, c) ? REG_CAT_ITEM[c] : '' };
-    })
+    }),
+    // 1.7.0 대출·관리비·세금 참고값
+    FINANCE_FIELDS: FIN_FIELDS.slice(),
+    /**
+     * 매물 모양 객체의 참고값만 다시 검사·정리(앱이 백업·예전 기록을 읽을 때 같은 규칙을 쓰도록).
+     * opts.today: KB시세 기준일이 없을 때 쓸 날짜. 결과 { fields(값이 있는 것만), notes, warnings }
+     */
+    cleanFinance: function (raw, opts) {
+      var notes = [];
+      var warnings = [];
+      var base = { askPrice: get(raw, 'askPrice'), tradeType: get(raw, 'tradeType') };
+      return { fields: cleanFinance(raw, base, opts, notes, warnings), notes: notes, warnings: warnings };
+    },
+    parseWon: wonFromText // "12만 3,450원" → 123450
   };
 });

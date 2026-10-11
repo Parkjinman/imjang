@@ -18,6 +18,8 @@
  * 두 기록 합치기(백업 [합치기]·여러 탭)는 merge.js(window.ImjangMerge)가 맡는다. import-parser.js 다음, 이 파일 전에 로드된다.
  * 1.6.0: 등기부 PDF 해석은 registry-parser.js(window.ImjangRegistry)가 맡는다(import-parser.js 다음, merge.js 전에 로드).
  *   PDF 글자를 꺼내는 pdf.js(vendor/pdfjs)는 처음 PDF 를 올릴 때만 불러온다(loadPdfjs). 서류·해석 결과는 이 기기 밖으로 보내지 않는다.
+ * 1.7.0: 대출 한도·월 상환·매수 부대비용·필요 현금·보유비용 추정은 finance.js(window.ImjangFinance)가 맡는다(merge.js 다음, 이 파일 전에 로드).
+ *   매물의 KB시세·관리비 등 네이버 참고값은 import-parser.js 가 읽고, 상세 화면 '대출·비용' 카드(finCard)가 보여 준다. 모든 수치는 추정이다.
  */
 (function () {
   'use strict';
@@ -25,11 +27,14 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.6.0';
+  var APP_VERSION = '1.7.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
   var REG_SIDE_KEY = 'imjang.v1.reg';
+  // 1.7.0: 매물의 1.7.0 필드(KB시세·관리비·리모델링비 등)와 전역 대출 조건(settings)의 사본. 예전(1.6.0 이하) 탭이 이것을 빼고 저장해도
+  // 되살린다. 1.6.0 은 REG_SIDE_KEY 를 통째로 다시 쓰므로 키를 따로 둔다(그 키에 넣으면 1.6.0 탭이 지움)
+  var FIN_SIDE_KEY = 'imjang.v1.fin';
   var SCHEMA_VERSION = 1;
   var PHOTO_DB_NAME = 'imjang-photos';
   var PHOTO_STORE = 'photos';
@@ -67,6 +72,8 @@
   var MG = window.ImjangMerge || null;
   // 1.6.0: 등기부 PDF 해석기(registry-parser.js). 파일이 없으면 null 이고, 그때는 PDF 를 서류로만 저장한다(해석 안내만 바뀜)
   var REG = window.ImjangRegistry || null;
+  // 1.7.0: 대출·비용 추정(finance.js). 파일이 없으면 null 이고, 그때는 '대출·비용' 카드가 안내로 바뀐다(값 입력·저장은 그대로)
+  var FIN = window.ImjangFinance || null;
   // 1.6.0: PDF 읽기 도구(pdf.js 3.11, Apache-2.0). 처음 PDF 를 올릴 때 스크립트 태그로 불러온다(loadPdfjs).
   // 일꾼(worker) 주소는 상대 경로(배포 위치가 바뀌어도 되게). 서비스 워커가 둘 다 미리 저장해 오프라인에서도 읽는다.
   // 한글 cMap 은 넣지 않았다: 인터넷등기소 PDF 는 글꼴을 품고 글자 대응표(ToUnicode)가 있어 cMap 없이 같은 글자가 나옴(1.6.0 확인)
@@ -173,6 +180,30 @@
     if (!s) return null;
     var n = parseFloat(s);
     return isFinite(n) ? n : null;
+  }
+  /**
+   * 1.7.0 검토 반영: 대출·비용 만원 칸(KB시세·협상가·리모델링비·공시가격) 읽기. 전에는 숫자가 아닌 글자를 모두 지워서
+   * '1.9억'이 19(만원), '2천'이 2(만원)로 조용히 저장됐다.
+   *   숫자·쉼표·공백만 → 그 수. '억·천·만·원'이 든 글('1.9억', '2억 4천', '1천5백만', '15000000원') → finance.js parseMan.
+   *   결과 { value: 만원 정수 | null(빈 칸), bad: '' | 'unread'(못 읽음) | 'fraction'(만원 아래 소수) }
+   */
+  function readManInput(text) {
+    var t = String(text === null || text === undefined ? '' : text)
+      .replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }).replace(/，/g, ',').trim();
+    if (!t) return { value: null, bad: '' };
+    if (/^[\d,\s]+$/.test(t)) {
+      var d = t.replace(/[,\s]/g, '');
+      return d ? { value: parseInt(d, 10), bad: '' } : { value: null, bad: 'unread' };
+    }
+    var n = FIN && FIN.parseMan ? FIN.parseMan(t) : null;
+    if (n === null || !isFinite(n)) return { value: null, bad: 'unread' };
+    if (Math.abs(n - Math.round(n)) > 1e-9) return { value: null, bad: 'fraction' };
+    return { value: Math.round(n), bad: '' };
+  }
+  /** readManInput 이 못 읽었을 때 칸 아래에 보일 말 */
+  function manInputError(bad) {
+    return bad === 'fraction' ? '만원 단위로 소수점 없이 적어 주세요. (2억 3,450 → 23450)'
+      : '읽지 못해 저장하지 않았어요. 만원 단위 숫자로 적어 주세요. (2억 3,450 → 23450)';
   }
   function domId(s) { return String(s).replace(/[^A-Za-z0-9_-]/g, '_'); }
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -477,7 +508,9 @@
   var loadProblem = null; // 'blocked' | 'broken'
 
   function emptyState() {
-    return { version: SCHEMA_VERSION, rev: '', dataVersion: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null, backupWithPhotos: null, dataNotice: null } };
+    return { version: SCHEMA_VERSION, rev: '', dataVersion: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null, backupWithPhotos: null, dataNotice: null },
+      // 1.7.0: 전역 대출 조건(finance.js defaultSettings 모양, 안 바꿨으면 null = 기본값)과 바꾼 시각. 기록의 일부라 백업·[합치기]에 함께 간다
+      settings: { finance: null, financeAt: 0 } };
   }
 
   var ITEM_VALUE_KEYS = ['status', 'memo', 'answer', 'date', 'done']; // 항목 상태의 값 이름(merge.js ITEM_FIELDS 와 같음)
@@ -789,6 +822,107 @@
     return out.length > SNAPSHOTS_MAX ? out.slice(out.length - SNAPSHOTS_MAX) : out;
   }
 
+  // ---- 1.7.0: 대출·비용 값(매물 필드) ----
+  // 매물마다 늘 같은 키를 둔다(값이 없으면 null·''·[]). 키가 아예 없는 저장본 매물 = 예전(1.6.0 이하) 탭이 쓴 것(restoreFinFromSide 가 판단)
+  //   kbPrice(만원)·kbAt('YYYY-MM-DD', KB시세를 가져온 날 = 기준일)·kbSource('naver'|'code'|'manual')·kbHistory·askHistory([{ value, at, source, t }])
+  //   dealPrice(협상가, 만원)·remodelCost(리모델링비, 만원)·publicPrice(공시가격, 만원) — 사용자가 '대출·비용' 카드에서 넣는 값
+  //   naverLoanLimit(만원)·naverRate({ min, max, bank })·feeMonthly·feeAvg·feeSummer·feeWinter(원)·feeRecent({ month, amount 원 })·
+  //   acqTaxNaver·propertyTaxNaver(원) — 네이버 화면의 참고값(import-parser.js W1 과 같은 범위 검사)
+  //   syncAt({ 칸: ms }): 가져오기·다시 붙여넣기가 그 칸에 값을 마지막으로 넣은 시각. 그 뒤에 fieldsAt 이 올라간 칸 = 손으로 고친 값
+  // 1.7.0 검토 반영: 협상가 하한을 KB시세처럼 1,000만원, 공시가격 하한을 100만원으로(전에는 1만원이라 '1.9억'을 19로 읽은 값도 받았음)
+  var FIN_NUM_RANGE = {
+    kbPrice: [1000, 10000000], dealPrice: [1000, 10000000], remodelCost: [0, 1000000], publicPrice: [100, 10000000],
+    naverLoanLimit: [100, 10000000], feeMonthly: [1000, 5000000], feeAvg: [1000, 5000000], feeSummer: [1000, 5000000],
+    feeWinter: [1000, 5000000], acqTaxNaver: [10000, 10000000000], propertyTaxNaver: [1000, 1000000000]
+  };
+  var FIN_PROP_NUMS = Object.keys(FIN_NUM_RANGE);
+  // 1.7.0 에서 늘어난 매물 필드(대출·비용). 1.7.0 은 늘 이 키를 적는다(값이 없으면 null·''·[]·{}). kbHistory 가 없으면 예전 탭이 쓴 매물.
+  // 저장본을 처음 읽을 때(loadState → restoreFinFromSide)도 쓰므로 그보다 앞에 선언한다
+  var FIELDS_170 = ['kbPrice', 'kbAt', 'kbSource', 'kbHistory', 'askHistory', 'dealPrice', 'remodelCost', 'publicPrice',
+    'naverLoanLimit', 'naverRate', 'feeMonthly', 'feeAvg', 'feeSummer', 'feeWinter', 'feeRecent', 'acqTaxNaver', 'propertyTaxNaver', 'syncAt'];
+  // 그중 fieldsAt 으로 시각을 남기는 칸(merge.js FIN_FIELDS 와 같음). 사본에 시각도 함께 둔다
+  var FIN_TIMED = ['kbPrice', 'dealPrice', 'remodelCost', 'publicPrice', 'naverLoanLimit', 'naverRate',
+    'feeMonthly', 'feeAvg', 'feeSummer', 'feeWinter', 'feeRecent', 'acqTaxNaver', 'propertyTaxNaver'];
+  var HIST_SOURCES = { naver: 1, code: 1, manual: 1 };
+  var HISTORY_MAX = 20; // merge.js HISTORY_MAX 와 같음
+  var ASK_RANGE = [1, 10000000];
+  /** 범위 안의 수(정수로 반올림)면 그 수, 아니면 null */
+  function finNum(v, key) {
+    var n = numOrNull(v);
+    var r = FIN_NUM_RANGE[key] || ASK_RANGE;
+    if (n === null) return null;
+    n = Math.round(n);
+    return n >= r[0] && n <= r[1] ? n : null;
+  }
+  /** 'YYYY-MM-DD'(있는 날짜)면 그대로, 아니면 '' */
+  function isoDateOr(v) {
+    var s = str(v).trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return '';
+    var d = new Date(+m[1], +m[2] - 1, +m[3]);
+    return d.getFullYear() === +m[1] && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3] ? s : '';
+  }
+  function finRate(v) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    var min = numOrNull(v.min);
+    if (min === null || min < 0.1 || min > 30) return null;
+    var max = numOrNull(v.max);
+    if (max === null || max < min || max > 30) max = null;
+    return { min: min, max: max, bank: str(v.bank).replace(/\s+/g, ' ').trim().slice(0, 30) };
+  }
+  function finFeeRecent(v) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    var month = /^\d{4}-(0[1-9]|1[0-2])$/.test(str(v.month)) ? str(v.month) : '';
+    var amount = finNum(v.amount, 'feeAvg');
+    return month && amount !== null ? { month: month, amount: amount } : null;
+  }
+  /** 값 이력 정리: { value(범위 안), at('YYYY-MM-DD'|''), source, t(ms, 있으면) } 만, 최근 HISTORY_MAX 개 */
+  function finHistory(v, range) {
+    var out = [];
+    (Array.isArray(v) ? v : []).forEach(function (e) {
+      if (!e || typeof e !== 'object') return;
+      var n = numOrNull(e.value);
+      if (n === null) return;
+      n = Math.round(n);
+      if (n < range[0] || n > range[1]) return;
+      var o = { value: n, at: isoDateOr(e.at), source: HIST_SOURCES[e.source] ? e.source : '' };
+      var t = numOrNull(e.t);
+      if (t > 0) o.t = t;
+      out.push(o);
+    });
+    return out.length > HISTORY_MAX ? out.slice(out.length - HISTORY_MAX) : out;
+  }
+  /** 매물 원본(p)의 1.7.0 값을 정리해 np 에 넣는다(normalizeProperty·restoreFinFromSide 가 같이 씀) */
+  function finFieldsInto(np, p) {
+    FIN_PROP_NUMS.forEach(function (k) { np[k] = finNum(p[k], k); });
+    np.naverRate = finRate(p.naverRate);
+    np.feeRecent = finFeeRecent(p.feeRecent);
+    np.kbAt = np.kbPrice !== null ? isoDateOr(p.kbAt) : '';
+    np.kbSource = np.kbPrice !== null && HIST_SOURCES[p.kbSource] ? p.kbSource : '';
+    np.kbHistory = finHistory(p.kbHistory, FIN_NUM_RANGE.kbPrice);
+    np.askHistory = finHistory(p.askHistory, ASK_RANGE);
+    np.syncAt = timeMapOf(p.syncAt); // { 칸: 가져오기로 넣은 시각 }
+    return np;
+  }
+  /** 1.7.0 전역 대출 조건 정리: { finance: 숫자·글·참거짓만 담은 객체 | null, financeAt: ms }. 값 검사는 finance.js normalizeSettings 가 계산 때 한다 */
+  function normalizeSettingsState(v) {
+    var out = { finance: null, financeAt: 0 };
+    if (!v || typeof v !== 'object') return out;
+    var f = v.finance;
+    if (f && typeof f === 'object' && !Array.isArray(f)) {
+      var o = {};
+      Object.keys(f).slice(0, 60).forEach(function (k) {
+        var x = f[k];
+        if (BAD_KEYS[k]) return;
+        if (x === null || typeof x === 'boolean' || (typeof x === 'number' && isFinite(x)) || (typeof x === 'string' && x.length <= 40)) o[k] = x;
+      });
+      out.finance = Object.keys(o).length ? o : null;
+    }
+    var t = numOrNull(v.financeAt);
+    out.financeAt = t > 0 ? t : 0;
+    return out;
+  }
+
   /** legacy(1.5.0 검토 반영): 데이터 2026-10c 보다 오래된 저장본에서 온 매물이면 바뀐 항목을 한 번 옮긴다(normalizeItems·migrateInjunction) */
   function normalizeProperty(p, legacy) {
     var now = Date.now();
@@ -839,6 +973,7 @@
     var snapGone = normalizeDeleted(p.registrySnapshotsRemoved);
     np.registrySnapshots = normalizeSnapshots(p.registrySnapshots, snapGone);
     if (Object.keys(snapGone).length) np.registrySnapshotsRemoved = snapGone;
+    finFieldsInto(np, p); // 1.7.0: 대출·비용 값(늘 같은 키)
     if (legacy && migrateInjunction(np.items) && migrationStats) migrationStats.inj++; // 1.5.0 검토 반영
     if (MG) return MG.fillTimes(np);
     // merge.js 를 못 불러왔을 때: 저장된 시각은 검사만 하고 그대로 둔다(버리면 다음 합치기에서 예전 값이 새 값을 이길 수 있음).
@@ -907,6 +1042,7 @@
       s.ui.backupWithPhotos = typeof data.ui.backupWithPhotos === 'boolean' ? data.ui.backupWithPhotos : null;
       s.ui.dataNotice = noticeStats(data.ui.dataNotice); // 1.5.0 검토 반영: 홈의 "체크리스트가 바뀌었어요" 안내(✕ 로 닫으면 null)
     }
+    s.settings = normalizeSettingsState(data.settings); // 1.7.0: 전역 대출 조건
     return s;
   }
 
@@ -939,6 +1075,7 @@
     knownRev = s.rev;
     // 1.6.0 검토 반영: 예전(1.5.x) 탭이 1.6.0 필드를 빼고 저장해 두었으면 따로 둔 키에서 되살리고 다시 저장한다
     if (restoreFromSide(s, obj)) migratedOnLoad = true;
+    if (restoreFinFromSide(s, obj)) migratedOnLoad = true; // 1.7.0: 예전(1.6.0 이하) 탭이 지운 대출·비용 값·대출 조건
     // 1.5.0 검토 반영: 옛 저장본(1.4.x)을 처음 읽었으면 옮긴 수를 홈 안내(ui.dataNotice)에 남기고, init 이 dataVersion 을 적어 다시 저장한다
     var m = migrationStats;
     if (m && m.legacy) {
@@ -967,6 +1104,7 @@
   // 1.6.0 에서 늘어난 매물 필드(매도인 이름, 등기부 해석 기록). 1.6.0 은 늘 이 키를 적으므로, 키가 없으면 예전(1.5.x) 탭이 쓴 매물이다.
   // 합칠 때는 내 값이 이기지만(merge.js LATE_FIELDS·기록 합집합) 저장본에서는 빠진 채라, 다시 저장해 되돌린다(needResave)
   var FIELDS_160 = ['sellerName', 'registrySnapshots'];
+  // 1.7.0 에서 늘어난 매물 필드는 FIELDS_170·FIN_TIMED(위 '대출·비용 값' 묶음. loadState 가 쓰므로 그 앞에 둔다)
   var needResave = false; // 합치면서 예전 탭이 지운 필드를 되살렸으면 다시 저장해 저장본에도 되돌려 놓는다
   /** 빈 값('' null undefined, 빈 배열) */
   function blankVal(v) { return v === '' || v === null || v === undefined || (Array.isArray(v) && !v.length); }
@@ -1028,6 +1166,82 @@
   }
 
   /**
+   * 1.7.0: 1.7.0 필드 사본(FIN_SIDE_KEY)을 쓴다 — { v: 1, props: { 매물id: { 값…, fa: { 칸: 시각 } } }, settings: { finance, financeAt } }.
+   * 1.6.0 이하 탭은 이 키를 몰라 남아 있다가, 그 탭이 대출·비용 값을 빼고 저장한 뒤 1.7.0 이 시작할 때(restoreFinFromSide) 되살린다.
+   * 본 저장이 된 뒤에만 부르고, 실패해도 조용히 넘어간다
+   */
+  function writeFinSide(s) {
+    try {
+      var props = {};
+      (s.properties || []).forEach(function (p) {
+        var o = {};
+        var fa = {};
+        FIELDS_170.forEach(function (k) {
+          var x = p[k];
+          if (!blankVal(x) && !(x && typeof x === 'object' && !Array.isArray(x) && !Object.keys(x).length)) o[k] = x;
+        });
+        FIN_TIMED.forEach(function (k) {
+          if (p.fieldsAt && numOrNull(p.fieldsAt[k]) > 0) fa[k] = p.fieldsAt[k];
+        });
+        if (!Object.keys(o).length && !Object.keys(fa).length) return;
+        if (Object.keys(fa).length) o.fa = fa;
+        props[p.id] = o;
+      });
+      var st = s.settings && s.settings.finance ? { finance: s.settings.finance, financeAt: s.settings.financeAt || 0 } : null;
+      if (Object.keys(props).length || st) {
+        var side = { v: 1, props: props };
+        if (st) side.settings = st;
+        localStorage.setItem(FIN_SIDE_KEY, JSON.stringify(side));
+      } else localStorage.removeItem(FIN_SIDE_KEY);
+    } catch (e) { /* 저장 공간 부족 등: 본 저장은 됐다. 다음 저장 때 다시 */ }
+  }
+  /**
+   * 1.7.0: 저장본 원문(raw)에서 1.7.0 키(kbHistory)가 아예 없는 매물(예전 탭이 씀)에 사본의 값을 되살린다. 지금 비어 있는 칸만 채우고,
+   * 그 칸의 시각(fa)도 되돌린다. 저장본에 settings 키가 없으면(예전 탭이 씀) 대출 조건도 되살린다. 되살렸으면 true(→ 다시 저장)
+   */
+  function restoreFinFromSide(s, raw) {
+    var side = null;
+    try { side = parseStored(localStorage.getItem(FIN_SIDE_KEY)); } catch (e) { return false; }
+    if (!side || typeof side !== 'object') return false;
+    var changed = false;
+    var sp = side.props && typeof side.props === 'object' && !Array.isArray(side.props) ? side.props : {};
+    var rawById = {};
+    (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
+      if (p && typeof p === 'object' && p.id && !BAD_KEYS[p.id]) rawById[str(p.id)] = p;
+    });
+    s.properties.forEach(function (p) {
+      var r = hasOwn(rawById, p.id) ? rawById[p.id] : null;
+      var d = hasOwn(sp, p.id) && !BAD_KEYS[p.id] ? sp[p.id] : null;
+      if (!r || !d || typeof d !== 'object' || hasOwn(r, 'kbHistory')) return;
+      var back = finFieldsInto({}, d);
+      var fa = d.fa && typeof d.fa === 'object' ? d.fa : {};
+      if (!p.fieldsAt || typeof p.fieldsAt !== 'object') p.fieldsAt = {};
+      FIN_TIMED.forEach(function (k) {
+        if (!blankVal(p[k]) || blankVal(back[k])) return;
+        p[k] = back[k];
+        if (k === 'kbPrice') { p.kbAt = back.kbAt; p.kbSource = back.kbSource; }
+        if (numOrNull(fa[k]) > 0 && !(numOrNull(p.fieldsAt[k]) > 0)) p.fieldsAt[k] = numOrNull(fa[k]);
+        changed = true;
+      });
+      ['kbHistory', 'askHistory'].forEach(function (k) {
+        if ((p[k] || []).length || !back[k].length) return;
+        p[k] = back[k];
+        changed = true;
+      });
+      if (!p.syncAt || typeof p.syncAt !== 'object') p.syncAt = {};
+      Object.keys(back.syncAt).forEach(function (k) {
+        if (!(p.syncAt[k] >= back.syncAt[k])) { p.syncAt[k] = back.syncAt[k]; changed = true; }
+      });
+    });
+    var ss = side.settings ? normalizeSettingsState(side.settings) : null;
+    if (ss && ss.finance && raw && !hasOwn(raw, 'settings') && !(s.settings && s.settings.finance)) {
+      s.settings = ss;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
    * 저장본 원문에서 1.3.0 시각(fieldsAt)이 아예 없는 매물 { id: true }.
    * 업데이트 전에 열어 둔 1.2.x 이하 탭이 쓴 매물이다. 이 탭은 항목을 지울 때 키째 지우고 시각도 남기지 않으므로,
    * 항목 단위로 합치면 그 탭에서 지운 값이 되살아날 수 있다. 그래서 이런 매물은 예전처럼 매물 단위로 합친다.
@@ -1046,7 +1260,7 @@
     var out = {};
     (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
       if (!p || typeof p !== 'object' || !p.id || BAD_KEYS[p.id]) return;
-      var miss = FIELDS_120.concat(FIELDS_160).filter(function (k) { return !hasOwn(p, k); });
+      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170).filter(function (k) { return !hasOwn(p, k); });
       if (miss.length) out[str(p.id)] = miss;
     });
     return out;
@@ -1107,7 +1321,8 @@
         if (r.changed) changed = true;
         // 1.6.0: 예전(1.5.x) 탭이 새 필드를 모른 채 저장했으면 합친 결과(내 값)를 저장본에도 되돌린다
         var miss = missing && hasOwn(missing, p.id) ? missing[p.id] : [];
-        if (FIELDS_160.some(function (k) { return miss.indexOf(k) >= 0 && !blankVal(mine[k]); })) needResave = true;
+        // 1.7.0: 대출·비용 필드도 같은 방식(나중에 늘어난 칸이라 합치면 내 값이 이기고, 저장본에는 다시 써서 되돌린다)
+        if (FIELDS_160.concat(FIELDS_170).some(function (k) { return miss.indexOf(k) >= 0 && !blankVal(mine[k]); })) needResave = true;
         return;
       }
       // 예전 버전 탭이 쓴 매물(또는 merge.js 를 못 불러옴): 매물 단위로 더 나중 것
@@ -1133,6 +1348,10 @@
     var na = numOrNull(target.ui.deviceNameAt) || 0;
     var nb = numOrNull(incoming.ui.deviceNameAt) || 0;
     if (nb > na) { target.ui.deviceName = incoming.ui.deviceName; target.ui.deviceNameAt = nb; changed = true; }
+    // 1.7.0: 전역 대출 조건은 더 나중에 바꾼 쪽
+    var ta = target.settings ? numOrNull(target.settings.financeAt) || 0 : 0;
+    var tb = incoming.settings ? numOrNull(incoming.settings.financeAt) || 0 : 0;
+    if (tb > ta) { target.settings = normalizeSettingsState(incoming.settings); changed = true; }
     return changed;
   }
 
@@ -1144,6 +1363,8 @@
     var obj = parseStored(raw);
     if (!obj || !obj.rev || str(obj.rev) === knownRev) return false;
     var changed = mergeInto(state, normalizeState(obj), missingNewFields(obj), oldTabProps(obj));
+    // 1.7.0: 예전 탭이 settings 키 없이 썼는데 내게 대출 조건이 있으면 저장본에도 되돌린다
+    if (!hasOwn(obj, 'settings') && state.settings && state.settings.finance) needResave = true;
     knownRev = str(obj.rev);
     return changed;
   }
@@ -1161,6 +1382,7 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       knownRev = state.rev;
       writeSide(state); // 1.6.0 검토 반영: 1.6.0 필드 사본(예전 탭이 지워도 되살리게)
+      writeFinSide(state); // 1.7.0: 대출·비용 값·대출 조건 사본
       dirty = false;
       lastSavedAt = Date.now();
       if (saveFailed) { saveFailed = false; showSaveError(null); }
@@ -1187,6 +1409,7 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(candidate));
       knownRev = candidate.rev;
       writeSide(candidate);
+      writeFinSide(candidate); // 1.7.0
       return true;
     } catch (e) {
       // 1.4.5: 실패 표시를 남겨야 다음 성공 저장(saveNow)이 빨간 띠를 지운다(전에는 새로고침할 때까지 남았음)
@@ -2198,7 +2421,9 @@
   /**
    * 하단 시트 형태의 대화상자. 결과: Promise<{ value, text }>
    * opts: { title, message, content(Node), className(1.6.0 검토 반영: .modal 에 더할 클래스), input: { placeholder, value, label, match, multiline },
-   *         buttons: [{ label, value, kind: 'primary'|'danger'|'danger-ghost'|'secondary'|'accent', needsMatch, action, keepOpen }] }
+   *         initialFocus(1.7.0: 처음 초점을 줄 요소, content 안),
+   *         buttons: [{ label, value, kind: 'primary'|'danger'|'danger-ghost'|'secondary'|'accent', needsMatch, action, keepOpen,
+   *                     validate(1.7.0: 누를 때 false 를 돌려주면 닫지 않음) }] }
    *   'danger-ghost' 은 위험하지만 주 버튼이 아닌 동작(테두리만 빨강). 첫 초점은 'danger' 일 때만 취소로 간다
    * 1.4.1: 연 뒤 DIALOG_GUARD_MS(0.4초) 동안은 버튼·바탕 누름을 무시한다. 폭이 좁으면 하단 시트의 [지우기]가 방금 누른
    *   [N개 삭제]와 같은 자리에 떠서, 두 번 빠르게 누르면 이름 목록을 보기도 전에 지워졌다
@@ -2263,6 +2488,7 @@
         var btn = h('button', { type: 'button', class: 'btn btn-block ' + cls }, b.label);
         btn.addEventListener('click', function () {
           if (tooSoon()) return; // 대화상자를 연 누름이 한 번 더 들어온 것
+          if (b.validate && !b.validate()) return; // 1.7.0 검토 반영: 칸 검사가 틀리면 닫지 않는다(오류는 validate 가 칸 아래에 보임)
           if (b.action) b.action(); // 공유·복사처럼 사용자 동작 안에서 바로 실행해야 하는 일
           if (!b.keepOpen) finish(b.value === undefined ? true : b.value);
         });
@@ -2282,7 +2508,7 @@
       // 지우기 같은 위험한 대화상자는 실수로 Enter 를 눌러도 안전하도록 '취소'에 먼저 초점
       var hasDanger = (opts.buttons || []).some(function (b) { return b.kind === 'danger'; });
       setTimeout(function () {
-        var target = inputEl ||
+        var target = (opts.initialFocus && document.contains(opts.initialFocus) ? opts.initialFocus : null) || inputEl ||
           (hasDanger ? actions.querySelector('.btn-ghost:not([disabled])') : null) ||
           actions.querySelector('button:not([disabled])');
         if (target) try { target.focus({ preventScroll: true }); } catch (e) { /* 무시 */ }
@@ -2558,7 +2784,10 @@
       ),
       h('p', { class: 'pcard-price', id: idBase ? idBase + '-price' : null },
         p.askPrice ? '호가 ' + formatManwon(p.askPrice) : '호가 입력 안 함',
-        diff !== null ? h('span', { class: 'pcard-diff', text: ' · 실거래 대비 ' + pctText(diff) }) : null
+        diff !== null ? h('span', { class: 'pcard-diff', text: ' · 실거래 대비 ' + pctText(diff) }) : null,
+        // 1.7.0: KB시세 작은 칩(없으면 생략). 칩 앞의 공백은 화면 읽기에서 숫자가 붙어 읽히지 않게
+        p.kbPrice ? ' ' : null,
+        p.kbPrice ? h('span', { class: 'kb-chip', title: 'KB시세' + (p.kbAt ? ' (' + formatISODate(p.kbAt) + ')' : ''), text: 'KB ' + kbShort(p.kbPrice) }) : null
       ),
       makeBar(prog.pct, '진행 ' + prog.pct + '%', { ariaLabel: '체크리스트 진행률' }).el,
       h('div', { class: 'pcard-meta' },
@@ -3843,6 +4072,8 @@
     v.refs.prevStopCount = prop.status === 'dropped' ? 0 : flagsYes(prop, 'stop').length;
     main.append(v.refs.alerts);
     renderAlerts(prop); // 제안 줄(refreshFlowHint)도 이 안에서 같이 그린다
+    // 1.7.0: 대출·비용(추정) 카드. 접힌 머리 줄에 필요 현금·대출 한도 요약(펼친 상태는 이 탭에서 기억)
+    main.append(finCard(prop));
 
     // 사진 저장소를 쓸 수 없는 환경(파일로 열기 등)이면 사진 버튼 대신 이 안내가 보인다(CSS .no-photos)
     main.append(h('p', { class: 'notice photo-off-note', role: 'note', text: '이 환경에서는 사진을 저장할 수 없어요. HTTPS 주소(또는 홈 화면 앱)로 열면 사진을 붙일 수 있어요. 메모는 그대로 저장돼요.' }));
@@ -6495,6 +6726,8 @@
     block('재방문 기록', S.visits.map(function (r) {
       return '- [' + visitLabel(r.st) + '] ' + r.it.text + (r.st.date ? ' (' + formatISODate(r.st.date) + ')' : '') + withMemo(r);
     }));
+    // 1.7.0: 돈 계산(추정). 숫자만 넣고(판정 없음), 사람 이름은 넣지 않는다
+    block('돈 계산 (추정)', finShareLines(prop));
     var memoLines = [];
     if (prop.memo && prop.memo.trim()) memoLines.push('- 매물 메모: ' + memoText(prop.memo));
     S.sectionMemos.forEach(function (m) { memoLines.push('- ' + m.sec.title + ': ' + memoText(m.memo)); });
@@ -6563,6 +6796,917 @@
     });
   }
 
+  // ---------------- 1.7.0 대출·비용 (finance.js) ----------------
+  // 상세 '대출·비용' 카드(finCard), 홈 카드 KB 칩, 비교 열, 공유 글, 다시 붙여넣기 갱신(refresh*)이 같이 쓴다.
+  // 모든 수치는 추정이다. 어느 집을 사라·사지 말라는 판정은 하지 않는다(사실과 숫자만, 가장 낮은 값 강조도 하지 않음).
+  // 매물 값(KB시세·협상가·리모델링비·공시가격)은 fieldsAt 시각을 남기고(합치기), 대출 조건은 state.settings(financeAt)에 둔다.
+  var finCache = {}; // 매물id → { key(입력 서명), val(finCalc 결과) }
+  var FIN_OPEN_KEY = 'imjang.fin.open'; // 상세 '대출·비용' 카드를 펼쳐 두었는지(sessionStorage)
+  var HIST_SOURCE_LABEL = { naver: '네이버 글', code: 'Claude 코드', manual: '직접 입력' };
+
+  /** 이력의 출처: 네이버 글(또는 네이버 글로 만든 코드)이면 'naver', Claude 코드면 'code' */
+  function finSourceOf(res) { return res && res.source === 'naver' ? 'naver' : 'code'; }
+  /** ms → 이 기기 날짜 'YYYY-MM-DD' (없으면 '') */
+  function isoDateOf(ms) {
+    if (!(ms > 0)) return '';
+    var d = new Date(ms);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  /**
+   * 가져오기 결과 매물(p, import-parser 가 정리한 값)의 1.7.0 값을 새 매물 원본(raw)에 넣는다.
+   * KB시세 기준일이 없으면 가져온 날(today). 첫 이력(KB시세·호가)과 가져오기 시각(syncAt)도 남긴다. t: 그 매물의 시각
+   */
+  function importFinInto(raw, p, hsrc, today, t) {
+    var sync = {};
+    FIN_TIMED.forEach(function (k) {
+      if (k === 'dealPrice' || k === 'remodelCost' || k === 'publicPrice') return; // 사용자가 넣는 칸
+      if (p[k] === null || p[k] === undefined || p[k] === '') return;
+      raw[k] = p[k];
+      sync[k] = t;
+    });
+    if (raw.kbPrice) {
+      raw.kbAt = isoDateOr(p.kbAt) || today;
+      raw.kbSource = hsrc;
+      raw.kbHistory = [{ value: raw.kbPrice, at: raw.kbAt, source: hsrc, t: t }];
+    }
+    if (p.askPrice) { raw.askHistory = [{ value: p.askPrice, at: today, source: hsrc, t: t }]; sync.askPrice = t; }
+    if (p.realPrice) sync.realPrice = t;
+    raw.syncAt = sync;
+  }
+
+  /**
+   * 1.7.0 검토 반영: 재산세를 계산할 해 = 지금 사는 사람이 처음 내는 해. 재산세는 6월 1일에 가진 사람이 그해 몫을 내므로
+   * 6월 이후(오늘이 6~12월)면 다음 해분, 1~5월이면 그해분. 2026-10 이면 2027년분(지금 법 그대로: 비율 60%·표준세율)
+   */
+  function finTaxYear() {
+    var d = new Date();
+    return d.getMonth() >= 5 ? d.getFullYear() + 1 : d.getFullYear();
+  }
+  /** 지금 대출 조건(finance.js 기본값 + 사용자가 바꾼 값) */
+  function finSettings() { return FIN ? FIN.normalizeSettings(state.settings && state.settings.finance) : null; }
+  /** 계산에 쓰는 매매가: 협상가가 있으면 협상가, 없으면 호가(만원) */
+  function finPrice(p) { return p.dealPrice || p.askPrice || null; }
+  /** 관리비 월평균(원): 관리비 묶음의 월 평균, 없으면 기본 정보의 관리비 */
+  function finFeeWon(p) { return p.feeAvg || p.feeMonthly || null; }
+
+  /**
+   * 매물 하나의 추정치 → { settings, price, priceKind('deal'|'ask'|''), cash(cashNeeded|null), limit(loanLimit|null),
+   *   pay(payment|null), hold(holdingCost|null) } | null(finance.js 없음). 입력이 같으면 다시 계산하지 않는다(홈 정렬·비교에서 여러 번 부름)
+   */
+  function finCalc(p) {
+    if (!FIN) return null;
+    var taxYear = finTaxYear();
+    var key = [JSON.stringify(state.settings && state.settings.finance || null), p.askPrice, p.dealPrice, p.kbPrice, p.area,
+      p.remodelCost, p.publicPrice, p.feeAvg, p.feeMonthly, taxYear].join('|');
+    var c = hasOwn(finCache, p.id) ? finCache[p.id] : null;
+    if (c && c.key === key) return c.val;
+    var s = finSettings();
+    var price = finPrice(p);
+    var fee = finFeeWon(p);
+    var cash = price ? FIN.cashNeeded({ price: price, kb: p.kbPrice, areaM2: p.area, remodel: p.remodelCost || 0, feeAvg: fee,
+      publicPrice: p.publicPrice, settings: s }) : null;
+    if (cash && !cash.ok) cash = null;
+    var limit = cash ? cash.loanInfo : FIN.loanLimit({ price: price, kb: p.kbPrice, settings: s });
+    if (limit && !limit.ok) limit = null;
+    var hold = FIN.holdingCost({ price: price, kb: p.kbPrice, publicPrice: p.publicPrice, feeAvg: fee,
+      loan: cash ? cash.loan : (limit ? limit.limit : null), settings: s, year: taxYear });
+    if (!hold.ok) hold = null;
+    var pay = cash ? cash.payment : (hold && hold.payment ? hold.payment : null);
+    if (pay && !pay.ok) pay = null;
+    var val = { settings: s, price: price, priceKind: p.dealPrice ? 'deal' : p.askPrice ? 'ask' : '', cash: cash, limit: limit, pay: pay, hold: hold };
+    finCache[p.id] = { key: key, val: val };
+    return val;
+  }
+  function finCashOf(p) { var c = finCalc(p); return c && c.cash ? c.cash.cash : null; }
+  /** 호가가 KB시세보다 몇 % 높은지(둘 다 있어야). 정렬용 숫자일 뿐 판정이 아니다 */
+  function kbGapOf(p) { return p.askPrice && p.kbPrice ? (p.askPrice - p.kbPrice) / p.kbPrice * 100 : null; }
+
+  /** 만원 → '1억 2,775만원'·'64.7만원'(소수가 있으면 한 자리)·'7,500원'. 숫자가 아니면 '-' */
+  function manText(v) {
+    if (typeof v !== 'number' || !isFinite(v)) return '-';
+    var t = FIN ? FIN.formatMan(v, Math.round(Math.abs(v) * 10) % 10 ? 1 : 0) : formatManwon(v);
+    return /[억만]$/.test(t) ? t + '원' : t;
+  }
+  /** 원 → '13만 8,552원' · '15만원' */
+  function wonText(won) {
+    if (typeof won !== 'number' || !isFinite(won) || won <= 0) return '-';
+    var man = Math.floor(won / 10000);
+    var rest = won % 10000;
+    return (man ? formatNumber(man) + '만' + (rest ? ' ' : '') : '') + (rest ? formatNumber(rest) : '') + '원';
+  }
+  /** 홈 카드 칩용 짧은 KB시세: '2억 3,450' (1억 미만은 '9,500만') */
+  function kbShort(v) {
+    var t = FIN ? FIN.formatMan(v) : formatManwon(v).replace(/원$/, '');
+    return /억/.test(t) ? t.replace(/만$/, '') : t;
+  }
+  function rateText(r) {
+    if (!r) return '';
+    return r.min + '%' + (r.max !== null && r.max !== undefined && r.max !== r.min ? '~' + r.max + '%' : '') + (r.bank ? ' · ' + r.bank : '');
+  }
+  /** 'YYYY-MM' → '2026년 7월' */
+  function monthText(m) { var x = /^(\d{4})-(\d{2})$/.exec(str(m)); return x ? x[1] + '년 ' + parseInt(x[2], 10) + '월' : str(m); }
+  /** 기간 표시: 30 → '30년', 30.5 → '30.5년' (전에는 Math.round 로 '31년') */
+  function yearsText(y) { return (Math.round(y * 10) / 10) + '년'; }
+  /** 계산에 실제로 쓰는 LTV·기간(규칙상 최대를 넘으면 finance.js 가 낮춘 값). c: finCalc 결과(없어도 됨) */
+  function finUsed(s, c) {
+    var ltv = c && c.limit ? c.limit.ltv : Math.min(s.ltv, FIN.suggestLtv(s));
+    var maxY = FIN.RULES.capitalMaxYears;
+    var years = c && c.pay ? c.pay.years : ((s.capitalArea || s.regulated) && s.years > maxY ? maxY : s.years);
+    return { ltv: ltv, years: years };
+  }
+  /**
+   * 대출 조건 한 줄: 'LTV 70% · 연 4.5% · 30년 · 원리금균등 · 생애최초 · 방공제 과밀억제권역 4,800만 · 수도권 · 특별·광역시'.
+   * 1.7.0 검토 반영: 넣은 값이 아니라 실제 계산에 쓴 LTV·기간을 적고, 다르면 넣은 값을 함께 적는다(카드·공유 글이 같은 문구)
+   *   예 'LTV 40%(규칙상 최대. 넣은 값 70%) · … · 30년(수도권·규제지역 최대. 넣은 값 40년)'
+   */
+  function finCondText(s, c) {
+    if (!s || !FIN) return '';
+    var bg = null;
+    FIN.BANG_GONGJE.forEach(function (b) { if (b.key === s.bangGongje) bg = b; });
+    var u = finUsed(s, c);
+    return ['LTV ' + u.ltv + '%' + (u.ltv !== s.ltv ? '(규칙상 최대. 넣은 값 ' + s.ltv + '%)' : ''),
+      '연 ' + s.ratePct + '%',
+      yearsText(u.years) + (u.years !== s.years ? '(수도권·규제지역 최대. 넣은 값 ' + yearsText(s.years) + ')' : ''),
+      FIN.METHOD_LABEL[s.method] || '',
+      s.firstHome ? '생애최초' : '생애최초 아님', s.birthRelief ? '출산·양육 감면' : '',
+      bg ? (bg.key === 'none' ? '방공제 빼지 않음' : '방공제 ' + bg.label) : '',
+      s.regulated ? '규제지역' : s.capitalArea ? '수도권' : '지방', s.metroCity ? '특별·광역시' : ''].filter(Boolean).join(' · ');
+  }
+
+  /** 값 이력에 한 줄 더한다(합치기와 같은 규칙: 날짜·값·출처·시각이 같으면 하나, 최근 HISTORY_MAX 개) */
+  function pushHistory(list, e) {
+    if (MG && MG.mergeHistory) return MG.mergeHistory(list, [e]);
+    var out = (Array.isArray(list) ? list : []).concat([e]);
+    return out.length > HISTORY_MAX ? out.slice(out.length - HISTORY_MAX) : out;
+  }
+  /** 이력의 마지막 값이 지금 값과 다르면(직접 고쳤거나 예전 버전이 넣은 값) 지금 값을 먼저 남긴다 */
+  function keepCurrentInHistory(prop, histKey, cur, at, source, t) {
+    var list = Array.isArray(prop[histKey]) ? prop[histKey] : [];
+    var last = list.length ? list[list.length - 1] : null;
+    if (cur === null || cur === undefined || (last && last.value === cur)) return;
+    var e = { value: cur, at: at || '', source: source };
+    if (t > 0) e.t = t;
+    prop[histKey] = pushHistory(list, e);
+  }
+
+  /** 대출·비용 칸 하나를 바꾸고 시각을 남긴다(합치기: 칸마다 더 나중에 고친 쪽) */
+  function setFinField(prop, key, value) {
+    if (sameValue(prop[key], value)) return;
+    var t = prop.fieldsAt[key] = stampAfter(Date.now(), prop.fieldsAt[key], prop.legacyAt);
+    prop[key] = value;
+    touch(prop, t);
+  }
+  /**
+   * KB시세를 직접 넣거나(값) 지운다(null). 직접 넣은 값은 출처 'manual', 기준일은 오늘. 바꿨으면 true.
+   * 1.7.0 검토 반영: 지금 값과 같으면 아무것도 바꾸지 않는다(전에는 값 그대로 [저장]만 눌러도 출처가 '직접 입력'이 되고
+   * 이력이 한 줄씩 늘어, 다시 붙여넣기에서 '직접 고친 값'으로 나오고 처음 가져온 이력이 밀려났음)
+   */
+  function setKbManual(prop, value) {
+    if (sameValue(prop.kbPrice, value)) return false;
+    var now = Date.now();
+    var prevT = numOrNull(prop.fieldsAt.kbPrice) || 0;
+    var t = prop.fieldsAt.kbPrice = stampAfter(now, prop.fieldsAt.kbPrice, prop.legacyAt);
+    if (prop.kbPrice !== null) keepCurrentInHistory(prop, 'kbHistory', prop.kbPrice, prop.kbAt, prop.kbSource || 'manual', prevT);
+    prop.kbPrice = value;
+    prop.kbAt = value === null ? '' : todayISO();
+    prop.kbSource = value === null ? '' : 'manual';
+    if (value !== null) prop.kbHistory = pushHistory(prop.kbHistory, { value: value, at: prop.kbAt, source: 'manual', t: t });
+    touch(prop, t);
+    return true;
+  }
+
+  // ---- 다시 붙여넣기 갱신(가져오기 화면의 "이미 담은 매물이에요") ----
+  // 바뀔 수 있는 값. hand: 사용자가 손으로 고칠 수 있는 칸(고쳤으면 덮어쓰기 전에 묻는다). 호수·메모·체크 기록 등은 넣지 않는다(절대 덮어쓰지 않음)
+  var REFRESH_FIELDS = [
+    { k: 'kbPrice', label: 'KB시세', kind: 'man', hand: true },
+    { k: 'kbAt', label: 'KB시세 기준일', kind: 'date' },
+    { k: 'askPrice', label: '호가', kind: 'man', hand: true },
+    { k: 'realPrice', label: '최근 실거래가', kind: 'man', hand: true },
+    { k: 'naverLoanLimit', label: '대출 한도(네이버 계산)', kind: 'man' },
+    { k: 'naverRate', label: '최저 금리(네이버)', kind: 'rate' },
+    { k: 'feeMonthly', label: '관리비(기본 정보)', kind: 'won' },
+    { k: 'feeAvg', label: '관리비 월 평균', kind: 'won' },
+    { k: 'feeSummer', label: '관리비 여름 평균', kind: 'won' },
+    { k: 'feeWinter', label: '관리비 겨울 평균', kind: 'won' },
+    { k: 'feeRecent', label: '최근 관리비', kind: 'recent' },
+    { k: 'acqTaxNaver', label: '취득세 합계(네이버)', kind: 'won' },
+    { k: 'propertyTaxNaver', label: '재산세 합계(네이버)', kind: 'won' },
+    { k: 'confirmedAt', label: '확인매물 날짜', kind: 'text' }
+  ];
+  /** 가져오기 결과 매물 → 앱 범위로 정리한 새 값들 */
+  function refreshValues(np) {
+    var o = finFieldsInto({}, np);
+    o.askPrice = finNum(np.askPrice, 'askPrice');
+    o.realPrice = finNum(np.realPrice, 'realPrice');
+    o.confirmedAt = str(np.confirmedAt).trim();
+    return o;
+  }
+  function finValText(kind, v) {
+    if (v === null || v === undefined || v === '') return '없음';
+    if (kind === 'man') return manText(v);
+    if (kind === 'won') return wonText(v);
+    if (kind === 'rate') return rateText(v);
+    if (kind === 'recent') return monthText(v.month) + ' ' + wonText(v.amount);
+    if (kind === 'date') return formatISODate(v);
+    return str(v);
+  }
+  function sameFinVal(a, b) {
+    if (sameValue(a, b)) return true;
+    return !!a && !!b && typeof a === 'object' && typeof b === 'object' && JSON.stringify(a) === JSON.stringify(b);
+  }
+  /**
+   * 손으로 고친 값인지: KB시세는 직접 넣은 것(manual), 나머지는 가져오기가 넣은 뒤(syncAt, 없으면 가져온 시각) 고친 칸.
+   * 1.7.0 검토 반영: 예전(1.2.x 이하) 기록은 fillTimes 가 모든 칸 시각을 legacyAt(= 처음 읽은 때의 updatedAt)으로 채운다.
+   * 그 시각은 "그때 값을 알고 있었다"는 뜻일 뿐 고친 시각이 아니므로, 기준을 legacyAt 까지 올린다(전에는 체크 항목 하나만 고친
+   * 예전 매물의 호가·실거래가가 '직접 고친 값'으로 나왔음)
+   */
+  function handEdited(prop, k) {
+    if (prop[k] === null || prop[k] === undefined || prop[k] === '') return false;
+    if (k === 'kbPrice') return prop.kbSource === 'manual';
+    var t = numOrNull(prop.fieldsAt && prop.fieldsAt[k]) || 0;
+    var s = numOrNull(prop.syncAt && prop.syncAt[k]) || numOrNull(prop.importedAt) || 0;
+    var legacy = numOrNull(prop.legacyAt) || 0;
+    if (s && legacy > s) s = legacy;
+    return !s || t > s;
+  }
+  /** 저장된 매물(prop)과 새로 읽은 값(np)의 차이 [{ k, label, from, to, hand }]. 새 글에 없는 값은 바꾸지 않는다(그대로 둠) */
+  function refreshChanges(prop, np) {
+    var vals = refreshValues(np);
+    var out = [];
+    REFRESH_FIELDS.forEach(function (f) {
+      var nv = vals[f.k];
+      if (nv === null || nv === undefined || nv === '') return;
+      if (f.k === 'kbAt') { // KB시세가 그대로이고 새 기준일이 더 나중일 때만(값이 바뀌면 KB시세 줄이 함께 바꿈)
+        if (prop.kbPrice === null || vals.kbPrice !== prop.kbPrice || !(nv > str(prop.kbAt))) return;
+      } else if (sameFinVal(prop[f.k], nv)) return;
+      out.push({ k: f.k, label: f.label, from: finValText(f.kind, prop[f.k]), to: finValText(f.kind, nv), hand: !!f.hand && handEdited(prop, f.k) });
+    });
+    return out;
+  }
+  /**
+   * 고른 값(keys)만 새 값으로 바꾼다. KB시세·호가는 바꾸기 전 값을 이력에 남기고 새 값도 이력에 더한다.
+   * 칸마다 fieldsAt·syncAt 을 같은 시각으로 찍어(다음에 "손으로 고친 값"을 가릴 수 있게) touch 한다. 호수 등 다른 칸은 건드리지 않는다
+   */
+  function applyRefresh(prop, np, keys, hsrc) {
+    var vals = refreshValues(np);
+    var now = Date.now();
+    var today = todayISO();
+    var last = 0;
+    if (!prop.syncAt || typeof prop.syncAt !== 'object') prop.syncAt = {};
+    var oldSrc = prop.source === 'naver-text' ? 'naver' : prop.importedAt ? 'code' : 'manual';
+    // 시각을 찍기 전에: 지금 호가가 손으로 고친 값인지, 언제 들어온 값인지(이력에 남길 때 씀)
+    var askHand = handEdited(prop, 'askPrice');
+    var askT = numOrNull(prop.fieldsAt.askPrice) || 0;
+    var askAt = isoDateOf(askT || prop.importedAt || prop.createdAt);
+    var kbT = numOrNull(prop.fieldsAt.kbPrice) || 0;
+    keys.forEach(function (k) {
+      if (k === 'confirmedAt') { prop.confirmedAt = vals.confirmedAt; return; } // 가져오기 값(시각 없이 합침)
+      var fk = k === 'kbAt' ? 'kbPrice' : k;
+      var t = prop.fieldsAt[fk] = stampAfter(now, prop.fieldsAt[fk], prop.legacyAt);
+      prop.syncAt[fk] = t;
+      if (t > last) last = t;
+      if (fk === 'kbPrice') {
+        var kb = k === 'kbAt' ? prop.kbPrice : vals.kbPrice;
+        keepCurrentInHistory(prop, 'kbHistory', prop.kbPrice, prop.kbAt, prop.kbSource || oldSrc, kbT);
+        prop.kbPrice = kb;
+        prop.kbAt = vals.kbAt || today;
+        prop.kbSource = hsrc;
+        // 1.7.0 검토 반영: 이력에는 값이 바뀐 것만 남긴다. 값은 그대로이고 기준일만 새로우면(네이버 글은 늘 '오늘') 줄을 더하지 않는다.
+        // 전에는 다른 날 다시 붙여 넣을 때마다 같은 값이 한 줄씩 쌓여 20줄 안에서 실제로 바뀐 기록이 밀려났음
+        var kh = Array.isArray(prop.kbHistory) ? prop.kbHistory : [];
+        if (!kh.length || kh[kh.length - 1].value !== kb) prop.kbHistory = pushHistory(kh, { value: kb, at: prop.kbAt, source: hsrc, t: t });
+        return;
+      }
+      if (fk === 'askPrice') {
+        keepCurrentInHistory(prop, 'askHistory', prop.askPrice, askAt, askHand ? 'manual' : oldSrc, askT);
+        prop.askHistory = pushHistory(prop.askHistory, { value: vals.askPrice, at: today, source: hsrc, t: t });
+      }
+      prop[fk] = vals[fk];
+    });
+    touch(prop, last || now);
+  }
+  /** 층 글 → 해당층 숫자: '12/25' → 12, '3층' → 3, '중/25'·'' → null */
+  function floorNum(f) {
+    var m = /^\s*(\d{1,3})(?:\s*층)?(?:\s*\/|\s*$)/.exec(str(f));
+    return m ? parseInt(m[1], 10) : null;
+  }
+  /** 호수 → 층: '1203' → 12, '302호' → 3. 세 자리·네 자리 숫자일 때만(그 밖은 null) */
+  function floorOfHo(ho) {
+    var m = /^\s*(\d{3,4})\s*호?\s*$/.exec(str(ho));
+    return m ? Math.floor(parseInt(m[1], 10) / 100) : null;
+  }
+  /**
+   * 다시 붙여넣기: 같은 매물(매물번호 → 링크 → 단지명·동·면적·호가, 1.4.1 느슨한 판정)으로 이미 담은 매물. 없으면 null.
+   * 1.7.0 검토 반영: 판정의 확실한 정도도 → { prop, by('a'|'u'|'n'|'loose'), sure, warn: [쉬운 말], floorConflict }.
+   * 매물번호·링크로 같다고 본 것은 확실(sure). 단지명 조합(n)·느슨한 판정은 ① 매물번호(링크)가 한쪽에만 있거나 ② 층이 한쪽에만
+   * 있거나 ③ 담은 매물의 호수에서 나온 층과 새 글의 층이 다르거나(floorConflict) ④ 매물번호도 층도 양쪽에 없거나 ⑤ 느슨한 판정이면
+   * 다른 집일 수 있다고 알린다(warn, sure false).
+   * 전에는 층 없이 담은 1203호 매물에 같은 단지·동·면적·호가인 3층 매물 글을 붙여 넣으면 [바꾸기]로 다른 집의 값이 들어갔음
+   */
+  function existingMatch(np, idx) {
+    if (!IMP) return null;
+    var hit = IMP.findDuplicate(np, idx, null);
+    var prop = null, by = '';
+    if (hit && hit.kind === 'exists' && hit.prop) { prop = hit.prop; by = hit.by || 'n'; }
+    else {
+      var nm = searchKey(np.name);
+      var dong = IMP.dongOf(np.dong);
+      if (!nm || !np.askPrice) return null;
+      var c = state.properties.filter(function (p) { return searchKey(p.name) === nm && IMP.dongOf(p.dong) === dong && p.askPrice === np.askPrice; });
+      if (c.length !== 1) return null;
+      prop = c[0];
+      by = 'loose';
+    }
+    var warn = [];
+    var conflict = false;
+    if (by === 'n' || by === 'loose') {
+      if (by === 'loose') warn.push('단지·동·호가만 같아요(면적·매물번호로 확인하지 못했어요)');
+      // 매물번호(없으면 링크): 양쪽에 있었다면 앞 단계(a·u)가 정했으므로 여기서는 많아야 한쪽에만 있다
+      var na = str(np.articleNo).trim() || str(np.sourceUrl).trim(), pa = str(prop.articleNo).trim() || str(prop.sourceUrl).trim();
+      if (!!na !== !!pa) warn.push(na ? '담아 둔 매물에는 매물번호가 없어요' : '새 글에는 매물번호가 없어요');
+      var nf = str(np.floor).trim(), pf = str(prop.floor).trim();
+      var hoF = floorOfHo(prop.ho), newF = floorNum(nf);
+      if (!pf && nf && hoF !== null && newF !== null && hoF !== newF) {
+        conflict = true;
+        warn.push('담아 둔 매물은 ' + str(prop.ho).trim() + '호(' + hoF + '층)인데 새 글은 ' + newF + '층이에요');
+      } else if (!!nf !== !!pf) {
+        warn.push(nf ? '담아 둔 매물에는 층 정보가 없어요(새 글 ' + floorText(nf) + ')' : '새 글에는 층 정보가 없어요');
+      }
+      if (by === 'n' && !na && !pa && !nf && !pf) warn.push('매물번호와 층이 없어 단지·동·면적·호가로만 같다고 봤어요');
+    }
+    return { prop: prop, by: by, sure: !warn.length, warn: warn, floorConflict: conflict };
+  }
+  /** 손으로 고친 값을 덮어쓸지 고르게 한다(기본은 그대로 둠). others: 함께 바뀌는 다른 값 이름. 결과 Promise: { 칸: true }(고른 것), [취소]면 null */
+  function confirmHandOverwrite(list, others) {
+    var boxes = [];
+    var ul = h('ul', { class: 'rp-over' }, list.map(function (c) {
+      var id = 'imp-hand-' + domId(c.k);
+      var cb = h('input', { type: 'checkbox', id: id, checked: false });
+      boxes.push({ k: c.k, cb: cb });
+      return h('li', {}, h('label', { class: 'rp-check', for: id }, cb,
+        h('span', { text: c.label + ': 지금 ' + c.from + '(직접 고친 값) → 새 ' + c.to })));
+    }));
+    // 1.7.0 검토 반영: '그대로'를 두 뜻으로 쓰지 않는다. 체크한 값만 바꾸고, 함께 바뀌는 다른 값은 이름을 적는다
+    var rest = (others || []).length ? '나머지 바뀐 값(' + others.join(', ') + ')은 새 값으로 바꿔요.' : '';
+    return openDialog({
+      title: '직접 고친 값이 있어요. 바꿀까요?',
+      content: h('div', { class: 'rp-over-box' },
+        h('p', { class: 'small muted', text: '체크한 값만 새 값으로 바꿔요. 체크하지 않은 값은 지금 값을 그대로 둬요. ' + rest }), ul),
+      buttons: [
+        { label: '바꾸기', value: 'go' },
+        { label: '취소', value: null, kind: 'secondary' }
+      ]
+    }).then(function (r) {
+      if (r.value !== 'go') return null;
+      var over = {};
+      boxes.forEach(function (b) { if (b.cb.checked) over[b.k] = true; });
+      return over;
+    });
+  }
+
+  // ---- 상세 '대출·비용' 카드 ----
+  var FIN_INPUT_LABEL = { kbPrice: 'KB시세', dealPrice: '협상가', remodelCost: '리모델링비', publicPrice: '공시가격' };
+  /** 1.7.0 검토 반영: 범위 밖 값의 안내(칸 이름과 고치는 법). 너무 크면 원 단위로 적었을 수 있다 */
+  function finRangeError(key, n) {
+    var r = FIN_NUM_RANGE[key], name = FIN_INPUT_LABEL[key] || '이 값';
+    return (n > r[1] ? josa(name, '이', '가') + ' 너무 커요. ' : josa(name, '은', '는') + ' ' + manText(r[0]) + ' 이상으로 적어 주세요. ') +
+      '만원 단위 숫자예요. (2억 3,450만원 → 23450) 이 값은 저장하지 않았어요.';
+  }
+  /**
+   * 만원 입력 칸(협상가·리모델링비·공시가격). 입력을 멈추면(0.35초) 저장하고 아래 계산만 다시 그린다.
+   * 1.7.0 검토 반영: readManInput 으로 읽는다('1.9억'·'1억 9천' → 19000). 못 읽거나 범위 밖이면 저장하지 않고 칸 아래에 알린다
+   */
+  function finInputField(prop, key, id, label, hint, placeholder) {
+    var inp = h('input', {
+      class: 'input', id: id, type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'done', autocomplete: 'off',
+      value: prop[key] !== null && prop[key] !== undefined ? String(prop[key]) : '', placeholder: placeholder || '',
+      'aria-describedby': id + '-live ' + id + '-err ' + id + '-hint'
+    });
+    var live = h('p', { class: 'field-live', id: id + '-live', 'aria-live': 'polite' });
+    var err = h('p', { class: 'field-error', id: id + '-err', role: 'alert', hidden: true });
+    var timer = null;
+    function show() {
+      var r = readManInput(inp.value);
+      live.textContent = !r.bad && r.value !== null ? '= ' + manText(r.value) : '';
+    }
+    function fail(text) {
+      err.textContent = text;
+      err.hidden = false;
+      inp.setAttribute('aria-invalid', 'true');
+    }
+    function commit() {
+      clearTimeout(timer);
+      timer = null;
+      if (!findProp(prop.id)) return;
+      var r = readManInput(inp.value);
+      if (r.bad) { fail(manInputError(r.bad)); return; }
+      var n = r.value;
+      if (n !== null && finNum(n, key) === null) { fail(finRangeError(key, n)); return; }
+      err.hidden = true;
+      inp.removeAttribute('aria-invalid');
+      if (sameValue(prop[key], n)) return;
+      setFinField(prop, key, n);
+      drawFinResults(prop);
+    }
+    inp.addEventListener('input', function () { show(); clearTimeout(timer); timer = setTimeout(commit, 350); });
+    inp.addEventListener('change', commit);
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); commit(); inp.blur(); }
+    });
+    show();
+    return h('div', { class: 'field fin-field' },
+      h('label', { for: id, text: label }),
+      h('div', { class: 'input-unit' }, inp, h('span', { class: 'unit', 'aria-hidden': 'true', text: '만원' })),
+      live, err,
+      h('p', { class: 'field-hint', id: id + '-hint', text: hint }));
+  }
+
+  /** KB시세 직접 입력 칸 + [저장]. editing: 이미 KB시세가 있어 고치는 중([취소]·[지우기] 보임) */
+  function kbEditor(prop, editing) {
+    var inp = h('input', {
+      class: 'input', id: 'fin-kb-input', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'done', autocomplete: 'off',
+      value: editing && prop.kbPrice !== null ? String(prop.kbPrice) : '', placeholder: '예: 23450', 'aria-describedby': 'fin-kb-live fin-kb-err fin-kb-hint'
+    });
+    var live = h('p', { class: 'field-live', id: 'fin-kb-live', 'aria-live': 'polite' });
+    var err = h('p', { class: 'field-error', id: 'fin-kb-err', role: 'alert', hidden: true });
+    function show() { var r = readManInput(inp.value); live.textContent = !r.bad && r.value !== null ? '= ' + manText(r.value) : ''; }
+    function save() {
+      var r = readManInput(inp.value);
+      var n = r.value;
+      // 1.7.0 검토 반영: '2.3억'을 23(만원)으로 읽지 않는다. 값이 지금과 같으면 아무것도 바꾸지 않고 칸만 닫는다(setKbManual)
+      if (r.bad) { err.textContent = manInputError(r.bad); err.hidden = false; return; }
+      if (n === null) {
+        if (!editing) { err.textContent = 'KB시세를 만원 단위 숫자로 적어 주세요. (2억 3,450 → 23450)'; err.hidden = false; return; }
+        if (setKbManual(prop, null)) toast('KB시세를 지웠어요');
+      } else if (finNum(n, 'kbPrice') === null) {
+        err.textContent = finRangeError('kbPrice', n);
+        err.hidden = false;
+        return;
+      } else {
+        toast(setKbManual(prop, n) ? 'KB시세를 저장했어요' : '지금 KB시세와 같아서 그대로 두었어요');
+      }
+      saveNow();
+      drawFinBody(prop, 'fin-kb');
+    }
+    inp.addEventListener('input', function () { show(); err.hidden = true; });
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); save(); }
+    });
+    show();
+    return h('div', { class: 'field fin-kb-edit' },
+      h('label', { for: 'fin-kb-input', text: editing ? 'KB시세 고치기' : 'KB시세 직접 입력' }),
+      h('div', { class: 'input-unit' }, inp, h('span', { class: 'unit', 'aria-hidden': 'true', text: '만원' })),
+      live, err,
+      h('p', { class: 'field-hint', id: 'fin-kb-hint', text: 'KB부동산 앱이나 은행에서 본 일반평균가를 만원 단위로 적어요. (2억 3,450 → 23450)' + (editing ? ' 비우고 저장하면 지워요.' : '') }),
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn btn-small', id: 'fin-kb-save', onclick: save }, 'KB시세 저장'),
+        editing ? h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: function () { drawFinBody(prop, 'fin-kb'); } }, '취소') : null));
+  }
+
+  /** 가격 이력(KB시세·호가) 대화상자 */
+  function showPriceHistory(prop) {
+    function rows(list, cur) {
+      var items = (list || []).slice().reverse();
+      if (!items.length) return h('p', { class: 'small muted', text: '기록이 없어요.' });
+      return h('ul', { class: 'fin-hist' }, items.map(function (e, i) {
+        return h('li', {},
+          h('span', { class: 'fin-hist-v', text: manText(e.value) }),
+          h('span', { class: 'fin-hist-sub', text: [e.at ? formatISODate(e.at) : '날짜 모름', HIST_SOURCE_LABEL[e.source] || '', i === 0 && e.value === cur ? '지금 값' : ''].filter(Boolean).join(' · ') }));
+      }));
+    }
+    return openDialog({
+      title: '가격 이력',
+      content: h('div', { class: 'fin-hist-box' },
+        h('h3', { class: 'fin-h', text: 'KB시세' }), rows(prop.kbHistory, prop.kbPrice),
+        h('h3', { class: 'fin-h', text: '호가' }), rows(prop.askHistory, prop.askPrice),
+        h('p', { class: 'small muted', text: '네이버 매물 글을 다시 붙여 넣고 [바꾸기]를 누르거나 KB시세를 직접 고치면 여기에 남아요. 네이버 화면의 KB시세에는 날짜가 없어서, 날짜는 가져온 날이에요.' })),
+      buttons: [{ label: '닫기', value: null }]
+    });
+  }
+
+  /**
+   * 대출 조건 바꾸기 대화상자(모든 매물에 같이 적용). 저장하면 true. prop: 이 창을 연 매물(저장 알림에 바뀐 결과를 적음. 없어도 됨)
+   * 1.7.0 검토 반영:
+   *  - 지역·생애최초를 맨 위로(LTV 규칙상 최대가 이것으로 정해짐). 넣은 LTV 가 규칙상 최대보다 크면 LTV 칸 바로 아래에 알린다
+   *  - 특별시·광역시(국민주택채권 요율)·출산·양육 감면 칸을 더함(전에는 화면에서 바꿀 수 없었음)
+   *  - 칸 안내를 aria-describedby 로 잇고, 첫 초점은 첫 칸(전에는 맨 아래 [저장])
+   *  - 못 읽은 숫자가 있으면 저장하지 않고 그 칸 아래에 칸 이름과 함께 알린다(창은 열린 채)
+   *  - [기본값으로 채우기]는 칸만 기본값으로 채운다(저장은 [저장]으로). 전에는 묻지 않고 바로 저장했음
+   *  - 저장 알림에 이 매물의 필요 현금·대출 한도가 어떻게 바뀌었는지 적는다(같으면 '그대로예요')
+   */
+  function editFinSettings(prop) {
+    if (!FIN) return Promise.resolve(false);
+    var s = finSettings();
+    var D = FIN.defaultSettings();
+    // 숫자 칸(화면 순서). 범위는 finance.js SETTING_NUM 과 같다
+    var NUMS = [
+      { key: 'ltv', id: 'fs-ltv', label: 'LTV', unit: '%', mode: 'decimal', min: 0, max: 100, eg: '70' },
+      { key: 'ratePct', id: 'fs-rate', label: '금리', unit: '%', mode: 'decimal', min: 0, max: 30, eg: '4.5' },
+      { key: 'years', id: 'fs-years', label: '대출 기간', unit: '년', mode: 'numeric', min: 1, max: 50, eg: '30' },
+      { key: 'legalFee', id: 'fs-legal', label: '법무사 비용', unit: '만원', mode: 'numeric', min: 0, max: 1000, eg: String(D.legalFee),
+        hint: '기본 ' + manText(D.legalFee) + ': 법무사 보수 50만원 + 등기 신청 수수료 1.5만원(부가세 별도). 견적을 받으면 바꿔요.' },
+      { key: 'moving', id: 'fs-moving', label: '이사비', unit: '만원', mode: 'numeric', min: 0, max: 10000, eg: '130' },
+      { key: 'depositPct', id: 'fs-deposit', label: '계약금 비율', unit: '%', mode: 'decimal', min: 0, max: 100, eg: '10',
+        hint: '보통 매매가의 10%예요. 매도인과 정해요.' }
+    ];
+    var f = {}, errs = {};
+    /** 숫자 칸 하나(이름·입력·단위·안내·오류). extra: 더 이을 안내 id */
+    function numField(d, extra) {
+      var hintId = d.hint ? d.id + '-hint' : '';
+      var inp = h('input', { class: 'input', id: d.id, type: 'text', inputmode: d.mode, autocomplete: 'off', value: String(s[d.key]),
+        placeholder: d.eg, 'aria-describedby': [hintId, extra || '', d.id + '-err'].filter(Boolean).join(' ') });
+      f[d.key] = inp;
+      errs[d.key] = h('p', { class: 'field-error', id: d.id + '-err', role: 'alert', hidden: true });
+      return h('div', { class: 'field' },
+        h('label', { for: d.id, text: d.label + (d.key === 'ratePct' ? ' (연)' : '') }),
+        h('div', { class: 'input-unit' }, inp, h('span', { class: 'unit', 'aria-hidden': 'true', text: d.unit })),
+        errs[d.key],
+        d.hint ? h('p', { class: 'field-hint', id: hintId, text: d.hint }) : null);
+    }
+    function toggle(id, checked, label, hintId) {
+      var cb = h('input', { type: 'checkbox', id: id, checked: !!checked, 'aria-describedby': hintId || null });
+      return { cb: cb, el: h('label', { class: 'toggle', for: id }, cb, h('span', { text: label })) };
+    }
+    var tCapital = toggle('fs-capital', s.capitalArea, '수도권 (서울·경기·인천)');
+    var tReg = toggle('fs-reg', s.regulated, '규제지역 (투기과열지구·조정대상지역)');
+    var tMetro = toggle('fs-metro', s.metroCity, '특별시·광역시 (서울·인천·부산 등)', 'fs-metro-hint');
+    var tFirst = toggle('fs-first', s.firstHome, '생애최초 (본인·배우자 모두 집을 가진 적이 없어요)');
+    var tBirth = toggle('fs-birth', s.birthRelief, '출산·양육 주택 감면 대상', 'fs-birth-hint');
+    var method = h('select', { class: 'select', id: 'fs-method', 'aria-describedby': 'fs-method-hint' },
+      h('option', { value: 'equal-payment', text: '원리금균등' }),
+      h('option', { value: 'equal-principal', text: '원금균등' }));
+    var bang = h('select', { class: 'select', id: 'fs-bang', 'aria-describedby': 'fs-bang-hint' }, FIN.BANG_GONGJE.map(function (b) { return h('option', { value: b.key, text: b.label }); }));
+    method.value = s.method;
+    bang.value = s.bangGongje;
+    var fields = {};
+    NUMS.forEach(function (d) { fields[d.key] = numField(d, d.key === 'ltv' ? 'fs-ltv-hint fs-ltv-warn' : ''); });
+    var bangHint = h('p', { class: 'field-hint', id: 'fs-bang-hint' });
+    // LTV 칸 바로 아래: 뜻과 이 조건의 규칙상 최대(지역·생애최초 칸을 바꾸면 바뀜), 넣은 값이 더 크면 경고
+    var ltvHint = h('p', { class: 'field-hint', id: 'fs-ltv-hint', 'aria-live': 'polite' });
+    var ltvWarn = h('p', { class: 'field-warn fin-ltv-warn', id: 'fs-ltv-warn', hidden: true });
+    fields.ltv.insertBefore(ltvHint, errs.ltv.nextSibling);
+    fields.ltv.append(ltvWarn);
+    var resetNote = h('p', { class: 'field-live fin-reset-note', 'aria-live': 'polite' });
+    function sync() {
+      var b = null;
+      FIN.BANG_GONGJE.forEach(function (x) { if (x.key === bang.value) b = x; });
+      bangHint.textContent = (b ? b.hint + ' ' : '') + '방공제: 은행이 소액 세입자 몫을 빼고 빌려주는 돈이에요.';
+      var cond = { firstHome: tFirst.cb.checked, capitalArea: tCapital.cb.checked, regulated: tReg.cb.checked };
+      var rule = FIN.suggestLtv(cond);
+      ltvHint.textContent = 'LTV: 집값 대비 빌릴 수 있는 비율이에요. 이 지역·조건의 규칙상 최대는 ' + rule + '%예요.';
+      var t = str(f.ltv.value).replace(/[,\s%]/g, '');
+      var n = /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : null;
+      var maxY = FIN.RULES.capitalMaxYears;
+      var ty = str(f.years.value).replace(/[,\s]/g, '');
+      var y = /^\d+(\.\d+)?$/.test(ty) ? parseFloat(ty) : null;
+      var warns = [];
+      if (n !== null && n > rule) warns.push('넣은 ' + n + '%는 규칙상 최대보다 커서 ' + rule + '%로 계산해요.');
+      if (y !== null && y > maxY && (cond.capitalArea || cond.regulated)) warns.push('수도권·규제지역 대출 기간은 ' + maxY + '년까지라 ' + maxY + '년으로 계산해요.');
+      ltvWarn.textContent = warns.join(' ');
+      ltvWarn.hidden = !warns.length;
+    }
+    [bang, tFirst.cb, tCapital.cb, tReg.cb].forEach(function (el) { el.addEventListener('change', sync); });
+    [f.ltv, f.years].forEach(function (el) { el.addEventListener('input', sync); });
+    NUMS.forEach(function (d) { f[d.key].addEventListener('input', function () { errs[d.key].hidden = true; f[d.key].removeAttribute('aria-invalid'); }); });
+    sync();
+    var content = h('div', { class: 'fin-set' },
+      h('p', { class: 'small muted', text: '모든 매물에 같이 적용돼요. 은행·상품마다 다르니 상담받은 조건으로 바꿔 보세요.' }),
+      h('fieldset', { class: 'fin-region' },
+        h('legend', { text: '지역' }),
+        tCapital.el, tReg.el, tMetro.el,
+        h('p', { class: 'field-hint', id: 'fs-metro-hint', text: '특별시·광역시는 국민주택채권 요율이 달라요(그 밖의 시·군은 더 낮아요).' }),
+        h('p', { class: 'field-hint', text: '기본값은 인천 계양구(수도권·규제지역 아님·광역시) 기준이에요. 매물 지역이 다르면 바꿔 주세요.' })),
+      tFirst.el,
+      tBirth.el,
+      h('p', { class: 'field-hint', id: 'fs-birth-hint', text: '아이를 낳은 가구가 집을 살 때 받는 취득세 감면이에요(500만원 한도). 생애최초 감면과 겹치면 큰 쪽 하나만 받아요. 자격은 위택스·구청에서 확인하세요.' }),
+      h('div', { class: 'field-row' }, fields.ltv, fields.ratePct),
+      h('div', { class: 'field-row' }, fields.years, h('div', { class: 'field' }, h('label', { for: 'fs-method', text: '상환 방식' }), method)),
+      h('p', { class: 'field-hint', id: 'fs-method-hint', text: '원리금균등: 매달 같은 금액을 내요. 원금균등: 처음에 많이 내고 점점 줄어요.' }),
+      h('div', { class: 'field' }, h('label', { for: 'fs-bang', text: '방공제 단계' }), bang, bangHint),
+      h('div', { class: 'field-row' }, fields.legalFee, fields.moving),
+      fields.depositPct,
+      resetNote);
+    /** [저장] 전에 숫자 칸 검사: 못 읽거나 범위 밖이면 그 칸 아래에 알리고 첫 칸으로 초점. 다 맞으면 true (비운 칸은 지금 값 그대로) */
+    function validate() {
+      var first = null;
+      NUMS.forEach(function (d) {
+        var t = str(f[d.key].value).replace(/[,\s%]/g, '');
+        var n = /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : NaN;
+        var ok = !t || (isFinite(n) && n >= d.min && n <= d.max);
+        errs[d.key].hidden = ok;
+        if (ok) { f[d.key].removeAttribute('aria-invalid'); return; }
+        errs[d.key].textContent = josa(d.label, '은', '는') + ' ' + d.min + '~' + formatNumber(d.max) + ' 사이 숫자로 적어 주세요. (예: ' + d.eg + ')';
+        f[d.key].setAttribute('aria-invalid', 'true');
+        if (!first) first = f[d.key];
+      });
+      if (first) { try { first.focus(); } catch (e) { /* 무시 */ } }
+      return !first;
+    }
+    /** [기본값으로 채우기]: 칸만 기본값으로(저장은 사용자가 [저장]으로) */
+    function fillDefaults() {
+      NUMS.forEach(function (d) { f[d.key].value = String(D[d.key]); errs[d.key].hidden = true; f[d.key].removeAttribute('aria-invalid'); });
+      tCapital.cb.checked = !!D.capitalArea;
+      tReg.cb.checked = !!D.regulated;
+      tMetro.cb.checked = !!D.metroCity;
+      tFirst.cb.checked = !!D.firstHome;
+      tBirth.cb.checked = !!D.birthRelief;
+      method.value = D.method;
+      bang.value = D.bangGongje;
+      sync();
+      resetNote.textContent = '';
+      resetNote.textContent = '기본값을 채웠어요. [저장]을 눌러야 바뀌어요.';
+    }
+    var before = prop ? finCalc(prop) : null;
+    return openDialog({
+      title: '대출 조건 바꾸기',
+      content: content,
+      className: 'fin-set-modal',
+      initialFocus: tCapital.cb,
+      buttons: [
+        { label: '저장', value: 'save', validate: validate },
+        { label: '취소', value: null, kind: 'secondary' },
+        { label: '기본값으로 채우기', value: 'fill', kind: 'secondary', keepOpen: true, action: fillDefaults }
+      ]
+    }).then(function (r) {
+      if (r.value !== 'save') return false;
+      var next = Object.assign({}, s);
+      NUMS.forEach(function (d) {
+        var t = str(f[d.key].value).replace(/[,\s%]/g, '');
+        if (t && /^\d+(\.\d+)?$/.test(t)) next[d.key] = parseFloat(t); // validate 를 지난 값. 비운 칸은 지금 값 그대로
+      });
+      next.method = method.value;
+      next.bangGongje = bang.value;
+      next.firstHome = tFirst.cb.checked;
+      next.birthRelief = tBirth.cb.checked;
+      next.capitalArea = tCapital.cb.checked;
+      next.regulated = tReg.cb.checked;
+      next.metroCity = tMetro.cb.checked;
+      next = FIN.normalizeSettings(next);
+      var prev = state.settings || { finance: null, financeAt: 0 };
+      state.settings = { finance: next, financeAt: stampAfter(Date.now(), prev.financeAt) };
+      finCache = {};
+      saveNow();
+      toast(finSettingsChangeText(before, prop && findProp(prop.id) ? finCalc(prop) : null), { duration: 6000 });
+      return true;
+    });
+  }
+  /** 조건 저장 알림: 이 매물의 필요 현금·대출 한도 전 → 뒤(1.7.0 검토 반영). 매물이 없으면 짧게 */
+  function finSettingsChangeText(b, a) {
+    if (!b || !a) return '대출 조건을 바꿨어요';
+    var parts = [];
+    function cmp(label, x, y) {
+      if (typeof x !== 'number' && typeof y !== 'number') return;
+      if (x !== y) parts.push(label + ' ' + manText(x) + ' → ' + manText(y));
+    }
+    cmp('필요 현금', b.cash ? b.cash.cash : null, a.cash ? a.cash.cash : null);
+    cmp('대출 한도', b.limit ? b.limit.limit : null, a.limit ? a.limit.limit : null);
+    return parts.length ? '대출 조건을 바꿨어요. 이 매물: ' + parts.join(' · ')
+      : '대출 조건을 바꿨어요. 이 매물의 필요 현금·대출 한도는 그대로예요.';
+  }
+
+  /** 상세 '대출·비용' 카드(접히는 카드). 머리 줄에 필요 현금·대출 한도 요약 */
+  function finCard(prop) {
+    var v = view;
+    var sumLine = h('span', { class: 'fin-sum-line', id: 'fin-sum-line' });
+    var body = h('div', { class: 'fin-body' });
+    var card = h('details', { class: 'card fin-card', id: 'fin-card', open: sessionGet(FIN_OPEN_KEY) === '1' },
+      h('summary', { class: 'fin-summary' },
+        h('span', { class: 'fin-title' }, '대출·비용', h('span', { class: 'fin-est', text: ' (추정)' })),
+        sumLine,
+        icon('chevron', 'fin-chev')),
+      body);
+    card.addEventListener('toggle', function () { sessionSet(FIN_OPEN_KEY, card.open ? '1' : '0'); });
+    v.refs.fin = { body: body, sumLine: sumLine, results: null, prop: prop };
+    drawFinBody(prop);
+    return card;
+  }
+
+  /**
+   * 카드 안 전체(핵심 숫자·조건·KB시세·입력 칸·계산 내역·참고값·안내)를 다시 그린다. focusId: 다 그린 뒤 초점을 줄 요소 id.
+   * 1.7.0 검토 반영: 핵심 숫자(필요한 현금·대출 한도·첫 달 상환)와 계산 조건·[조건 바꾸기]를 맨 위로(전에는 KB시세·입력 칸 아래라
+   * 큰 숫자까지 1,000px 넘게, 생애최초 같은 전제는 카드 맨 아래에 있었음). 네이버의 단순 계산(대출 한도·금리)은 '네이버 참고값' 안으로
+   */
+  function drawFinBody(prop, focusId) {
+    var r = view.refs.fin;
+    if (!r || view.prop !== prop) return;
+    var body = r.body;
+    body.textContent = '';
+    // 0) 핵심 숫자(입력할 때마다 이 자리도 다시 그림)와 계산 조건
+    r.top = h('div', { class: 'fin-sec fin-top', id: 'fin-top' });
+    body.append(r.top);
+    var cond = h('p', { class: 'fin-cond-line', id: 'fin-cond-line' });
+    body.append(h('div', { class: 'fin-sec fin-cond' },
+      h('h3', { class: 'fin-h', text: '계산 조건' }),
+      cond,
+      h('button', { type: 'button', class: 'btn btn-small btn-secondary', id: 'fin-cond-btn', onclick: function () {
+        editFinSettings(prop).then(function (changed) { if (changed && view.prop === prop) drawFinBody(prop, 'fin-cond-btn'); });
+      } }, '조건 바꾸기')));
+    r.cond = cond;
+    // 1) KB시세
+    var kbBox = h('div', { class: 'fin-sec fin-kb', id: 'fin-kb', tabindex: '-1' });
+    if (prop.kbPrice !== null) {
+      var hist = (prop.kbHistory || []).length + (prop.askHistory || []).length;
+      kbBox.append(
+        h('dl', { class: 'kv fin-kv' },
+          h('dt', { text: 'KB시세' }),
+          h('dd', {},
+            h('span', { class: 'fin-num', id: 'fin-kb-value', 'data-man': String(prop.kbPrice), text: manText(prop.kbPrice) }),
+            h('span', { class: 'sub', text: [prop.kbAt ? formatISODate(prop.kbAt) + (prop.kbSource === 'manual' ? ' 입력' : ' 가져옴') : '', HIST_SOURCE_LABEL[prop.kbSource] || ''].filter(Boolean).join(' · ') }))),
+        h('div', { class: 'btn-row fin-kb-btns' },
+          hist ? h('button', { type: 'button', class: 'btn btn-small btn-secondary', id: 'fin-hist-btn', onclick: function () { showPriceHistory(prop); } }, '이력 보기') : null,
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', id: 'fin-kb-edit-btn', onclick: function () {
+            var box = $('#fin-kb');
+            if (!box) return;
+            box.textContent = '';
+            box.append(kbEditor(prop, true));
+            try { $('#fin-kb-input').focus(); } catch (e) { /* 무시 */ }
+          } }, '직접 고치기')));
+    } else {
+      kbBox.append(
+        h('div', { class: 'notice notice-info fin-kb-none', role: 'note' },
+          h('strong', { text: 'KB시세가 없어요' }),
+          h('p', { text: '네이버 매물 글을 다시 붙여 넣으면 KB시세를 가져와요. 은행은 보통 KB시세로 대출 한도를 정해요. 지금은 매매가로 계산했어요.' }),
+          h('a', { class: 'btn btn-small btn-secondary', href: '#/import' }, icon('paste', 'ic-sm'), '네이버 글 붙여넣기')),
+        kbEditor(prop, false));
+    }
+    body.append(kbBox);
+    // 2) 입력 칸. 1.7.0 검토 반영: 협상가 자리표시자에 '예:'(전에는 호가 숫자만 있어 이미 넣은 값처럼 보였음), 안내에 지금 호가
+    body.append(h('div', { class: 'fin-sec fin-inputs' },
+      finInputField(prop, 'dealPrice', 'fin-deal', '협상가 (선택)',
+        '매도인과 맞춘 가격이 있으면 적어요. 비우면 ' + (prop.askPrice ? '호가 ' + manText(prop.askPrice) + '으로' : '호가로') + ' 계산해요.',
+        '예: ' + (prop.askPrice ? String(prop.askPrice) : '24000')),
+      finInputField(prop, 'remodelCost', 'fin-remodel', '리모델링비', '수리·인테리어에 쓸 돈이에요. 잔금 뒤에 나가는 돈으로 더해요.', '예: 1500'),
+      finInputField(prop, 'publicPrice', 'fin-public', '공시가격 (선택)', '모르면 KB시세의 69%로 추정해요. 부동산공시가격알리미에서 볼 수 있어요.', '예: 16000')));
+    // 3) 계산 내역(입력할 때마다 이 자리만 다시 그림)
+    r.results = h('div', { class: 'fin-results', id: 'fin-results' });
+    body.append(r.results);
+    // 4) 네이버 참고값(네이버 화면의 단순 계산·참고값. 은행 한도·금리가 아님)
+    var refs = [];
+    function ref(label, text) { if (text && text !== '-') refs.push(h('dt', { text: label }), h('dd', { text: text })); }
+    ref('대출 한도(네이버 계산)', prop.naverLoanLimit ? manText(prop.naverLoanLimit) : '');
+    ref('최저 금리(네이버)', prop.naverRate ? rateText(prop.naverRate) : '');
+    ref('관리비(기본 정보)', wonText(prop.feeMonthly));
+    ref('관리비 월 평균', wonText(prop.feeAvg));
+    ref('여름(6~8월) 평균', wonText(prop.feeSummer));
+    ref('겨울(12~2월) 평균', wonText(prop.feeWinter));
+    if (prop.feeRecent) ref('최근 관리비(' + monthText(prop.feeRecent.month) + ')', wonText(prop.feeRecent.amount));
+    ref('취득세 합계', prop.acqTaxNaver ? '약 ' + wonText(prop.acqTaxNaver) : '');
+    ref('재산세 합계', prop.propertyTaxNaver ? '약 ' + wonText(prop.propertyTaxNaver) : '');
+    if (refs.length) {
+      body.append(h('details', { class: 'fin-naver' },
+        h('summary', {}, '네이버 참고값'),
+        h('dl', { class: 'kv fin-kv' }, refs),
+        h('p', { class: 'small muted', text: '네이버 화면에 나온 값이에요(관리비는 국토교통부 자료). 대출 한도·금리는 네이버의 단순 계산이라 은행 한도·금리가 아니에요. 관리비는 세대·계절마다 달라요. 관리사무소에서 확인하세요.' })));
+    }
+    // 5) 늘 보이는 안내
+    body.append(h('p', { class: 'fin-foot', role: 'note', text: '모두 추정이에요. 실제 대출 한도는 소득(DSR)과 은행 심사로 정해져요. 세금은 위택스·구청에서 확인하세요.' }));
+    drawFinResults(prop);
+    if (focusId) {
+      var el = document.getElementById(focusId);
+      if (el) { try { el.focus({ preventScroll: false }); } catch (e) { /* 무시 */ } }
+    }
+  }
+
+  /** 계산 결과 자리만 다시 그린다(입력 칸은 그대로라 입력 중 초점이 남는다) */
+  function drawFinResults(prop) {
+    var r = view.refs.fin;
+    if (!r || view.prop !== prop || !r.results) return;
+    var box = r.results;
+    var top = r.top;
+    box.textContent = '';
+    if (top) top.textContent = '';
+    if (!FIN) {
+      r.sumLine.textContent = '';
+      box.append(h('div', { class: 'notice', role: 'note' },
+        h('strong', { text: '계산 파일을 불러오지 못했어요' }),
+        h('p', { text: '인터넷에 연결한 뒤 새로고침해 주세요. 넣은 값은 그대로 저장돼요.' })));
+      return;
+    }
+    var c = finCalc(prop);
+    if (r.cond) r.cond.textContent = finCondText(c.settings, c);
+    if (!c.price && prop.kbPrice === null) {
+      r.sumLine.textContent = '호가나 KB시세를 넣으면 계산해요';
+      box.append(h('p', { class: 'small muted', text: '호가(매물 정보 수정)나 협상가, KB시세를 넣으면 대출 한도와 필요한 현금을 계산해요.' }));
+      return;
+    }
+    function row(dt, valueMan, key, sub) {
+      return [h('dt', { text: dt }), h('dd', {},
+        h('span', { class: 'fin-num', 'data-fin': key || null, 'data-man': typeof valueMan === 'number' ? String(valueMan) : null, text: typeof valueMan === 'number' ? manText(valueMan) : str(valueMan) }),
+        sub ? h('span', { class: 'sub', text: sub }) : null)];
+    }
+    /** 맨 위 핵심 숫자 줄(data-top). 아래 내역(#fin-results, data-fin)과 같은 값 */
+    function topRow(dt, valueMan, key, sub) {
+      return [h('dt', { text: dt }), h('dd', {},
+        h('span', { class: 'fin-num', 'data-top': key, 'data-man': String(valueMan), text: manText(valueMan) }),
+        sub ? h('span', { class: 'sub', text: sub }) : null)];
+    }
+    var L = c.limit;
+    var P = c.pay;
+    var C = c.cash;
+    var H = c.hold;
+    var S = c.settings;
+    // 넣은 LTV 가 규칙상 최대보다 커서 낮춰 계산했으면 대출 줄 바로 아래에 보인다(전에는 접힌 '계산 설명' 안에만 있었음)
+    var ltvCut = L && L.ltv < S.ltv ? 'LTV ' + L.ltv + '%(규칙상 최대. 넣은 값 ' + S.ltv + '%)로 계산했어요' : '';
+    var capped = L && L.limit < Math.max(0, L.ltvAmount - L.deduction) - 1;
+    // 요약 줄
+    r.sumLine.textContent = C ? '필요 현금 약 ' + manText(C.cash) + (L ? ' · 대출 ' + manText(L.limit) : '')
+      : L ? '대출 한도 약 ' + manText(L.limit) : '';
+    // 맨 위 핵심 숫자
+    if (top) {
+      if (C) {
+        top.append(h('p', { class: 'fin-top-k', text: '필요한 현금' }),
+          h('p', { class: 'fin-big' }, h('span', { class: 'fin-num', 'data-top': 'cash', 'data-man': String(C.cash), text: manText(C.cash) })));
+      }
+      var trows = [];
+      if (L) trows.push(topRow('대출 한도', L.limit, 'loan', ltvCut || ('LTV ' + L.ltv + '% 기준' + (capped ? ' · 최대 한도 적용' : ''))));
+      if (P) trows.push(topRow('첫 달 상환', P.firstMonth, 'month', '연 ' + P.ratePct + '% · ' + yearsText(P.years)));
+      if (trows.length) top.append(h('dl', { class: 'kv fin-kv' }, trows));
+    }
+    // 가격 기준
+    box.append(h('dl', { class: 'kv fin-kv' },
+      row('계산에 쓴 매매가', c.price, 'price', c.priceKind === 'deal' ? '협상가' : c.priceKind === 'ask' ? '호가' : '호가가 없어 KB시세로만 계산했어요')));
+    // 대출
+    var loanRows = [];
+    if (L) {
+      var basis = (L.basis === 'kb' ? 'KB시세 ' : '매매가 ') + manText(L.base) + ' × LTV ' + L.ltv + '%' +
+        (L.deduction ? ' − 방공제 ' + manText(L.deduction) : '') + (capped ? ' (최대 한도 적용)' : '') + (ltvCut ? '. ' + ltvCut : '');
+      loanRows.push(row('대출 한도', L.limit, 'loan', basis));
+    }
+    if (P) {
+      loanRows.push(row('월 상환(첫 달)', P.firstMonth, 'month', '연 ' + P.ratePct + '% · ' + yearsText(P.years) +
+        (P.years !== S.years ? '(수도권·규제지역 최대. 넣은 값 ' + yearsText(S.years) + ')' : '') + ' · ' + (FIN.METHOD_LABEL[P.method] || '') +
+        (P.method === 'equal-principal' ? ' · 마지막 달 ' + manText(P.lastMonth) : '')));
+    }
+    if (loanRows.length) box.append(h('div', { class: 'fin-sec' }, h('h3', { class: 'fin-h', text: '대출' }), h('dl', { class: 'kv fin-kv' }, loanRows)));
+    // 필요 현금
+    if (C) {
+      var items = C.items.filter(function (it) { return it.amount !== 0 || it.key === 'acqTax'; });
+      var notes = [];
+      C.items.forEach(function (it) { if (it.notes && it.notes.length) notes.push(h('li', { text: it.label + ': ' + it.notes.join(' ') })); });
+      var WHEN = { contract: '계약일', balanceDay: '잔금일', after: '잔금 후' };
+      box.append(h('div', { class: 'fin-sec fin-cash' },
+        h('h3', { class: 'fin-h', text: '필요한 현금 내역' }),
+        h('p', { class: 'fin-cash-sum' }, '총비용 ' + manText(C.totalCost) + ' − 대출 ' + manText(C.loan) + ' = ',
+          h('span', { class: 'fin-num', 'data-fin': 'cash', 'data-man': String(C.cash), text: manText(C.cash) })),
+        h('ol', { class: 'fin-timeline', 'aria-label': '돈이 나가는 때' },
+          ['contract', 'balanceDay', 'after'].map(function (w) {
+            return h('li', {}, h('span', { class: 'fin-when', text: WHEN[w] + (w === 'after' ? '(이사·수리)' : '') }),
+              h('span', { class: 'fin-num', 'data-fin': w, 'data-man': String(C.timeline[w]), text: manText(C.timeline[w]) }));
+          })),
+        h('ul', { class: 'fin-items', 'aria-label': '들어가는 돈' }, items.map(function (it) {
+          return h('li', { 'data-k': it.key },
+            h('span', { class: 'fin-item-l' }, it.key === 'remodel' ? '리모델링비' : it.label, h('span', { class: 'fin-item-w', text: ' · ' + WHEN[it.when] })),
+            h('span', { class: 'fin-num', 'data-man': String(it.amount), text: manText(it.amount) }));
+        })),
+        notes.length ? h('details', { class: 'fin-notes' }, h('summary', {}, '항목 설명'), h('ul', {}, notes)) : null));
+    }
+    // 1년 보유비용
+    if (H) {
+      var ptx = H.propertyTaxInfo;
+      var hrows = [];
+      /** 표시값(소수 첫째 자리)끼리 더한 값. finance.js 는 원 단위로 더한 뒤 한 번만 반올림해 0.1만원 다를 수 있다 */
+      var sum1 = function (list) { return Math.round(list.reduce(function (a, x) { return a + (typeof x === 'number' ? x : 0); }, 0) * 10) / 10; };
+      var ROUND_NOTE = '항목을 원 단위로 더한 뒤 반올림해서 위 숫자의 합과 0.1만원 다를 수 있어요';
+      if (H.propertyTax !== null) {
+        // 1.7.0 검토 반영: 어느 해 몫인지와 다른 경우의 값. 산 사람이 처음 내는 해(finTaxYear)를 지금 법 그대로 계산한다
+        var spLast = FIN.RULES.specialLastYear;
+        var ptSub = [H.taxYear ? H.taxYear + '년분' : '',
+          H.taxYear > spLast ? '지금 법 그대로' + (H.propertyTaxMin < H.propertyTax ? ' · 특례가 연장되면 ' + manText(H.propertyTaxMin) : '')
+            : H.propertyTaxMax > H.propertyTax ? (H.taxYear + 1) + '년분은 지금 법 그대로면 ' + manText(H.propertyTaxMax) : '',
+          ptx && ptx.basis === 'estimate' ? '공시가격을 몰라 시세의 69%로 추정' : ''];
+        hrows.push(row('재산세', H.propertyTax, 'propertyTax', ptSub.filter(Boolean).join(' · ')));
+      }
+      hrows.push(row('관리비(1년)', H.mgmtFee !== null ? H.mgmtFee : '관리비 정보 없음', 'mgmt', H.mgmtFee !== null ? '월 ' + wonText(finFeeWon(prop)) + ' × 12' + (prop.feeAvg ? '' : ' (기본 정보 관리비)') : ''));
+      if (H.interestYear1 !== null) hrows.push(row('첫해 대출 이자', H.interestYear1, 'interest', '원금 상환은 빠져 있어요'));
+      hrows.push(row('합계', H.total, 'holdTotal', sum1([H.propertyTax, H.mgmtFee, H.interestYear1]) !== H.total ? ROUND_NOTE : ''));
+      hrows.push(row('월 주거비', H.monthly.total, 'monthTotal', '첫 달 상환 ' + manText(H.monthly.payment || 0) + ' + 관리비 ' + manText(H.monthly.mgmtFee || 0) +
+        (sum1([H.monthly.payment, H.monthly.mgmtFee]) !== H.monthly.total ? '. ' + ROUND_NOTE : '')));
+      box.append(h('div', { class: 'fin-sec' }, h('h3', { class: 'fin-h', text: '1년 보유비용' }), h('dl', { class: 'kv fin-kv' }, hrows)));
+    }
+    // 계산 설명(finance.js 메모). 1.7.0 검토 반영: 재산세 메모(6월 1일 소유자·적용 연도·특례 연장)도 넣는다
+    var all = [];
+    [L && L.notes, C && C.notes, H && H.notes, H && H.propertyTaxInfo && H.propertyTaxInfo.notes].forEach(function (list) {
+      (list || []).forEach(function (n) { if (all.indexOf(n) < 0 && !/^모두 추정이에요/.test(n)) all.push(n); });
+    });
+    if (all.length) box.append(h('details', { class: 'fin-notes' }, h('summary', {}, '계산 설명 ' + all.length + '개'), h('ul', {}, all.map(function (n) { return h('li', { text: n }); }))));
+  }
+
+  /** 공유 글의 '돈 계산 (추정)' 줄. 숫자만(판정·사람 이름 없음). 계산할 값이 없으면 [] */
+  function finShareLines(prop) {
+    var c = finCalc(prop);
+    if (!c || (!c.price && prop.kbPrice === null)) return [];
+    var out = [];
+    if (prop.kbPrice !== null) out.push('- KB시세 ' + manText(prop.kbPrice) + (prop.kbAt ? ' (' + formatISODate(prop.kbAt) + ' 기준)' : ''));
+    if (c.price) out.push('- 계산에 쓴 매매가 ' + manText(c.price) + (c.priceKind === 'deal' ? '(협상가)' : '(호가)'));
+    // 1.7.0 검토 반영: 조건 괄호는 실제 계산에 쓴 LTV·기간(카드의 계산 조건 줄과 같은 문구)
+    if (c.limit) out.push('- 대출 한도 약 ' + manText(c.limit.limit) + (c.pay ? ' · 첫 달 상환 약 ' + manText(c.pay.firstMonth) : '') + ' (' + finCondText(c.settings, c) + ')');
+    if (c.cash) out.push('- 필요한 현금 약 ' + manText(c.cash.cash) + ' (계약일 ' + manText(c.cash.timeline.contract) + ' · 잔금일 ' + manText(c.cash.timeline.balanceDay) + ' · 잔금 후 ' + manText(c.cash.timeline.after) + ')');
+    if (c.hold) out.push('- 1년 보유비용 약 ' + manText(c.hold.total) + ' · 월 주거비 약 ' + manText(c.hold.monthly.total) + (c.hold.taxYear ? ' (재산세 ' + c.hold.taxYear + '년분 기준)' : ''));
+    out.push('- 추정이에요. 대출은 은행, 세금은 위택스·구청에서 확인하세요.');
+    return out;
+  }
+
   // ---------------- 정렬 규칙 (비교·홈 공용, 1.5.1) ----------------
   /** 값이 없는(null) 매물은 맨 뒤. dir 1 이면 오름차순, -1 이면 내림차순 */
   function nullsLast(a, b, f, dir) {
@@ -6588,7 +7732,10 @@
       return cautionCount(a) - cautionCount(b) ||
         (flagsYes(a, 'stop').length ? 1 : 0) - (flagsYes(b, 'stop').length ? 1 : 0) ||
         (overallProgress(a).done ? 0 : 1) - (overallProgress(b).done ? 0 : 1);
-    }
+    },
+    // 1.7.0: 숫자 순서일 뿐 판정이 아니다(값이 없는 매물은 맨 뒤). 필요 현금은 지금 대출 조건으로 계산한 추정
+    kbGap: function (a, b) { return nullsLast(a, b, kbGapOf, 1); },
+    cash: function (a, b) { return nullsLast(a, b, finCashOf, 1); }
   };
   /** 정렬 id → 비교 함수. 모르는 id 는 '최근에 고친 순' */
   function sortCompare(key) { return SORT_CMP[key] || SORT_CMP.updated; }
@@ -6598,7 +7745,8 @@
     { id: 'ask', label: '호가 낮은 순' },
     { id: 'diff', label: '실거래 대비 낮은 순' },
     { id: 'progress', label: '진행률 높은 순' },
-    { id: 'caution', label: '주의 표시 적은 순' } // 1.5.1 검토 반영: "주의 적은 순"은 '안전한 순'으로 읽혀 이름을 바꿈(멈춤 신호는 주의 표시가 아님)
+    { id: 'caution', label: '주의 표시 적은 순' }, // 1.5.1 검토 반영: "주의 적은 순"은 '안전한 순'으로 읽혀 이름을 바꿈(멈춤 신호는 주의 표시가 아님)
+    { id: 'cash', label: '필요 현금 적은 순' } // 1.7.0: 비교 표의 필요 현금 열과 같은 추정
   ];
   /** 홈 목록의 정렬 select(1.5.1): 비교의 5가지 + 최근 추가한 순·단지명 가나다·호가 높은 순 */
   var HOME_SORTS = [
@@ -6609,7 +7757,10 @@
     { id: 'askDesc', label: '호가 높은 순' },
     { id: 'diff', label: '실거래 대비 낮은 순' },
     { id: 'progress', label: '진행률 높은 순' },
-    { id: 'caution', label: '주의 표시 적은 순' }
+    { id: 'caution', label: '주의 표시 적은 순' },
+    // 1.7.0: 끝에 더한다(1.5.1 정렬의 순서·이름은 그대로). 기억해 둔 정렬 id 가 모르는 값이면 '최근에 고친 순'(readHomeFilter)
+    { id: 'kbGap', label: 'KB시세 대비 호가 낮은 순' },
+    { id: 'cash', label: '필요 현금 적은 순' }
   ];
 
   // ---------------- 비교 ----------------
@@ -6635,6 +7786,8 @@
     var dropToggle = h('input', { type: 'checkbox', checked: includeDropped });
     var hiddenNote = h('p', { class: 'small muted', 'aria-live': 'polite', style: 'margin:-4px 2px 10px' });
     var tableWrap = h('div', { class: 'table-scroll', tabindex: '0', role: 'region', 'aria-label': '매물 비교 표 (옆으로 밀어서 보기)' });
+    // 1.7.0 검토 반영: 대출·비용 열이 표 끝에 있어 바로 가는 단추
+    var finJump = h('button', { type: 'button', class: 'btn btn-small btn-ghost cmp-fin-jump' }, '대출·비용 열 보기');
 
     // 1.4.5: 매물이 하나뿐이면 비교할 상대가 없다는 안내 + [매물 추가](0개일 때만 안내하던 것)
     var oneNote = state.properties.length === 1 ? h('div', { class: 'notice notice-info cmp-one', role: 'note' },
@@ -6642,8 +7795,8 @@
       h('a', { class: 'btn btn-small btn-accent', href: '#/new' }, icon('plus', 'ic-sm'), '매물 추가')) : null;
     main.append(
       // 1.5.0 검토 반영: 빠른 동작 열을 등기부 결과 바로 뒤(3번째 열)로 — 맨 끝(11번째)이면 390px 에서 약 900px 을 밀어야 보여 "바로"가 아니었음. 버튼 순서대로 적음
-      h('p', { class: 'page-sub', text: '옆으로 밀어서 더 보세요. 이름을 누르면 상세로, 등기부 결과 옆 [임장 예정]·[탈락]으로 상태를 바로 바꿔요.' }),
-      h('div', { class: 'compare-tools' }, sortSel, h('label', { class: 'toggle' }, dropToggle, '탈락 매물도 보기')),
+      h('p', { class: 'page-sub', text: '옆으로 밀어서 더 보세요. 이름을 누르면 상세로, 등기부 결과 옆 [임장 예정]·[탈락]으로 상태를 바로 바꿔요. 대출·비용(추정) 열은 표 오른쪽 끝에 있어요.' }),
+      h('div', { class: 'compare-tools' }, sortSel, h('label', { class: 'toggle' }, dropToggle, '탈락 매물도 보기'), finJump),
       hiddenNote
     );
     appendKid(main, oneNote); // null 이면 넣지 않는다(main.append(null) 은 글자 "null"을 넣음)
@@ -6651,9 +7804,24 @@
       tableWrap,
       h('div', { class: 'card', style: 'margin-top:14px' },
         h('p', { class: 'small muted', text: '실거래 대비: 호가가 최근 실거래가보다 몇 % 높은지(+) 낮은지(−). 실거래가는 한 건의 거래라 층·향·수리 상태에 따라 차이가 날 수 있어요.' }),
-        h('p', { class: 'small muted', text: '주의: 현장 평가에서 "주의"로 표시한 항목 + 등기부에서 "주의" 신호가 있다고 표시한 항목 수.' })
+        h('p', { class: 'small muted', text: '주의: 현장 평가에서 "주의"로 표시한 항목 + 등기부에서 "주의" 신호가 있다고 표시한 항목 수.' }),
+        // 1.7.0
+        h('p', { class: 'small muted', text: '대출 한도·월 상환(첫 달)·필요 현금·1년 보유비용: 매물 상세 "대출·비용" 카드의 조건으로 계산한 추정이에요. 계산 매매가는 협상가가 있으면 협상가, 없으면 호가예요. 실제 한도는 소득(DSR)·은행 심사로, 세금은 위택스·구청에서 확인하세요.' })
       )
     );
+    /** 1.7.0: 대출·비용 칸 6개(KB시세·계산 매매가·대출 한도·월 상환·필요 현금·1년 보유비용). 없으면 '-' */
+    function finCells(p) {
+      var c = finCalc(p);
+      function td(v, key) { return h('td', { class: 'num', 'data-fin': key, text: typeof v === 'number' ? manText(v) : '-' }); }
+      return [
+        td(p.kbPrice, 'kb'),
+        td(c ? c.price : null, 'price'),
+        td(c && c.limit ? c.limit.limit : null, 'loan'),
+        td(c && c.pay ? c.pay.firstMonth : null, 'month'),
+        td(c && c.cash ? c.cash.cash : null, 'cash'),
+        td(c && c.hold ? c.hold.total : null, 'holdTotal')
+      ];
+    }
 
     /** 1.5.0(M5): 고정 열 부제 "204동 1604호 · 16/16층 동향" — 같은 단지·같은 동 매물을 층·방향으로 구분(전에는 동·호만) */
     function subText(p) {
@@ -6735,6 +7903,7 @@
       tableWrap.textContent = '';
       hiddenNote.textContent = !includeDropped && droppedCount ? '탈락 ' + droppedCount + '개 숨김' : '';
       hiddenNote.hidden = !hiddenNote.textContent;
+      finJump.hidden = !list.length;
       if (!list.length) {
         tableWrap.append(h('p', { class: 'muted', style: 'padding:16px', text: '보여 줄 매물이 없어요.' }));
         return;
@@ -6752,7 +7921,15 @@
         h('th', { class: 'num', scope: 'col', text: '주의' }),
         h('th', { scope: 'col', text: '진행률' }),
         h('th', { class: 'num', scope: 'col', text: '최근 실거래가' }),
-        h('th', { class: 'num', scope: 'col', text: '전용면적' })
+        h('th', { class: 'num', scope: 'col', text: '전용면적' }),
+        // 1.7.0: 대출·비용(추정). 숫자만 나란히(가장 낮은 값 강조 같은 판정 표시는 하지 않음).
+        // 1.7.0 검토 반영: 표 끝으로 옮김(전에는 '실거래 대비' 다음이라 위험 정보인 '주의'·'진행률' 열이 630px 오른쪽으로 밀렸음)
+        h('th', { class: 'num', scope: 'col', id: 'cmp-fin-start', text: 'KB시세' }),
+        h('th', { class: 'num', scope: 'col', text: '계산 매매가' }),
+        h('th', { class: 'num', scope: 'col', text: '대출 한도' }),
+        h('th', { class: 'num', scope: 'col', text: '월 상환' }),
+        h('th', { class: 'num', scope: 'col', text: '필요 현금' }),
+        h('th', { class: 'num', scope: 'col', text: '1년 보유비용' })
       ));
       var tbody = h('tbody', {}, list.map(function (p) {
         var prog = overallProgress(p);
@@ -6771,11 +7948,35 @@
           h('td', { class: 'num', text: String(cautionCount(p)) }),
           h('td', {}, h('span', { class: 'mini-bar' }, makeBar(prog.pct, null, { thin: true, ariaLabel: p.name + ' 진행률' }).el), prog.pct + '%'),
           h('td', { class: 'num', text: p.realPrice ? formatManwon(p.realPrice) : '-' }),
-          h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' })
+          h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' }),
+          finCells(p)
         );
       }));
       tableWrap.append(h('table', { class: 'ctable' }, h('caption', { class: 'sr-only', text: '매물 비교' }), thead, tbody));
+      snapPad();
     }
+    /**
+     * 1.7.0 검토 반영: 옆으로 밀다 멈출 때 칸이 고정된 '매물' 열에 반쯤 가린 채 멈추지 않게(오른쪽 정렬 금액의 앞자리가 가려
+     * '1억 1,401.5만원'이 '01.5만원'처럼 보였음). 표는 칸 시작에 맞춰 멈추고(styles.css scroll-snap), 맞출 자리는 고정 열 바로 오른쪽
+     */
+    function snapPad() {
+      var st = tableWrap.querySelector('thead .sticky-col');
+      if (st && st.offsetWidth) tableWrap.style.scrollPaddingLeft = st.offsetWidth + 'px';
+    }
+    /** [대출·비용 열 보기]: 표를 KB시세 열까지 민다 */
+    function showFinCols() {
+      var th = document.getElementById('cmp-fin-start');
+      var st = tableWrap.querySelector('thead .sticky-col');
+      if (!th) return;
+      tableWrap.scrollLeft = Math.max(0, th.offsetLeft - (st ? st.offsetWidth : 0));
+      try { tableWrap.focus({ preventScroll: true }); } catch (e) { /* 무시 */ }
+    }
+    finJump.addEventListener('click', showFinCols);
+    var onResize = function () {
+      if (!document.contains(tableWrap)) { window.removeEventListener('resize', onResize); return; }
+      snapPad();
+    };
+    window.addEventListener('resize', onResize);
 
     sortSel.addEventListener('change', function () { sessionSet('imjang.cmp.sort', sortSel.value); draw(); });
     dropToggle.addEventListener('change', function () {
@@ -7553,6 +8754,8 @@
       candidate.properties.forEach(function (p) { candidate.localDeleted[p.id] = stamp; });
       recent.forEach(function (id) { candidate.localDeleted[id] = stamp; });
       candidate.properties = incoming.properties;
+      // 1.7.0: 백업에 대출 조건이 있으면 그것으로(덮어쓰기 = 백업 내용으로 바꿈). 없으면(예전 백업·바꾼 적 없음) 이 기기 것을 둔다
+      if (incoming.settings && incoming.settings.finance) candidate.settings = normalizeSettingsState(incoming.settings);
       // 예전에 지운 매물을 백업으로 되살리는 경우: '지움' 표시를 없애고 지금 고친 것으로 본다(지운 시각보다 늘 나중)
       candidate.properties.forEach(function (p) {
         if (candidate.deleted[p.id]) {
@@ -7621,7 +8824,7 @@
     var added = rep.added + rep.revived.length;
     var mergedN = rep.merged + rep.updated;
     var docsAdded = extra.docsAdded || 0; // 1.6.0
-    var sameHere = !added && !mergedN && !rep.deleted && !photosAdded && !docsAdded; // 이 기기 기록은 그대로
+    var sameHere = !added && !mergedN && !rep.deleted && !photosAdded && !docsAdded && !rep.settings; // 이 기기 기록은 그대로(1.7.0: 대출 조건 포함)
     var notes = rep.keptAfterDelete.length + rep.keptLocal.length + rep.revived.length + rep.skipped.length + dups.length; // 따로 알려 줄 매물
     function group(cls, title, desc, list) {
       if (!list.length) return null;
@@ -7650,6 +8853,7 @@
       group('', '넣지 않은 매물', '이 기기에서 지운 매물이라 넣지 않았어요. 그 기기에서도 지우려면 여기서 백업 파일을 만들어 그 기기에서 [합치기] 하세요.', rep.skipped),
       group('is-kept', '같은 매물로 보이는 것', '두 기기에서 따로 추가한 같은 매물로 보여요(매물번호나 링크가 같음). 하나를 지우기 전에 양쪽의 체크 기록과 사진·서류를 확인하세요. 지운 쪽의 기록과 사진·서류는 함께 사라져요.', dups),
       extra.photoCount === 0 && !extra.docCount ? h('p', { class: 'small muted', text: '이 백업에는 사진·서류가 없어요. 사진·서류도 옮기려면 그 기기에서 "사진·서류도 함께 넣기"를 켜고 백업하세요.' }) : null,
+      rep.settings ? h('p', { class: 'small muted', text: '대출 조건(대출·비용 카드의 [조건 바꾸기])은 백업 쪽이 더 나중에 바꾼 것이라 그것으로 맞췄어요.' }) : null, // 1.7.0
       rep.incomingBehind
         ? h('p', { class: 'small muted', text: '이 기기에만 있던 내용도 있어요. 백업을 만든 기기도 맞추려면 아래 [이 기기 백업 파일 만들기]로 만든 파일을 그 기기에서 [합치기] 하세요.' })
         : (sameHere ? null : h('p', { class: 'small muted', text: '이제 이 기기 기록이 백업과 같아요.' }))
@@ -7951,19 +9155,137 @@
     var done = false;   // [담기]를 이미 눌렀음: 빠르게 두 번 눌러 같은 매물이 두 벌 저장되지 않게
     var lastStatus = null;
     var lastError = null;
+    // 1.7.0 다시 붙여넣기 갱신: 항목 열쇠 → { id(바꾼 매물), n(바꾼 값 수) } / true([취소]로 그대로 둠)
+    var refreshed = {};
+    var refreshOff = {};
+    var sameOk = {}; // 1.7.0 검토 반영: 같은 집인지 확실하지 않은 상자에서 "같은 집이 맞아요"를 체크함(항목 열쇠 → true)
 
     function entryKey(e) { return e.index + '|' + e.prop.name; }
+
+    /**
+     * 1.7.0: 같은 매물(매물번호 → 링크 → 단지명·동·면적·호가)을 이미 담았으면 미리보기 카드 아래에 "이미 담은 매물이에요" 상자.
+     * 바뀌는 값(KB시세·호가·관리비 등, 이전 → 새)을 보여 주고 [바꾸기](새 매물을 만들지 않고 값만, 이전 값은 이력에)·
+     * [새 매물로 담기](체크해서 [담기]로)·[취소](그대로). 호수·메모·체크 기록 등 사용자 입력은 바꾸지 않는다.
+     * 1.7.0 검토 반영:
+     *  - 같은 집인지 확실하지 않으면(existingMatch: 매물번호·층이 한쪽에만 있음, 둘 다 없음, 느슨한 판정) 제목을 "이미 담은 매물일 수
+     *    있어요"로 하고 까닭을 적은 뒤, "같은 집이 맞아요"를 체크해야 [바꾸기]가 켜진다. 담은 매물의 호수에서 나온 층과 새 글의 층이
+     *    다르면 [바꾸기]를 두지 않는다(전에는 1203호 매물에 3층 매물의 KB·관리비·대출 한도가 들어갔음)
+     *  - 바꾼 뒤 상자에 바꾼 값과 그대로 둔 값(직접 고친 값)을 나눠 적는다
+     *  - [새 매물로 담기]를 고르거나 카드를 체크하면 상자를 '새 매물로 담도록 골랐어요 · [되돌리기]'로 줄인다
+     */
+    function updateBox(e, idx) {
+      if (!e.canImport || !e.warnings.some(function (w) { return w.code === 'exists'; })) return null;
+      var match = existingMatch(e.prop, idx);
+      if (!match) return null;
+      var target = match.prop;
+      var k = entryKey(e);
+      var base = 'imp-' + e.index + '-up';
+      var unit = unitText(target);
+      var who = target.name + (unit ? ' ' + unit : '') + (target.status === 'dropped' ? ' (탈락)' : '');
+      if (hasOwn(refreshed, k)) {
+        var rf = refreshed[k];
+        return h('div', { class: 'imp-update is-done', id: base, role: 'group', 'aria-labelledby': base + '-t' },
+          h('strong', { class: 'imp-up-title', id: base + '-t', tabindex: '-1', text: '값을 바꿨어요 · ' + who }),
+          h('p', { class: 'small', text: '바꾼 값: ' + rf.changed.join(' · ') }),
+          rf.kept.length ? h('p', { class: 'small', text: '그대로 둔 값: ' + rf.kept.join(' · ') }) : null,
+          rf.hist ? h('p', { class: 'small muted', text: '바꾸기 전 KB시세·호가는 매물의 [이력 보기]에 남겼어요.' }) : null,
+          h('a', { class: 'btn btn-small btn-secondary', href: '#/p/' + encodeURIComponent(rf.id) }, '매물 보기'));
+      }
+      if (isOn(e)) {
+        return h('div', { class: 'imp-update is-off', id: base },
+          h('p', { class: 'small', id: base + '-t', tabindex: '-1', text: '새 매물로 담도록 골랐어요. 아래 [담기]를 누르면 ' + josa(who, '과', '와') + ' 따로 담아요.' }),
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: function () { picks[k] = false; redrawFocus(base + '-t'); } }, '되돌리기'));
+      }
+      if (refreshOff[k]) {
+        return h('div', { class: 'imp-update is-off', id: base },
+          h('p', { class: 'small muted', id: base + '-t', tabindex: '-1', text: '이미 담은 매물이라 그대로 두었어요.' }),
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: function () { delete refreshOff[k]; redrawFocus(base + '-t'); } }, '바꿀 값 다시 보기'));
+      }
+      var ch = refreshChanges(target, e.prop);
+      var list = ch.length ? h('ul', { class: 'imp-up-list', id: base + '-list' }, ch.map(function (c) {
+        return h('li', {},
+          h('span', { class: 'imp-up-k', text: c.label }),
+          h('span', { class: 'imp-up-v' }, h('span', { class: 'imp-up-from', text: c.from }), ' → ', h('strong', { text: c.to })),
+          c.hand ? h('span', { class: 'imp-up-hand', text: '직접 고친 값' }) : null);
+      })) : h('p', { class: 'small muted', id: base + '-list', text: '바뀐 값이 없어요. 담아 둔 값과 같아요.' });
+      // 같은 집인지 확실하지 않은 까닭(매물번호·층). 층이 다르면(conflict) [바꾸기]를 두지 않는다
+      var conflict = match.floorConflict;
+      var why = match.warn;
+      var unsure = !match.sure;
+      var upBtn = conflict ? null : h('button', { type: 'button', class: 'btn btn-small', disabled: !ch.length || (unsure && !sameOk[k]), 'aria-describedby': base + '-list', onclick: doUpdate }, '바꾸기');
+      var sameCb = unsure && !conflict && ch.length ? h('input', { type: 'checkbox', id: base + '-same', checked: !!sameOk[k] }) : null;
+      if (sameCb) sameCb.addEventListener('change', function () { sameOk[k] = sameCb.checked; upBtn.disabled = !sameCb.checked; });
+      function doUpdate() {
+        var hands = ch.filter(function (c) { return c.hand; });
+        var others = ch.filter(function (c) { return !c.hand; }).map(function (c) { return c.label; });
+        (hands.length ? confirmHandOverwrite(hands, others) : Promise.resolve({})).then(function (over) {
+          if (over === null || view !== v) return;
+          var p = findProp(target.id);
+          if (!p) { toast('그 매물을 찾지 못했어요. 다른 탭에서 지웠을 수 있어요.'); return; }
+          var keys = ch.filter(function (c) { return !c.hand || over[c.k]; }).map(function (c) { return c.k; });
+          if (!keys.length) { toast('바꾼 값이 없어요. 직접 고친 값은 그대로 두었어요.'); return; }
+          applyRefresh(p, e.prop, keys, finSourceOf(current));
+          saveNow();
+          var hist = keys.indexOf('kbPrice') >= 0 || keys.indexOf('askPrice') >= 0;
+          refreshed[k] = { id: p.id, n: keys.length, hist: hist,
+            changed: ch.filter(function (c) { return keys.indexOf(c.k) >= 0; }).map(function (c) { return c.label + ' ' + c.from + ' → ' + c.to; }),
+            kept: ch.filter(function (c) { return keys.indexOf(c.k) < 0; }).map(function (c) { return c.label + ' ' + c.from + '(직접 고친 값)'; }) };
+          picks[k] = false;
+          homeReveal[p.id] = true;
+          redrawFocus(base + '-t');
+          toast('값을 바꿨어요.' + (hist ? ' 이전 값은 이력에 남겼어요.' : ''), { duration: 6000, action: { label: '매물 보기', fn: function () { navigate('/p/' + p.id); } } });
+        });
+      }
+      return h('div', { class: 'imp-update' + (unsure || conflict ? ' is-unsure' : ''), id: base, role: 'group', 'aria-labelledby': base + '-t', 'aria-describedby': base + '-d' + (why.length ? ' ' + base + '-why' : '') },
+        h('strong', { class: 'imp-up-title', id: base + '-t', tabindex: '-1', text: conflict ? '다른 집일 수 있어요' : unsure ? '이미 담은 매물일 수 있어요' : '이미 담은 매물이에요' }),
+        h('p', { class: 'small', id: base + '-d', text: who + ' — ' + (conflict
+          ? '층이 달라 값을 바꾸지 않아요. 다른 집이면 [새 매물로 담기]로 따로 담으세요.'
+          : '새 매물을 만들지 않고 값만 바꿀 수 있어요. 호수·메모·체크 기록은 그대로예요.') }),
+        why.length ? h('p', { class: 'imp-up-why', id: base + '-why', text: (conflict ? '' : '같은 집인지 확인해 주세요. ') + why.join('. ') + '.' }) : null,
+        ch.length && !conflict ? h('p', { class: 'imp-up-sub', text: '바뀌는 값 (이전 → 새)' }) : null,
+        conflict ? null : list,
+        sameCb ? h('label', { class: 'toggle imp-up-same', for: base + '-same' }, sameCb, h('span', { text: '같은 집이 맞아요 (확인하면 [바꾸기]가 켜져요)' })) : null,
+        h('div', { class: 'btn-row imp-up-btns' },
+          upBtn,
+          h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () {
+            picks[k] = true;
+            redrawFocus(null);
+            toast('새 매물로 담도록 체크했어요. 아래 [담기]를 누르세요.', { duration: 4000 });
+            try { submitBtn.focus({ preventScroll: false }); } catch (err) { /* 무시 */ }
+          } }, '새 매물로 담기'),
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: function () {
+            refreshOff[k] = true;
+            picks[k] = false;
+            redrawFocus(base + '-t');
+          } }, '취소')));
+    }
+    /** 미리보기를 다시 그리고 id 요소로 초점(스크롤 위치는 그대로). 같은 상태 줄은 다시 읽히지 않는다(setStatus) */
+    function redrawFocus(id) {
+      var y = window.scrollY;
+      draw();
+      window.scrollTo(0, y);
+      var el = id ? document.getElementById(id) : null;
+      if (el) { try { el.focus({ preventScroll: true }); } catch (err) { /* 무시 */ } }
+    }
     function isOn(e) {
       var k = entryKey(e);
       return e.canImport && (hasOwn(picks, k) ? picks[k] : e.checked);
     }
     function chosen() { return current && current.ok ? current.entries.filter(isOn) : []; }
 
+    /** 1.7.0 검토 반영: [바꾸기]로 값만 바꾼 항목 수와, 그 밖에 아직 담을 수 있는 항목 수 */
+    function refreshedCounts() {
+      var es = current && current.ok ? current.entries : [];
+      var rn = es.filter(function (e) { return hasOwn(refreshed, entryKey(e)); }).length;
+      var left = es.filter(function (e) { return e.canImport && !hasOwn(refreshed, entryKey(e)); }).length;
+      return { refreshed: rn, left: left };
+    }
     function refreshCount() {
       if (done) return; // 담는 중: 다시 살리지 않는다
       var n = chosen().length;
+      var rc = refreshedCounts();
       submitBtn.disabled = !n;
-      submitBtn.textContent = n ? n + '개 담기' : '담을 매물을 골라 주세요';
+      submitBtn.textContent = n ? n + '개 담기' : rc.refreshed && !rc.left ? '새로 담을 매물이 없어요' : '담을 매물을 골라 주세요';
     }
 
     function previewCard(e) {
@@ -8005,6 +9327,8 @@
         picks[k] = cb.checked;
         card.classList.toggle('is-off', !cb.checked);
         refreshCount();
+        // 1.7.0 검토 반영: 카드 아래 "이미 담은 매물" 상자가 있으면 고른 대로 다시 그린다(체크하면 '새 매물로 담도록 골랐어요')
+        if (document.getElementById(base + '-up')) redrawFocus(base + '-cb');
       });
       return card;
     }
@@ -8061,11 +9385,18 @@
             : dupN === offN ? '이미 있는 매물 ' + dupN + '개는 빼 두었어요. 담을 매물만 체크하세요.'
               : '확인이 필요한 매물 ' + offN + '개는 체크를 빼 두었어요. 경고를 읽고 담을 매물만 체크하세요.'
       ];
+      // 1.7.0 검토 반영: [바꾸기]로 값을 바꾼 뒤에는 그에 맞게(전에는 바꾼 뒤에도 '담을 매물만 체크하세요'가 남았음)
+      var rc = refreshedCounts();
+      if (rc.refreshed) lines[1] = '이미 담은 매물 ' + rc.refreshed + '개는 값을 바꿨어요. ' + (rc.left ? '새로 담을 매물만 체크하세요.' : '새로 담을 매물은 없어요.');
       if (r.truncated) lines.push('한 번에 ' + IMP.LIMITS.properties + '개까지 담을 수 있어요. 앞의 ' + IMP.LIMITS.properties + '개만 보여 줘요.');
       if (r.skipped) lines.push('읽을 수 없는 항목 ' + r.skipped + '개는 뺐어요.');
       if (r.incomplete) lines.push('글이 길어 뒷부분은 읽지 못했어요. 코드 부분만 붙여 넣어 주세요.');
       setStatus(lines);
-      r.entries.forEach(function (e) { list.append(previewCard(e)); });
+      var idx = IMP.indexProps ? IMP.indexProps(state.properties) : null; // 1.7.0: 이미 담은 매물 찾기용
+      r.entries.forEach(function (e) {
+        list.append(previewCard(e));
+        appendKid(list, updateBox(e, idx)); // 1.7.0: "이미 담은 매물이에요" → [바꾸기]/[새 매물로 담기]/[취소]
+      });
       hint.hidden = false;
       actions.hidden = false;
       refreshCount();
@@ -8156,13 +9487,16 @@
       clearTimeout(timer);
       timer = null;
       // 1.4.0: 가져오기 코드를 먼저 찾고, 없거나 못 읽으면 네이버 매물 화면 글로 읽는다
-      current = (IMP.parseText || IMP.parse)(ta.value, { existing: state.properties, goneKeys: state.goneKeys });
+      // 1.7.0: today = KB시세 기준일이 글에 없을 때 쓸 날(네이버 화면의 KB시세에는 날짜가 없음 → 가져온 날)
+      current = (IMP.parseText || IMP.parse)(ta.value, { existing: state.properties, goneKeys: state.goneKeys, today: todayISO() });
       draw();
     }
 
     function onTextChange() {
       var text = ta.value;
       clearBtn.hidden = !text;
+      refreshed = {}; // 1.7.0: 글이 바뀌면 "바꿨어요·그대로 두었어요" 표시를 지우고 새로 비교한다
+      refreshOff = {};
       if (text && text.length <= IMP.LIMITS.inputChars) sessionSet(IMPORT_TEXT_KEY, text);
       else sessionRemove(IMPORT_TEXT_KEY);
       clearTimeout(timer);
@@ -8244,6 +9578,8 @@
       submitBtn.disabled = true;
       var now = Date.now();
       var src = current && current.source === 'naver' ? (IMP.NAVER_SOURCE_ID || 'naver-text') : IMP.SOURCE_ID; // 어디서 읽은 매물인지
+      var hsrc = finSourceOf(current); // 1.7.0: 이력의 출처('naver' | 'code')
+      var today = todayISO();
       var made = picked.map(function (e, i) {
         var p = e.prop;
         // 1.5.0(M7): 앱 안내 문장(면적 환산 안내 등)과 가져오기 참고 문구(e.notes)는 메모가 아니라 importNotes 로.
@@ -8251,7 +9587,7 @@
         var sp = splitImportMemo(p.memo, e.notes);
         var memo = sp.memo;
         if (p.tradeType && p.tradeType !== '매매') memo = '거래 종류: ' + p.tradeType + (memo ? '\n' + memo : '');
-        return normalizeProperty({
+        var raw = {
           id: uid(), name: p.name, dong: p.dong, ho: '', // 호수는 늘 사용자가 직접
           area: p.area, supplyArea: p.supplyArea, floor: p.floor, direction: p.direction,
           askPrice: p.askPrice, realPrice: p.realPrice, agentName: p.agentName, agentPhone: p.agentPhone,
@@ -8260,7 +9596,9 @@
           status: 'review', createdAt: now, updatedAt: now - i, // 코드 순서대로 목록 맨 위에
           importedAt: now, source: src,
           fieldsAt: {} // 새 매물(예전 기록이 아님)
-        });
+        };
+        importFinInto(raw, p, hsrc, today, now - i); // 1.7.0: KB시세·관리비 등 참고값과 첫 이력
+        return normalizeProperty(raw);
       });
       Array.prototype.unshift.apply(state.properties, made);
       made.forEach(function (p) { homeReveal[p.id] = true; }); // 1.5.1 검토 반영: 홈 필터·검색이 남아 있어도 담은 매물이 홈에서 보이게

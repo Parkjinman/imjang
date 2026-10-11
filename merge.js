@@ -34,6 +34,9 @@
  *   - 1.6.0 등기부 해석 기록(registrySnapshots: [{ id, …, t }])은 id 합집합. 같은 id 는 t(없으면 addedAt)가 큰 쪽(같으면 내 것).
  *     지운 기록은 registrySnapshotsRemoved { 기록id: 지운 시각 } 합집합(큰 시각)으로 전하고, 지운 시각 뒤에 고친 기록이 아니면 뺀다.
  *     1.6.0 검토 반영: 열람 일시·고유번호·서류 종류가 같은 겹친 기록(두 기기에서 같은 PDF 를 따로 올림)은 하나로 줄인다(dedupeSnapshots).
+ *   - 1.7.0 대출·비용 칸(KB시세·협상가·리모델링비·공시가격·네이버 참고값)은 기본 정보처럼 fieldsAt 으로 비교하고 모두 LATE_FIELDS.
+ *     KB시세의 기준일·출처(kbAt·kbSource)는 KB시세를 고른 쪽 것을 같이 쓴다(FIELD_GROUPS). 값 이력(kbHistory·askHistory)은 합집합,
+ *     syncAt({ 칸: 가져오기로 값을 넣은 시각 })은 칸마다 큰 쪽. 전역 대출 조건(state.settings)은 financeAt 이 더 나중인 쪽(mergeSettings).
  *   - 매물 삭제는 deleted { 매물id: 지운 시각 } 로 전한다. 지운 시각보다 나중에 고친 매물은 지우지 않고 남긴다.
  *     전체 삭제·[덮어쓰기]로 지운 것(app.js localDeleted)은 이 기기 일이라 여기서 다루지 않는다.
  */
@@ -46,11 +49,26 @@
 
   // 기본 정보(폼에서 고치는 칸 + 가져오기 코드의 공급면적). fieldsAt 의 키
   // 1.6.0: sellerName(매도인 이름. 등기부 소유자와 비교에 씀) 추가
+  // 1.7.0: 대출·비용 칸. KB시세(kbPrice, 만원)·협상가(dealPrice)·리모델링비(remodelCost)·공시가격(publicPrice)은 사용자가 넣거나 고치고,
+  //   네이버 참고값(대출 한도·금리·관리비·세금)은 가져오기와 [바꾸기](다시 붙여넣기)가 바꾼다. 모두 필드마다 더 나중에 바꾼 쪽
+  var FIN_FIELDS = ['kbPrice', 'dealPrice', 'remodelCost', 'publicPrice', 'naverLoanLimit', 'naverRate',
+    'feeMonthly', 'feeAvg', 'feeSummer', 'feeWinter', 'feeRecent', 'acqTaxNaver', 'propertyTaxNaver'];
   var FIELDS = ['name', 'dong', 'ho', 'area', 'supplyArea', 'floor', 'direction', 'askPrice', 'realPrice',
-    'agentName', 'agentPhone', 'memo', 'sourceUrl', 'sellerName'];
+    'agentName', 'agentPhone', 'memo', 'sourceUrl', 'sellerName'].concat(FIN_FIELDS);
   // 1.6.0: FIELDS 가운데 나중에 늘어난 칸. 시각(fieldsAt)이 없는 빈 값은 "그때 비어 있었다"가 아니라 "아직 몰랐다"(시각 0)로 본다.
   // 그러지 않으면 예전 버전(1.5.x) 기기·탭이 쓴 사본의 빈 값이 그 사본의 updatedAt 을 시각으로 얻어, 다른 기기에서 먼저 적은 이름을 지운다
+  // 1.7.0: 대출·비용 칸도 모두 나중에 늘어난 칸(예전 버전 사본은 이 칸을 모른다)
   var LATE_FIELDS = { sellerName: 1 };
+  FIN_FIELDS.forEach(function (f) { LATE_FIELDS[f] = 1; });
+  // 1.7.0: 함께 움직이는 칸. KB시세를 고른 쪽의 기준일(kbAt)·출처(kbSource)를 같이 쓴다(값과 날짜가 엇갈리지 않게)
+  var FIELD_GROUPS = { kbPrice: ['kbAt', 'kbSource'] };
+  // 1.7.0: 값 이력(KB시세·호가). [{ value, at('YYYY-MM-DD'), source('naver'|'code'|'manual'), t(ms, 있으면) }] 합집합.
+  // 날짜·값·출처·시각이 모두 같은 것만 하나로, 순서는 시각(t) → 날짜 → 값. 최근 HISTORY_MAX 개만
+  var HISTORY_FIELDS = ['kbHistory', 'askHistory'];
+  var HISTORY_MAX = 20;
+  // 1.7.0: { 칸: ms } 꼴의 시각 묶음. 칸마다 큰 쪽(합집합). syncAt = 가져오기·다시 붙여넣기가 그 칸에 값을 마지막으로 넣은 시각
+  // (fieldsAt 이 그보다 나중이면 손으로 고친 값 → 다시 붙여넣기가 덮어쓰기 전에 묻는다)
+  var TIME_MAP_FIELDS = ['syncAt'];
   // 진행 상태 묶음. statusAt 하나로 함께 움직인다(탈락 사유는 상태와 같이 정해지므로)
   var STATUS_FIELDS = ['status', 'dropReason'];
   // 가져오기 코드가 채우는 값. 사용자가 고치지 않으므로 시각 없이 "비어 있지 않은 쪽"
@@ -91,6 +109,7 @@
       for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
       return true;
     }
+    if (isObj(a) && isObj(b)) return stable(a) === stable(b); // 1.7.0: 작은 객체 값(naverRate·feeRecent)은 내용으로
     return false;
   }
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
@@ -130,8 +149,14 @@
   /** 두 매물의 내용이 같은지(시각·id 는 보지 않음) */
   function sameProperty(a, b) {
     if (!isObj(a) || !isObj(b)) return a === b;
-    var keys = FIELDS.concat(STATUS_FIELDS, OTHER_FIELDS);
+    var keys = FIELDS.concat(STATUS_FIELDS, OTHER_FIELDS, FIELD_GROUPS.kbPrice);
     for (var i = 0; i < keys.length; i++) if (!sameVal(a[keys[i]], b[keys[i]])) return false;
+    for (var tm = 0; tm < TIME_MAP_FIELDS.length; tm++) { // 1.7.0
+      if (stable(timeMap(a[TIME_MAP_FIELDS[tm]], 0)) !== stable(timeMap(b[TIME_MAP_FIELDS[tm]], 0))) return false;
+    }
+    for (var h = 0; h < HISTORY_FIELDS.length; h++) { // 1.7.0: 값 이력
+      if (stable(histList(a[HISTORY_FIELDS[h]])) !== stable(histList(b[HISTORY_FIELDS[h]]))) return false;
+    }
     var ik = unionKeys(a.items, b.items);
     for (var j = 0; j < ik.length; j++) if (!sameItem(own(a.items, ik[j]), own(b.items, ik[j]))) return false;
     var mk = unionKeys(a.sectionMemos, b.sectionMemos);
@@ -226,6 +251,44 @@
       out.push(keep);
     });
     return out;
+  }
+
+  // ---------------- 1.7.0 값 이력(kbHistory·askHistory) ----------------
+  var HIST_SOURCES = { naver: 1, code: 1, manual: 1 };
+  /** 이력 목록: 배열이고 value 가 유한한 수인 객체만(없으면 빈 배열) */
+  function histList(v) {
+    return Array.isArray(v) ? v.filter(function (e) { return isObj(e) && typeof e.value === 'number' && isFinite(e.value); }) : [];
+  }
+  // 같은 기록인지: 날짜·값·출처·시각(t). 같은 날 값이 돌아온 것(2억 3,000 → 2억 3,450 → 2억 3,000)도 따로 남는다
+  function histKey(e) { return str(e.at) + '|' + e.value + '|' + (HIST_SOURCES[e.source] ? e.source : '') + '|' + ms(e.t); }
+  function histCmp(x, y) {
+    return (ms(x.t) - ms(y.t)) || (str(x.at) < str(y.at) ? -1 : str(x.at) > str(y.at) ? 1 : 0) || (x.value - y.value) ||
+      (str(x.source) < str(y.source) ? -1 : str(x.source) > str(y.source) ? 1 : 0);
+  }
+  /**
+   * 두 이력의 합집합. 날짜·값·출처·시각이 같은 기록은 하나로, 순서는 t → 날짜 → 값 → 출처.
+   * 어느 기기에서 어떤 순서로 합쳐도 같은 결과. 넘치면 최근 HISTORY_MAX 개. 결과는 새 배열(사본)
+   */
+  function mergeHistory(a, b) {
+    var pick = {};
+    histList(a).concat(histList(b)).forEach(function (e) {
+      var k = histKey(e);
+      if (!hasOwn(pick, k) || histCmp(e, pick[k]) < 0) pick[k] = e;
+    });
+    var out = Object.keys(pick).map(function (k) { return clone(pick[k]); });
+    out.sort(histCmp);
+    return out.length > HISTORY_MAX ? out.slice(out.length - HISTORY_MAX) : out;
+  }
+
+  /**
+   * 1.7.0: 전역 대출 조건(state.settings = { finance: {…}, financeAt: ms }) 두 사본 중 더 나중에 바꾼 쪽.
+   * 결과 { value(사본, 둘 다 없으면 undefined), fromI(받은 쪽을 골랐으면 true), localNewer(내 쪽이 더 나중) }. 시각이 같으면 내 것
+   */
+  function mergeSettings(a, b) {
+    var ta = isObj(a) ? ms(a.financeAt) : 0;
+    var tb = isObj(b) ? ms(b.financeAt) : 0;
+    if (tb > ta) return { value: clone(b), fromI: true, localNewer: false };
+    return { value: isObj(a) ? clone(a) : undefined, fromI: false, localNewer: ta > tb };
   }
 
   // ---------------- 항목 안의 값별 시각(ft) ----------------
@@ -430,12 +493,16 @@
       var late = !!LATE_FIELDS[f];
       var lt = ms(own(L.fieldsAt, f)) || (late && blank(L[f]) ? 0 : lBase);
       var it = ms(own(I.fieldsAt, f)) || (late && blank(I[f]) ? 0 : iBase);
+      var grp = hasOwn(FIELD_GROUPS, f) ? FIELD_GROUPS[f] : [];
       if (it > lt) {
         set(out, f, I[f]);
         fa[f] = it;
-        if (!sameVal(L[f], I[f])) sum.fields++;
+        var diff = !sameVal(L[f], I[f]);
+        grp.forEach(function (g) { set(out, g, I[g]); if (!sameVal(L[g], I[g])) diff = true; }); // 1.7.0: KB 기준일·출처도 같은 쪽
+        if (diff) sum.fields++;
       } else {
         set(out, f, L[f]);
+        grp.forEach(function (g) { set(out, g, L[g]); });
         if (lt) fa[f] = lt;
       }
     });
@@ -527,6 +594,22 @@
       snapN = ms5.n;
     }
 
+    // 5'') 1.7.0 값 이력(KB시세·호가): 합집합(한쪽에만 있어도 남김). 어느 쪽에도 키가 없으면(예전 기록끼리) 만들지 않는다.
+    //      가져오기 시각(syncAt { 칸: ms })은 칸마다 큰 쪽
+    HISTORY_FIELDS.forEach(function (f) {
+      if (!hasOwn(L, f) && !hasOwn(I, f)) return;
+      var m = mergeHistory(L[f], I[f]);
+      if (stable(m) !== stable(histList(L[f]))) sum.other++;
+      out[f] = m;
+    });
+    TIME_MAP_FIELDS.forEach(function (f) {
+      if (!hasOwn(L, f) && !hasOwn(I, f)) return;
+      var a = timeMap(L[f], 0);
+      var m = unionMax(a, timeMap(I[f], 0));
+      if (stable(m) !== stable(a)) sum.other++;
+      out[f] = m;
+    });
+
     // 6) 나머지: id 는 내 것, 만든 시각은 이른 쪽, 고친 시각은 늦은 쪽
     set(out, 'id', L.id !== undefined ? L.id : I.id);
     var c1 = ms(L.createdAt);
@@ -608,7 +691,8 @@
     var gone = capNewest(unionMax(timeMap(L.goneKeys, cutoff), timeMap(I.goneKeys, cutoff)), goneMax);
     var report = {
       added: 0, merged: 0, updated: 0, deleted: 0, unchanged: 0, items: 0,
-      removed: [], keptAfterDelete: [], keptLocal: [], revived: [], skipped: [], incomingBehind: false
+      removed: [], keptAfterDelete: [], keptLocal: [], revived: [], skipped: [], incomingBehind: false,
+      settings: false // 1.7.0: 받은 쪽의 대출 조건을 가져왔으면 true
     };
 
     var lProps = Array.isArray(L.properties) ? L.properties : [];
@@ -687,6 +771,11 @@
     state.deleted = deleted;
     state.goneKeys = gone;
     state.ui = isObj(L.ui) ? clone(L.ui) : {};
+    // 1.7.0: 전역 대출 조건은 더 나중에 바꾼 쪽(기기 설정 ui 와 달리 기록의 일부로 함께 맞춘다)
+    var sm = mergeSettings(L.settings, I.settings);
+    if (sm.value !== undefined) state.settings = sm.value;
+    report.settings = sm.fromI;
+    if (sm.localNewer) report.incomingBehind = true;
     return { state: state, report: report };
   }
 
@@ -694,6 +783,12 @@
     after: after,
     FIELDS: FIELDS,
     LATE_FIELDS: LATE_FIELDS,
+    FIN_FIELDS: FIN_FIELDS,         // 1.7.0
+    FIELD_GROUPS: FIELD_GROUPS,     // 1.7.0
+    HISTORY_FIELDS: HISTORY_FIELDS, // 1.7.0
+    HISTORY_MAX: HISTORY_MAX,       // 1.7.0
+    mergeHistory: mergeHistory,     // 1.7.0
+    mergeSettings: mergeSettings,   // 1.7.0
     STATUS_FIELDS: STATUS_FIELDS,
     OTHER_FIELDS: OTHER_FIELDS,
     ITEM_FIELDS: ITEM_FIELDS,

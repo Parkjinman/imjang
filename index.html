@@ -22,13 +22,14 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="styles.css">
 
-  <!-- 순서 중요: 체크리스트 내용(data.js) → 가져오기 코드 해석기(import-parser.js) → 등기부 PDF 해석기(registry-parser.js, 1.6.0) → 두 기록 합치기(merge.js) → 앱(app.js). file:// 로 열어도 되도록 모듈이 아닌 일반 스크립트.
+  <!-- 순서 중요: 체크리스트 내용(data.js) → 가져오기 코드 해석기(import-parser.js) → 등기부 PDF 해석기(registry-parser.js, 1.6.0) → 두 기록 합치기(merge.js) → 대출·비용 추정(finance.js, 1.7.0) → 앱(app.js). file:// 로 열어도 되도록 모듈이 아닌 일반 스크립트.
        PDF 읽기 도구(vendor/pdfjs/pdf.min.js, 약 0.4MB)는 여기서 부르지 않는다: 처음 PDF 를 올릴 때 app.js 가 스크립트 태그로 불러온다(loadPdfjs) -->
   <script>window.__bootFail = [];</script>
   <script defer src="data.js" onerror="__bootFail.push('data.js')"></script>
   <script defer src="import-parser.js" onerror="__bootFail.push('import-parser.js')"></script>
   <script defer src="registry-parser.js" onerror="__bootFail.push('registry-parser.js')"></script>
   <script defer src="merge.js" onerror="__bootFail.push('merge.js')"></script>
+  <script defer src="finance.js" onerror="__bootFail.push('finance.js')"></script>
   <script defer src="app.js" onerror="__bootFail.push('app.js')"></script>
 </head>
 <body>
