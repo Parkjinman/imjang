@@ -27,7 +27,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.7.0';
+  var APP_VERSION = '1.7.1';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -7644,19 +7644,22 @@
       var items = C.items.filter(function (it) { return it.amount !== 0 || it.key === 'acqTax'; });
       var notes = [];
       C.items.forEach(function (it) { if (it.notes && it.notes.length) notes.push(h('li', { text: it.label + ': ' + it.notes.join(' ') })); });
-      var WHEN = { contract: '계약일', balanceDay: '잔금일', after: '잔금 후' };
+      // 값이 금액이므로 이름표도 '때'가 아니라 '그때 필요한 돈'으로 읽히게 한다. 작은 글씨는 그 돈에 든 것
+      var WHEN = { contract: '계약일에 필요한 돈', balanceDay: '잔금일에 필요한 돈', after: '잔금 후 필요한 돈' };
+      var WHEN_IN = { contract: '계약금', balanceDay: '잔금(대출 뺀 몫) + 세금·수수료', after: '이사비·수리비' };
+      var PAY_AT = { contract: '계약일에 냄', balanceDay: '잔금일에 냄', after: '잔금 후 냄' };
       box.append(h('div', { class: 'fin-sec fin-cash' },
         h('h3', { class: 'fin-h', text: '필요한 현금 내역' }),
         h('p', { class: 'fin-cash-sum' }, '총비용 ' + manText(C.totalCost) + ' − 대출 ' + manText(C.loan) + ' = ',
           h('span', { class: 'fin-num', 'data-fin': 'cash', 'data-man': String(C.cash), text: manText(C.cash) })),
-        h('ol', { class: 'fin-timeline', 'aria-label': '돈이 나가는 때' },
+        h('ol', { class: 'fin-timeline', 'aria-label': '언제 얼마가 필요한지' },
           ['contract', 'balanceDay', 'after'].map(function (w) {
-            return h('li', {}, h('span', { class: 'fin-when', text: WHEN[w] + (w === 'after' ? '(이사·수리)' : '') }),
+            return h('li', {}, h('span', { class: 'fin-when' }, WHEN[w], h('small', { class: 'fin-when-in', text: WHEN_IN[w] })),
               h('span', { class: 'fin-num', 'data-fin': w, 'data-man': String(C.timeline[w]), text: manText(C.timeline[w]) }));
           })),
         h('ul', { class: 'fin-items', 'aria-label': '들어가는 돈' }, items.map(function (it) {
           return h('li', { 'data-k': it.key },
-            h('span', { class: 'fin-item-l' }, it.key === 'remodel' ? '리모델링비' : it.label, h('span', { class: 'fin-item-w', text: ' · ' + WHEN[it.when] })),
+            h('span', { class: 'fin-item-l' }, it.key === 'remodel' ? '리모델링비' : it.label, h('span', { class: 'fin-item-w', text: ' · ' + PAY_AT[it.when] })),
             h('span', { class: 'fin-num', 'data-man': String(it.amount), text: manText(it.amount) }));
         })),
         notes.length ? h('details', { class: 'fin-notes' }, h('summary', {}, '항목 설명'), h('ul', {}, notes)) : null));
@@ -7701,7 +7704,7 @@
     if (c.price) out.push('- 계산에 쓴 매매가 ' + manText(c.price) + (c.priceKind === 'deal' ? '(협상가)' : '(호가)'));
     // 1.7.0 검토 반영: 조건 괄호는 실제 계산에 쓴 LTV·기간(카드의 계산 조건 줄과 같은 문구)
     if (c.limit) out.push('- 대출 한도 약 ' + manText(c.limit.limit) + (c.pay ? ' · 첫 달 상환 약 ' + manText(c.pay.firstMonth) : '') + ' (' + finCondText(c.settings, c) + ')');
-    if (c.cash) out.push('- 필요한 현금 약 ' + manText(c.cash.cash) + ' (계약일 ' + manText(c.cash.timeline.contract) + ' · 잔금일 ' + manText(c.cash.timeline.balanceDay) + ' · 잔금 후 ' + manText(c.cash.timeline.after) + ')');
+    if (c.cash) out.push('- 필요한 현금 약 ' + manText(c.cash.cash) + ' (계약일에 ' + manText(c.cash.timeline.contract) + ' · 잔금일에 ' + manText(c.cash.timeline.balanceDay) + ' · 잔금 후에 ' + manText(c.cash.timeline.after) + ')');
     if (c.hold) out.push('- 1년 보유비용 약 ' + manText(c.hold.total) + ' · 월 주거비 약 ' + manText(c.hold.monthly.total) + (c.hold.taxYear ? ' (재산세 ' + c.hold.taxYear + '년분 기준)' : ''));
     out.push('- 추정이에요. 대출은 은행, 세금은 위택스·구청에서 확인하세요.');
     return out;

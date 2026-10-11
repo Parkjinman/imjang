@@ -8,7 +8,7 @@
 'use strict';
 
 var CACHE_PREFIX = 'imjang-static-';
-var CACHE_VERSION = CACHE_PREFIX + 'v1.7.0';
+var CACHE_VERSION = CACHE_PREFIX + 'v1.7.1';
 
 // 사전 캐시 목록 — 실제 파일과 반드시 일치해야 한다(하나라도 없으면 설치 실패).
 // tools/make-dist.js 가 이 목록의 파일만 배포 폴더로 복사한다.

@@ -1762,7 +1762,8 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 /* 돈이 나가는 때: 폰에서는 한 줄에 하나(이름 왼쪽·금액 오른쪽, 큰 숫자가 중간에 끊기지 않게), 넓은 화면(iPad)에서는 세 칸 */
 .fin-timeline { list-style: none; display: grid; gap: 6px; }
 .fin-timeline li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--card-2); border: 1px solid var(--line); min-width: 0; }
-.fin-when { color: var(--muted); font-size: 0.8235rem; font-weight: 700; }
+.fin-when { font-size: 0.8235rem; font-weight: 700; min-width: 0; }
+.fin-when-in { display: block; color: var(--muted); font-size: 0.7647rem; font-weight: 500; margin-top: 1px; }
 .fin-timeline .fin-num { font-weight: 800; font-size: 0.9412rem; text-align: right; overflow-wrap: anywhere; }
 @media (min-width: 560px) {
   .fin-timeline { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
