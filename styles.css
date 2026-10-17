@@ -976,7 +976,8 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
   bottom: 0;
   z-index: 40;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr); /* 1.10.0: 탭 수(5개)에 맞춰 같은 폭으로. 320px 에서는 한 탭 64px */
   padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
   background: var(--tabbar-bg);
   -webkit-backdrop-filter: saturate(180%) blur(16px);
@@ -1001,6 +1002,12 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 .tab[aria-current="page"] { color: var(--teal-ink); }
 .tab[aria-current="page"] .ic { color: var(--orange); }
 .tab:active { opacity: 0.7; }
+/* 1.10.0: 탭이 5개라 좁은 화면에서 '용어·링크'가 잘리지 않게 — 글자는 한 줄, 320px 대에서는 글자·아이콘을 조금 줄인다(모양은 그대로) */
+.tab > span { max-width: 100%; padding: 0 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 359px) {
+  .tab { font-size: 11px; letter-spacing: -0.02em; gap: 1px; }
+  .tab .ic { width: 24px; height: 24px; }
+}
 
 /* ---------- 토스트 ---------- */
 .toast {
@@ -1868,3 +1875,89 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 /* 1.7.0 검토 반영: 같은 집인지 확실하지 않은 상자(까닭 + "같은 집이 맞아요" 체크) */
 .imp-up-why { font-size: 0.8824rem; font-weight: 700; color: var(--orange-ink); }
 .imp-up-same { display: flex; font-size: 0.8824rem; }
+
+/* ---------- 1.10.0 일정 탭·주요 날짜 카드 ---------- */
+/* 홈 카드 가격 줄의 기한 칩 "D-3 잔금"(KB 칩 모양). 지난 기한은 빨강 */
+.sched-chip { background: var(--orange-soft); color: var(--orange-ink); }
+.sched-chip.is-past { background: var(--red-soft); color: var(--red-ink); }
+/* 주요 날짜 카드(상세·일정 탭 같은 카드). 날짜 칸 2열, 좁으면 1열. 칸 옆 ✕(값이 있을 때만) */
+.sched-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 419px) { .sched-grid { grid-template-columns: minmax(0, 1fr); } }
+.sched-field .input { min-width: 0; }
+.sched-field .input-clear .sched-clear { width: 40px; height: 40px; margin-right: -6px; flex: none; }
+.sched-field .input-clear .sched-clear[hidden] { display: none; }
+.sched-field .field-hint { margin-top: 4px; }
+.sched-weekend { padding: 8px 12px; border-radius: var(--radius-sm); background: var(--red-soft); color: var(--red-ink); font-weight: 700; }
+.sched-card .fin-sum-line { color: var(--orange-ink); }
+/* 검토 반영: 머리 줄의 지난 기한은 홈 칩과 같이 빨강 */
+.sched-card .fin-sum-line.is-past { color: var(--red-ink); }
+.sched-foot > .btn { flex: 1 1 140px; }
+/* 일정 줄 목록 */
+.sched-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.sched-row {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 6px 8px 6px 4px;
+  border-radius: var(--radius-sm); background: var(--card); box-shadow: var(--shadow);
+  border-left: 4px solid var(--line);
+}
+.sched-row.sev-stop { border-left-color: var(--red); }
+.sched-row.sev-caution { border-left-color: var(--yellow); }
+.sched-row.sev-info { border-left-color: var(--teal); }
+.sched-row.is-done { opacity: 0.72; border-left-color: var(--line); }
+.sched-row.is-done .sched-title { text-decoration: line-through; color: var(--muted); }
+.sched-row.is-dropped .sched-prop { text-decoration: line-through; }
+.sched-check {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; margin: 0; padding: 0; border: 0; background: transparent; border-radius: 10px;
+}
+.sched-check .check-box { margin-top: 0; width: 28px; height: 28px; }
+.sched-check[aria-checked="true"] .check-box { background: var(--teal); border-color: var(--teal); }
+.sched-check[aria-checked="true"] .check-box::after {
+  content: ""; position: absolute; left: 8px; top: 2px; width: 8px; height: 14px;
+  border: solid #fff; border-width: 0 3px 3px 0; transform: rotate(45deg);
+}
+.sched-main { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; color: inherit; text-decoration: none; }
+.sched-d {
+  flex: none; min-width: 3.4em; padding: 3px 6px; border-radius: 6px; text-align: center;
+  background: var(--teal-soft); color: var(--teal-ink); font-size: 0.8235rem; font-weight: 800; white-space: nowrap;
+}
+.sched-row.is-today .sched-d { background: var(--orange-soft); color: var(--orange-ink); }
+/* 검토 반영: 지난 것 중 법정·계약 기한(kind deadline)만 빨강. 지난 '그날 할 일'·내 일정은 회색 D+n(되돌릴 수 없는 날이라 겁주지 않게) */
+.sched-row.is-past.kind-deadline .sched-d { background: var(--red-soft); color: var(--red-ink); }
+.sched-row.is-past:not(.kind-deadline) .sched-d { background: var(--chip); color: var(--muted); }
+.sched-row.is-done .sched-d { background: var(--chip); color: var(--muted); }
+.sched-body { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.sched-top { overflow-wrap: anywhere; }
+.sched-prop { font-size: 0.8235rem; font-weight: 700; color: var(--muted); margin-right: 6px; }
+.sched-title { font-size: 0.9412rem; font-weight: 700; }
+.sched-why { font-size: 0.7647rem; color: var(--muted); line-height: 1.45; }
+.sched-date { font-size: 0.7647rem; font-weight: 600; color: var(--muted); }
+.sched-row.is-past.kind-deadline:not(.is-done) .sched-date { color: var(--red-ink); }
+.sched-edit { flex: none; align-self: center; }
+.sched-mini .sched-row { box-shadow: none; background: var(--card-2); }
+.sched-past-note { font-size: 0.8235rem; font-weight: 700; color: var(--red-ink); margin-top: 8px; }
+.sched-past-note.is-todo { color: var(--muted); }
+/* 검토 반영: "다음에 할 일" 카드의 지난 기한 안내는 누르면 "지난 것"을 여는 버튼 */
+.sched-past-btn {
+  display: block; appearance: none; -webkit-appearance: none; border: 0; background: transparent; margin: 4px 0 0; padding: 8px 0 4px;
+  font: inherit; font-size: 0.8235rem; font-weight: 700; color: var(--red-ink); text-align: left; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px; min-height: 44px;
+}
+.sched-past-btn.is-todo { color: var(--muted); }
+.sched-past-btn:focus-visible { border-radius: 6px; }
+.sched-next .sched-list { margin-top: 10px; }
+.sched-hint { margin: 8px 2px 0; }
+/* 묶음 머리(지난 것은 접히는 details) */
+.sched-group { margin-top: 6px; }
+.sched-gt { justify-content: flex-start; }
+.sched-group-past > summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; }
+.sched-group-past > summary::-webkit-details-marker { display: none; }
+.sched-group-past .sched-gt .count { color: var(--red-ink); }
+.sched-gchev { color: var(--muted); transition: transform 0.15s; }
+.sched-group-past[open] .sched-gchev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .sched-gchev { transition: none; } }
+.sched-chips { margin-top: 4px; }
+.sched-empty-btns > .btn { flex: 1 1 140px; }
+/* 일정 추가·고치기 대화상자 */
+.ce-form { gap: 12px; text-align: left; }
+.ce-form .input { min-width: 0; }

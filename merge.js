@@ -38,6 +38,11 @@
  *     KB시세의 기준일·출처(kbAt·kbSource)는 KB시세를 고른 쪽 것을 같이 쓴다(FIELD_GROUPS). 값 이력(kbHistory·askHistory)은 합집합,
  *     syncAt({ 칸: 가져오기로 값을 넣은 시각 })은 칸마다 큰 쪽. 전역 대출 조건(state.settings)은 financeAt 이 더 나중인 쪽(mergeSettings).
  *   - 1.9.0 최근 실거래의 거래일·층(realAt·realFloor)은 realPrice 를 고른 쪽 것을 같이 쓴다(FIELD_GROUPS.realPrice). 따로 시각을 두지 않는다.
+ *   - 1.10.0 주요 날짜(dates { contractAt, balanceAt, vacateAt, leaseEndAt, moveInAt })는 날짜마다 fieldsAt['dates.<칸>'] 으로 비교한다
+ *     (모두 LATE: 시각 없는 빈 값은 "아직 몰랐다"). 사용자 일정(customEvents [{ id, at, title, memo, t }])은 id 합집합(같은 id 는 t 가 큰 쪽),
+ *     지운 일정은 customEventsRemoved { id: 지운 시각 } 합집합. 일정 완료 표시(scheduleDone { key: ms })는 key 마다 절댓값이 큰 쪽
+ *     (양수 = 완료한 시각, 음수 = 완료를 취소한 시각. 취소를 음수로 남겨 다른 기기의 예전 '완료'가 되살아나지 않게).
+ *     일정 설정(state.settings.schedule, scheduleAt)은 대출 조건(financeAt)과 따로 더 나중인 쪽(mergeSettings).
  *   - 매물 삭제는 deleted { 매물id: 지운 시각 } 로 전한다. 지운 시각보다 나중에 고친 매물은 지우지 않고 남긴다.
  *     전체 삭제·[덮어쓰기]로 지운 것(app.js localDeleted)은 이 기기 일이라 여기서 다루지 않는다.
  */
@@ -73,6 +78,11 @@
   // 1.7.0: { 칸: ms } 꼴의 시각 묶음. 칸마다 큰 쪽(합집합). syncAt = 가져오기·다시 붙여넣기가 그 칸에 값을 마지막으로 넣은 시각
   // (fieldsAt 이 그보다 나중이면 손으로 고친 값 → 다시 붙여넣기가 덮어쓰기 전에 묻는다)
   var TIME_MAP_FIELDS = ['syncAt'];
+  // 1.10.0: 매물의 주요 날짜(property.dates 안의 칸). fieldsAt 키는 'dates.<칸>'. 모두 나중에 늘어난 칸(LATE 와 같은 규칙)
+  var DATE_FIELDS = ['contractAt', 'balanceAt', 'vacateAt', 'leaseEndAt', 'moveInAt'];
+  function dateKey(f) { return 'dates.' + f; }
+  // 1.10.0: 일정 완료 표시 { 항목 key: ms }. 양수 = 완료, 음수 = 완료 취소(그 시각의 음수). key 마다 절댓값이 큰 쪽(같으면 내 것)
+  var SIGNED_TIME_MAP_FIELDS = ['scheduleDone'];
   // 진행 상태 묶음. statusAt 하나로 함께 움직인다(탈락 사유는 상태와 같이 정해지므로)
   var STATUS_FIELDS = ['status', 'dropReason'];
   // 가져오기 코드가 채우는 값. 사용자가 고치지 않으므로 시각 없이 "비어 있지 않은 쪽"
@@ -160,6 +170,11 @@
     }
     for (var h = 0; h < HISTORY_FIELDS.length; h++) { // 1.7.0: 값 이력
       if (stable(histList(a[HISTORY_FIELDS[h]])) !== stable(histList(b[HISTORY_FIELDS[h]]))) return false;
+    }
+    for (var d = 0; d < DATE_FIELDS.length; d++) if (!sameVal(dateOf(a, DATE_FIELDS[d]), dateOf(b, DATE_FIELDS[d]))) return false; // 1.10.0
+    if (stable(eventList(a.customEvents).map(eventContent)) !== stable(eventList(b.customEvents).map(eventContent))) return false; // 1.10.0
+    for (var sd = 0; sd < SIGNED_TIME_MAP_FIELDS.length; sd++) { // 1.10.0
+      if (stable(signedMap(a[SIGNED_TIME_MAP_FIELDS[sd]])) !== stable(signedMap(b[SIGNED_TIME_MAP_FIELDS[sd]]))) return false;
     }
     var ik = unionKeys(a.items, b.items);
     for (var j = 0; j < ik.length; j++) if (!sameItem(own(a.items, ik[j]), own(b.items, ik[j]))) return false;
@@ -289,10 +304,75 @@
    * 결과 { value(사본, 둘 다 없으면 undefined), fromI(받은 쪽을 골랐으면 true), localNewer(내 쪽이 더 나중) }. 시각이 같으면 내 것
    */
   function mergeSettings(a, b) {
-    var ta = isObj(a) ? ms(a.financeAt) : 0;
-    var tb = isObj(b) ? ms(b.financeAt) : 0;
-    if (tb > ta) return { value: clone(b), fromI: true, localNewer: false };
-    return { value: isObj(a) ? clone(a) : undefined, fromI: false, localNewer: ta > tb };
+    var A = isObj(a) ? a : null;
+    var B = isObj(b) ? b : null;
+    var ta = A ? ms(A.financeAt) : 0;
+    var tb = B ? ms(B.financeAt) : 0;
+    // 1.10.0: 일정 설정(schedule, scheduleAt)은 대출 조건과 따로 비교한다(한쪽에서 대출 조건만, 다른 쪽에서 일정 설정만 바꿨어도 둘 다 남게)
+    var sa = A ? ms(A.scheduleAt) : 0;
+    var sb = B ? ms(B.scheduleAt) : 0;
+    var finI = tb > ta;
+    var schedI = sb > sa;
+    if (!finI && !schedI) return { value: A ? clone(A) : undefined, fromI: false, schedule: false, localNewer: ta > tb || sa > sb };
+    var out = clone(A || {});
+    if (finI) { out.finance = clone(B.finance); out.financeAt = B.financeAt; }
+    if (schedI) { out.schedule = clone(B.schedule); out.scheduleAt = B.scheduleAt; }
+    return { value: out, fromI: finI, schedule: schedI, localNewer: ta > tb || sa > sb };
+  }
+
+  // ---------------- 1.10.0 주요 날짜·사용자 일정·완료 표시 ----------------
+  function dateOf(p, f) { return isObj(p) && isObj(p.dates) ? own(p.dates, f) : undefined; }
+  /** 사용자 일정 목록: 배열이고 id 가 있는 객체만 */
+  function eventList(v) {
+    return Array.isArray(v) ? v.filter(function (e) { return isObj(e) && !blank(e.id) && !BAD_KEYS[e.id]; }) : [];
+  }
+  function eventContent(e) { return { id: str(e.id), at: str(e.at), title: str(e.title), memo: str(e.memo) }; }
+  function eventT(e) { return ms(e.t); }
+  /**
+   * 사용자 일정 합치기: id 합집합. 같은 id 는 t(바뀐 시각)가 큰 쪽(같으면 내 것). 지운 일정 표시(customEventsRemoved)는 큰 시각 합집합,
+   * 지운 시각 뒤에 고친 일정이 아니면 뺀다. 결과 { list(날짜 → id 순), removed, n(받은 쪽에서 들어오거나 바뀐 수) }
+   */
+  function mergeEvents(L, I) {
+    var removed = unionMax(timeMap(L.customEventsRemoved, 0), timeMap(I.customEventsRemoved, 0));
+    var byId = {};
+    var n = 0;
+    eventList(L.customEvents).forEach(function (e) { if (!hasOwn(byId, e.id)) byId[e.id] = e; });
+    eventList(I.customEvents).forEach(function (e) {
+      var cur = own(byId, e.id);
+      if (!cur) { byId[e.id] = e; n++; return; }
+      if (eventT(e) > eventT(cur)) { byId[e.id] = e; if (stable(eventContent(e)) !== stable(eventContent(cur))) n++; }
+    });
+    var list = [];
+    Object.keys(byId).forEach(function (id) {
+      var e = byId[id];
+      var gone = own(removed, id) || 0;
+      if (gone && eventT(e) <= gone) return;
+      list.push(clone(e));
+    });
+    list.sort(function (x, y) { return (str(x.at) < str(y.at) ? -1 : str(x.at) > str(y.at) ? 1 : 0) || (str(x.id) < str(y.id) ? -1 : str(x.id) > str(y.id) ? 1 : 0); });
+    return { list: list, removed: removed, n: n };
+  }
+  /** { key: ms } 에서 0 이 아닌 유한한 수만(음수도 남긴다: 완료 취소 시각) */
+  function signedMap(m) {
+    var out = {};
+    if (!isObj(m)) return out;
+    Object.keys(m).forEach(function (k) {
+      if (BAD_KEYS[k]) return;
+      var v = typeof m[k] === 'number' ? m[k] : NaN;
+      if (isFinite(v) && v !== 0) out[k] = v;
+    });
+    return out;
+  }
+  /** 두 { key: ±ms } 의 합집합. 같은 key 는 절댓값이 큰 쪽(같으면 내 것) */
+  function unionSigned(a, b) {
+    var out = {};
+    unionKeys(a, b).forEach(function (k) {
+      var x = own(a, k), y = own(b, k);
+      if (x === undefined) out[k] = y;
+      else if (y === undefined) out[k] = x;
+      else out[k] = Math.abs(y) > Math.abs(x) ? y : x;
+    });
+    return out;
   }
 
   // ---------------- 항목 안의 값별 시각(ft) ----------------
@@ -439,6 +519,13 @@
       // 1.6.0: 나중에 늘어난 칸(매도인 이름)은 시각이 없고 비어 있으면 채우지 않는다(= 아직 모름, 시각 0)
       if (!t && LATE_FIELDS[f] && blank(p[f])) return;
       if (t || fill) fa[f] = t || fill;
+    });
+    // 1.10.0: 주요 날짜의 시각('dates.<칸>')도 남긴다(비어 있고 시각이 없으면 아직 모름)
+    DATE_FIELDS.forEach(function (f) {
+      var k = dateKey(f);
+      var t = typeof rawFa === 'number' ? ms(rawFa) : ms(own(rawFa, k));
+      if (!t && blank(dateOf(p, f))) return;
+      if (t || fill) fa[k] = t || fill;
     });
     p.fieldsAt = fa;
     var st = ms(p.statusAt) || fill;
@@ -614,6 +701,44 @@
       out[f] = m;
     });
 
+    // 5''') 1.10.0 주요 날짜: 날짜마다 더 나중에 고친 쪽(시각 없는 빈 값은 아직 모름). 어느 쪽에도 dates 키가 없으면(예전 기록끼리) 만들지 않는다
+    if (hasOwn(L, 'dates') || hasOwn(I, 'dates')) {
+      var dd = {};
+      DATE_FIELDS.forEach(function (f) {
+        var k = dateKey(f);
+        var lv = dateOf(L, f);
+        var iv = dateOf(I, f);
+        var lt2 = ms(own(L.fieldsAt, k)) || (blank(lv) ? 0 : lBase);
+        var it2 = ms(own(I.fieldsAt, k)) || (blank(iv) ? 0 : iBase);
+        if (it2 > lt2) {
+          dd[f] = blank(iv) ? '' : iv;
+          fa[k] = it2;
+          if (!sameVal(lv, iv)) sum.fields++;
+        } else {
+          dd[f] = blank(lv) ? '' : lv;
+          if (lt2) fa[k] = lt2;
+        }
+      });
+      out.dates = dd;
+    }
+    // 1.10.0 사용자 일정: id 합집합(같은 id 는 더 나중에 고친 쪽), 지운 일정 표시도 합집합
+    var evN = 0;
+    if (hasOwn(L, 'customEvents') || hasOwn(I, 'customEvents') || hasOwn(L, 'customEventsRemoved') || hasOwn(I, 'customEventsRemoved')) {
+      var me = mergeEvents(L, I);
+      out.customEvents = me.list;
+      set(out, 'customEventsRemoved', Object.keys(me.removed).length ? me.removed : undefined);
+      evN = me.n;
+      if (evN) sum.other++;
+    }
+    // 1.10.0 일정 완료 표시: key 마다 절댓값(더 나중에 바꾼 쪽)이 큰 값
+    SIGNED_TIME_MAP_FIELDS.forEach(function (f) {
+      if (!hasOwn(L, f) && !hasOwn(I, f)) return;
+      var sa2 = signedMap(L[f]);
+      var sm2 = unionSigned(sa2, signedMap(I[f]));
+      if (stable(sm2) !== stable(sa2)) sum.other++;
+      out[f] = sm2;
+    });
+
     // 6) 나머지: id 는 내 것, 만든 시각은 이른 쪽, 고친 시각은 늦은 쪽
     set(out, 'id', L.id !== undefined ? L.id : I.id);
     var c1 = ms(L.createdAt);
@@ -779,6 +904,7 @@
     var sm = mergeSettings(L.settings, I.settings);
     if (sm.value !== undefined) state.settings = sm.value;
     report.settings = sm.fromI;
+    report.scheduleSettings = !!sm.schedule; // 1.10.0: 받은 쪽의 일정 설정(대출 종류)을 가져왔으면 true
     if (sm.localNewer) report.incomingBehind = true;
     return { state: state, report: report };
   }
@@ -793,6 +919,10 @@
     HISTORY_MAX: HISTORY_MAX,       // 1.7.0
     mergeHistory: mergeHistory,     // 1.7.0
     mergeSettings: mergeSettings,   // 1.7.0
+    DATE_FIELDS: DATE_FIELDS,       // 1.10.0
+    dateKey: dateKey,               // 1.10.0
+    mergeEvents: mergeEvents,       // 1.10.0
+    unionSigned: unionSigned,       // 1.10.0
     STATUS_FIELDS: STATUS_FIELDS,
     OTHER_FIELDS: OTHER_FIELDS,
     ITEM_FIELDS: ITEM_FIELDS,

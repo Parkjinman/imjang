@@ -22,6 +22,8 @@
  *   매물의 KB시세·관리비 등 네이버 참고값은 import-parser.js 가 읽고, 상세 화면 '대출·비용' 카드(finCard)가 보여 준다. 모든 수치는 추정이다.
  * 1.8.0: 지워진 지난 기록(reg-history)을 지금 소유자가 산 날 전/후로 나눈다(registry-parser.js classifyHistory). 저장 필드 없이
  *   등기부 기록(registrySnapshots)에서 그때그때 계산해 미리보기 꼬리표·항목 카드 안내·답하기 메모·주의/참고 개수·요약에 쓴다(historyEraOf).
+ * 1.10.0: 일정 탭(#/schedule). 매물의 주요 날짜(dates)·사용자 일정(customEvents)·완료 표시(scheduleDone)와 대출 종류(settings.schedule)를 저장하고,
+ *   기한 계산은 schedule.js(window.ImjangSchedule, finance.js 다음·이 파일 전에 로드)의 순수 함수가 맡는다. 상세 '주요 날짜' 카드·홈 카드 기한 칩·.ics 내보내기
  */
 (function () {
   'use strict';
@@ -29,7 +31,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.9.0';
+  var APP_VERSION = '1.10.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -40,6 +42,10 @@
   // 1.9.0 검토 반영: 매물의 최근 실거래 거래일·층 사본 { v: 1, props: { 매물id: { price, at, floor } } }. 1.7.0~1.8.1 은 FIN_SIDE_KEY 를
   // 통째로 다시 쓰므로(그 키의 real 항목은 예전 탭이 한 번 저장하면 사라짐) 1.6.0→1.7.0 때처럼 키를 따로 둔다. 예전 탭은 이 키를 모른다
   var REAL_SIDE_KEY = 'imjang.v1.real';
+  // 1.10.0: 매물의 주요 날짜(dates·시각)·사용자 일정(customEvents·지운 표시)·일정 완료 표시(scheduleDone)와 일정 설정(settings.schedule)의 사본
+  // { v: 1, props: { 매물id: { dates, datesAt, customEvents, customEventsRemoved, scheduleDone } }, settings?: { schedule, scheduleAt } }.
+  // 1.9.0 이하 탭은 이 필드들을 모른 채 저장하고(REAL_SIDE_KEY 등 다른 사본 키는 통째로 다시 씀) 이 키는 모르므로 따로 둔다
+  var SCHED_SIDE_KEY = 'imjang.v1.sched';
   var SCHEMA_VERSION = 1;
   var PHOTO_DB_NAME = 'imjang-photos';
   var PHOTO_STORE = 'photos';
@@ -79,6 +85,20 @@
   var REG = window.ImjangRegistry || null;
   // 1.7.0: 대출·비용 추정(finance.js). 파일이 없으면 null 이고, 그때는 '대출·비용' 카드가 안내로 바뀐다(값 입력·저장은 그대로)
   var FIN = window.ImjangFinance || null;
+  // 1.10.0: 일정 계산(schedule.js). 파일이 없으면 null 이고, 그때는 일정 탭·주요 날짜 카드가 안내로 바뀐다(날짜 입력·저장은 그대로)
+  var SCHED = window.ImjangSchedule || null;
+  // 1.10.0: 매물의 주요 날짜 칸(property.dates). schedule.js DATE_KEYS·DATE_LABELS 와 같아야 한다(저장 모양은 여기가 기준)
+  var DATE_KEYS = ['contractAt', 'balanceAt', 'vacateAt', 'leaseEndAt', 'moveInAt'];
+  var DATE_LABELS = { contractAt: '계약일', balanceAt: '잔금일', vacateAt: '집 비워 주는 날', leaseEndAt: '세입자 임대차 만기', moveInAt: '이사·입주일' };
+  var DATE_HINTS = { contractAt: '계약서 쓰는 날', balanceAt: '잔금 치르고 열쇠 받는 날', vacateAt: '세입자가 나가는 날(비어 있으면 안 적어도 돼요)', leaseEndAt: '세입자 계약 만기(세입자가 있을 때)', moveInAt: '내가 이사 들어가는 날(비우면 잔금일로 봐요)' };
+  var LOAN_TYPES = { bank: '은행 주택담보대출', didimdol: '디딤돌대출', bogeumjari: '보금자리론' };
+  var CUSTOM_EVENTS_MAX = 50; // 매물 하나의 사용자 일정 최대 개수
+  var EVENT_TITLE_MAX = 60;
+  var EVENT_MEMO_MAX = 300;
+  var SCHED_OPEN_KEY = 'imjang.sched.open';     // 상세 '주요 날짜' 카드를 펼쳐 두었는지(sessionStorage)
+  var SCHED_PROP_KEY = 'imjang.sched.prop';     // 일정 탭 매물 필터(sessionStorage. '' = 전체)
+  var SCHED_DROPPED_KEY = 'imjang.sched.dropped'; // 일정 탭 "탈락 매물도 보기"
+  var SCHED_PAST_KEY = 'imjang.sched.past';     // 일정 탭 "지난 것" 펼침
   // 1.6.0: PDF 읽기 도구(pdf.js 3.11, Apache-2.0). 처음 PDF 를 올릴 때 스크립트 태그로 불러온다(loadPdfjs).
   // 일꾼(worker) 주소는 상대 경로(배포 위치가 바뀌어도 되게). 서비스 워커가 둘 다 미리 저장해 오프라인에서도 읽는다.
   // 한글 cMap 은 넣지 않았다: 인터넷등기소 PDF 는 글꼴을 품고 글자 대응표(ToUnicode)가 있어 cMap 없이 같은 글자가 나옴(1.6.0 확인)
@@ -142,7 +162,9 @@
     search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
     alert: '<path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.3h.01"/>',
     paste: '<path d="M9 4.5H6.5A1.5 1.5 0 0 0 5 6v13.5A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H15"/><rect x="9" y="3" width="6" height="3.5" rx="1"/><path d="M9 12h6M9 16h4"/>',
-    copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="1.5"/><path d="M15.5 8.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v9A1.5 1.5 0 0 0 5 15.5h3.5"/>'
+    copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="1.5"/><path d="M15.5 8.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v9A1.5 1.5 0 0 0 5 15.5h3.5"/>',
+    // 1.10.0: 일정 탭
+    calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M8 13.5h2M12 13.5h2M16 13.5h2M8 17h2M12 17h2"/>'
   };
 
   // =====================================================
@@ -515,7 +537,8 @@
   function emptyState() {
     return { version: SCHEMA_VERSION, rev: '', dataVersion: '', properties: [], deleted: {}, localDeleted: {}, goneKeys: {}, ui: { dismissedInstallTip: false, lastBackupAt: null, deviceName: '', deviceNameAt: null, backupWithPhotos: null, dataNotice: null },
       // 1.7.0: 전역 대출 조건(finance.js defaultSettings 모양, 안 바꿨으면 null = 기본값)과 바꾼 시각. 기록의 일부라 백업·[합치기]에 함께 간다
-      settings: { finance: null, financeAt: 0 } };
+      // 1.10.0: 일정 설정 schedule({ loanType: 'bank'|'didimdol'|'bogeumjari' }, 안 바꿨으면 null = 'bank')과 바꾼 시각 scheduleAt(대출 조건과 따로 합침)
+      settings: { finance: null, financeAt: 0, schedule: null, scheduleAt: 0 } };
   }
 
   var ITEM_VALUE_KEYS = ['status', 'memo', 'answer', 'date', 'done']; // 항목 상태의 값 이름(merge.js ITEM_FIELDS 와 같음)
@@ -894,6 +917,10 @@
   // 시각은 따로 두지 않고 fieldsAt.realPrice 와 함께 움직인다(merge.js FIELD_GROUPS.realPrice). 1.9.0 은 늘 이 키를 적으므로(값이 없어도 ''·null)
   // 저장본 매물에 realAt 키가 아예 없으면 예전(1.8.1 이하) 탭이 쓴 것 → 사본(REAL_SIDE_KEY)에서 되살린다(restoreRealFromSide)
   var FIELDS_190 = ['realAt', 'realFloor'];
+  // 1.10.0 에서 늘어난 매물 필드: 주요 날짜 dates(늘 5칸, 빈 값 '')·사용자 일정 customEvents(배열)·일정 완료 표시 scheduleDone({ key: ±ms }).
+  // 1.10.0 은 늘 이 키를 적으므로 저장본 매물에 dates 키가 아예 없으면 예전(1.9.0 이하) 탭이 쓴 것 → 사본(SCHED_SIDE_KEY)에서 되살린다(restoreSchedFromSide).
+  // 날짜의 시각은 fieldsAt['dates.<칸>'](merge.js DATE_FIELDS), 사용자 일정은 항목마다 t, 지운 일정은 customEventsRemoved { id: 시각 }
+  var FIELDS_1100 = ['dates', 'customEvents', 'scheduleDone'];
   var REAL_FLOOR_RANGE = [1, 99];
   var HIST_SOURCES = { naver: 1, code: 1, manual: 1 };
   var HISTORY_MAX = 20; // merge.js HISTORY_MAX 와 같음
@@ -976,6 +1003,81 @@
     np.realFloor = has ? realFloorOr(p.realFloor) : null;
     return np;
   }
+  // ---- 1.10.0: 주요 날짜·사용자 일정·일정 완료 표시 ----
+  /** 한 줄 글: 줄바꿈·제어 문자 → 공백, 앞뒤 공백 제거, max 글자 */
+  function cleanLine(v, max) { return str(v).replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
+  /** 여러 줄 글(메모): 제어 문자만 빼고 max 글자 */
+  function cleanText(v, max) { return str(v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, max); }
+  /** 주요 날짜: 늘 5칸, 'YYYY-MM-DD' 아니면 '' */
+  function normalizeDates(v) {
+    var o = {};
+    var src = v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+    DATE_KEYS.forEach(function (k) { o[k] = isoDateOr(src[k]); });
+    return o;
+  }
+  /** 사용자 일정: id·날짜·제목이 있는 것만, 같은 id 는 처음 것, 날짜 → id 순, 최대 CUSTOM_EVENTS_MAX 개 */
+  function normalizeEvents(v) {
+    var out = [];
+    var seen = {};
+    (Array.isArray(v) ? v : []).forEach(function (e) {
+      if (!e || typeof e !== 'object') return;
+      var id = cleanLine(e.id, 40);
+      var at = isoDateOr(e.at);
+      var title = cleanLine(e.title, EVENT_TITLE_MAX);
+      if (!id || BAD_KEYS[id] || !at || !title || seen[id]) return;
+      seen[id] = true;
+      var o = { id: id, at: at, title: title, memo: cleanText(e.memo, EVENT_MEMO_MAX) };
+      var t = numOrNull(e.t);
+      if (t > 0) o.t = t;
+      out.push(o);
+    });
+    out.sort(function (a, b) { return (a.at < b.at ? -1 : a.at > b.at ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
+    if (out.length > CUSTOM_EVENTS_MAX) {
+      // 검토 반영: 상한을 넘으면(두 기기 합치기 등) 지난 날짜를 오래된 것부터 버리고, 그래도 넘치면 가장 먼 날짜부터 버린다(앞으로 할 일을 먼저 지킨다)
+      var today = todayISO();
+      var drop = out.length - CUSTOM_EVENTS_MAX;
+      var kept = [];
+      out.forEach(function (e) { if (drop > 0 && e.at < today) { drop--; return; } kept.push(e); });
+      out = kept.slice(0, CUSTOM_EVENTS_MAX);
+    }
+    return out;
+  }
+  /** 합친 직후: 사용자 일정이 상한(50개)을 넘은 매물만 normalizeEvents 규칙(지난 것부터, 그다음 먼 날짜부터)으로 정리한다. 그 밖의 매물은 건드리지 않음 */
+  function capCustomEvents(props) {
+    (props || []).forEach(function (p) {
+      if (p && Array.isArray(p.customEvents) && p.customEvents.length > CUSTOM_EVENTS_MAX) p.customEvents = normalizeEvents(p.customEvents);
+    });
+  }
+  /** 일정 완료 표시 { key: ±ms }: 0 이 아닌 유한한 수만. 완료 취소(음수)는 보관 기간(180일)이 지나면 버린다 */
+  function normalizeDone(v) {
+    var out = {};
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+    var cutoff = Date.now() - TOMBSTONE_KEEP_MS;
+    Object.keys(v).forEach(function (k) {
+      if (BAD_KEYS[k] || k.length > 80) return;
+      var t = typeof v[k] === 'number' ? v[k] : numOrNull(v[k]);
+      if (t === null || !isFinite(t) || t === 0) return;
+      if (t < 0 && -t < cutoff) return;
+      out[k] = t;
+    });
+    return out;
+  }
+  /** 매물 원본(p)의 1.10.0 값을 정리해 np 에 넣는다(normalizeProperty·restoreSchedFromSide 가 같이 씀). 지운 일정 표시 뒤에 고치지 않은 일정은 뺀다 */
+  function schedFieldsInto(np, p) {
+    p = p && typeof p === 'object' ? p : {};
+    np.dates = normalizeDates(p.dates);
+    var gone = normalizeDeleted(p.customEventsRemoved);
+    np.customEvents = normalizeEvents(p.customEvents).filter(function (e) { return !(gone[e.id] && gone[e.id] >= (e.t || 0)); });
+    if (Object.keys(gone).length) np.customEventsRemoved = gone;
+    np.scheduleDone = normalizeDone(p.scheduleDone);
+    return np;
+  }
+  /** 빈 값 판단(1.10.0 필드 포함): ''·null·빈 배열, 또는 값이 모두 빈 객체(dates 가 모두 ''·scheduleDone 이 {}) */
+  function blankField(v) {
+    if (blankVal(v)) return true;
+    if (v && typeof v === 'object' && !Array.isArray(v)) return Object.keys(v).every(function (k) { return blankVal(v[k]); });
+    return false;
+  }
   /** "1억 6,250만원"·"9,500만원"·"2억원" → 만원 수(16250·9500·20000). 모양이 다르면 null */
   function manwonOfText(s) {
     var t = str(s).replace(/\s+/g, '');
@@ -1015,7 +1117,7 @@
   }
   /** 1.7.0 전역 대출 조건 정리: { finance: 숫자·글·참거짓만 담은 객체 | null, financeAt: ms }. 값 검사는 finance.js normalizeSettings 가 계산 때 한다 */
   function normalizeSettingsState(v) {
-    var out = { finance: null, financeAt: 0 };
+    var out = { finance: null, financeAt: 0, schedule: null, scheduleAt: 0 };
     if (!v || typeof v !== 'object') return out;
     var f = v.finance;
     if (f && typeof f === 'object' && !Array.isArray(f)) {
@@ -1029,6 +1131,11 @@
     }
     var t = numOrNull(v.financeAt);
     out.financeAt = t > 0 ? t : 0;
+    // 1.10.0: 일정 설정(대출 종류). 아는 값만, 안 바꿨으면 null(= 'bank')
+    var sc = v.schedule;
+    if (sc && typeof sc === 'object' && !Array.isArray(sc) && LOAN_TYPES[str(sc.loanType)]) out.schedule = { loanType: str(sc.loanType) };
+    var ts = numOrNull(v.scheduleAt);
+    out.scheduleAt = ts > 0 ? ts : 0;
     return out;
   }
 
@@ -1086,6 +1193,7 @@
     if (Object.keys(snapGone).length) np.registrySnapshotsRemoved = snapGone;
     finFieldsInto(np, p); // 1.7.0: 대출·비용 값(늘 같은 키)
     realFieldsInto(np, p); // 1.9.0: 실거래 거래일·층(늘 같은 키. realPrice 가 없으면 빈 값)
+    schedFieldsInto(np, p); // 1.10.0: 주요 날짜·사용자 일정·일정 완료 표시(늘 같은 키)
     // 1.9.0: 1.8.1 이하가 메모에만 남긴 날짜·층을 한 번 채운다(메모는 그대로). 저장본을 읽으며 채웠으면 init 이 한 번 다시 저장(loadState)
     // 1.9.0 검토 반영: 원본에 realAt 키가 있으면(1.9.0 이 씀 — 지운 빈 값 포함) 다시 채우지 않는다(realReviveAllowed). 가져오기 '담기'·폼은 키를 늘 넣는다
     if (realReviveAllowed(p) && reviveRealFromMemo(np) && migrationStats) migrationStats.realRevived = (migrationStats.realRevived || 0) + 1;
@@ -1192,6 +1300,7 @@
     if (restoreFromSide(s, obj)) migratedOnLoad = true;
     if (restoreFinFromSide(s, obj)) migratedOnLoad = true; // 1.7.0: 예전(1.6.0 이하) 탭이 지운 대출·비용 값·대출 조건
     if (restoreRealFromSide(s, obj)) migratedOnLoad = true; // 1.9.0: 예전(1.8.1 이하) 탭이 지운 실거래 거래일·층(사본 REAL_SIDE_KEY)
+    if (restoreSchedFromSide(s, obj)) migratedOnLoad = true; // 1.10.0: 예전(1.9.0 이하) 탭이 지운 주요 날짜·사용자 일정·완료 표시·일정 설정(사본 SCHED_SIDE_KEY)
     if (migrationStats && migrationStats.realRevived) migratedOnLoad = true; // 1.9.0: 메모에서 되살린 실거래 거래일·층을 저장본에도
     // 1.5.0 검토 반영: 옛 저장본(1.4.x)을 처음 읽었으면 옮긴 수를 홈 안내(ui.dataNotice)에 남기고, init 이 dataVersion 을 적어 다시 저장한다
     var m = migrationStats;
@@ -1405,6 +1514,78 @@
   }
 
   /**
+   * 1.10.0: 주요 날짜·사용자 일정·완료 표시·일정 설정 사본(SCHED_SIDE_KEY)을 쓴다. 날짜는 시각(fieldsAt['dates.<칸>'])도 함께(datesAt).
+   * 값이 하나도 없는 매물은 항목을 두지 않고, 모두 비면 키를 지운다. 1.9.0 이하는 이 키를 모른다. 본 저장이 된 뒤에만 부르고, 실패해도 조용히 넘어간다
+   */
+  function writeSchedSide(s) {
+    try {
+      var props = {};
+      (s.properties || []).forEach(function (p) {
+        var o = {};
+        var d = p.dates || {};
+        if (DATE_KEYS.some(function (k) { return !!d[k]; })) {
+          o.dates = d;
+          var da = {};
+          DATE_KEYS.forEach(function (k) { var t = p.fieldsAt ? numOrNull(p.fieldsAt['dates.' + k]) : null; if (t > 0) da[k] = t; });
+          if (Object.keys(da).length) o.datesAt = da;
+        }
+        if ((p.customEvents || []).length) o.customEvents = p.customEvents;
+        if (p.customEventsRemoved && Object.keys(p.customEventsRemoved).length) o.customEventsRemoved = p.customEventsRemoved;
+        if (p.scheduleDone && Object.keys(p.scheduleDone).length) o.scheduleDone = p.scheduleDone;
+        if (Object.keys(o).length) props[p.id] = o;
+      });
+      var st = s.settings && s.settings.schedule ? { schedule: s.settings.schedule, scheduleAt: s.settings.scheduleAt || 0 } : null;
+      if (Object.keys(props).length || st) {
+        var side = { v: 1, props: props };
+        if (st) side.settings = st;
+        localStorage.setItem(SCHED_SIDE_KEY, JSON.stringify(side));
+      } else localStorage.removeItem(SCHED_SIDE_KEY);
+    } catch (e) { /* 저장 공간 부족 등: 본 저장은 됐다. 다음 저장 때 다시 */ }
+  }
+  /**
+   * 1.10.0: 저장본 원문(raw)에 dates 키가 아예 없는 매물(1.9.0 이하 탭이 씀)에 사본의 날짜(지금 비어 있는 칸만, 시각 포함)·사용자 일정(지금 없을 때)·
+   * 완료 표시(지금 없을 때)를 되살린다. 저장본 settings 에 schedule 키가 없으면(예전 탭이 씀) 일정 설정도. 되살렸으면 true(→ 다시 저장)
+   */
+  function restoreSchedFromSide(s, raw) {
+    var side = null;
+    try { side = parseStored(localStorage.getItem(SCHED_SIDE_KEY)); } catch (e) { return false; }
+    if (!side || typeof side !== 'object') return false;
+    var sp = side.props && typeof side.props === 'object' && !Array.isArray(side.props) ? side.props : {};
+    var rawById = {};
+    (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
+      if (p && typeof p === 'object' && p.id && !BAD_KEYS[p.id]) rawById[str(p.id)] = p;
+    });
+    var changed = false;
+    s.properties.forEach(function (p) {
+      var r = hasOwn(rawById, p.id) ? rawById[p.id] : null;
+      var d = hasOwn(sp, p.id) && !BAD_KEYS[p.id] ? sp[p.id] : null;
+      if (!r || !d || typeof d !== 'object' || hasOwn(r, 'dates')) return;
+      var back = schedFieldsInto({}, d);
+      var da = d.datesAt && typeof d.datesAt === 'object' ? d.datesAt : {};
+      if (!p.fieldsAt || typeof p.fieldsAt !== 'object') p.fieldsAt = {};
+      DATE_KEYS.forEach(function (k) {
+        // 사본의 시각(datesAt)은 값이 비어 있어도 되살린다(1.10.0 에서 지운 날짜의 '지운 시각' — 없으면 다른 기기의 예전 날짜가 합칠 때 되살아난다. 검토 반영)
+        var t = numOrNull(da[k]);
+        if (t > 0 && !(numOrNull(p.fieldsAt['dates.' + k]) > 0)) { p.fieldsAt['dates.' + k] = t; changed = true; }
+        if (p.dates[k] || !back.dates[k]) return;
+        p.dates[k] = back.dates[k];
+        changed = true;
+      });
+      if (!p.customEvents.length && back.customEvents.length) { p.customEvents = back.customEvents; changed = true; }
+      // 지운 일정 표시는 일정이 하나도 없어도 되살린다(다른 기기 사본과 합칠 때 지운 일정이 되살아나지 않게)
+      if (!(p.customEventsRemoved && Object.keys(p.customEventsRemoved).length) && back.customEventsRemoved) { p.customEventsRemoved = back.customEventsRemoved; changed = true; }
+      if (!Object.keys(p.scheduleDone).length && Object.keys(back.scheduleDone).length) { p.scheduleDone = back.scheduleDone; changed = true; }
+    });
+    var ss = side.settings ? normalizeSettingsState(side.settings) : null;
+    if (ss && ss.schedule && raw && !(raw.settings && typeof raw.settings === 'object' && hasOwn(raw.settings, 'schedule')) && !(s.settings && s.settings.schedule)) {
+      s.settings.schedule = ss.schedule;
+      s.settings.scheduleAt = ss.scheduleAt;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
    * 저장본 원문에서 1.3.0 시각(fieldsAt)이 아예 없는 매물 { id: true }.
    * 업데이트 전에 열어 둔 1.2.x 이하 탭이 쓴 매물이다. 이 탭은 항목을 지울 때 키째 지우고 시각도 남기지 않으므로,
    * 항목 단위로 합치면 그 탭에서 지운 값이 되살아날 수 있다. 그래서 이런 매물은 예전처럼 매물 단위로 합친다.
@@ -1423,7 +1604,7 @@
     var out = {};
     (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
       if (!p || typeof p !== 'object' || !p.id || BAD_KEYS[p.id]) return;
-      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170, FIELDS_190).filter(function (k) { return !hasOwn(p, k); });
+      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170, FIELDS_190, FIELDS_1100).filter(function (k) { return !hasOwn(p, k); });
       if (miss.length) out[str(p.id)] = miss;
     });
     return out;
@@ -1482,18 +1663,20 @@
         var r = MG.mergeProperty(mine, p);
         Object.assign(mine, r.prop);
         if (r.changed) changed = true;
+        capCustomEvents([mine]); // 1.10.0 검토 반영: 사용자 일정 합집합이 50개를 넘으면 지난 것부터 정리
         // 1.6.0: 예전(1.5.x) 탭이 새 필드를 모른 채 저장했으면 합친 결과(내 값)를 저장본에도 되돌린다
         var miss = missing && hasOwn(missing, p.id) ? missing[p.id] : [];
         // 1.7.0: 대출·비용 필드도 같은 방식(나중에 늘어난 칸이라 합치면 내 값이 이기고, 저장본에는 다시 써서 되돌린다)
         // 1.9.0: 실거래 거래일·층도 같은 방식(저장본에 키가 없으면 예전 탭이 쓴 것. 합친 결과를 다시 써서 되돌린다)
-        if (FIELDS_160.concat(FIELDS_170, FIELDS_190).some(function (k) { return miss.indexOf(k) >= 0 && !blankVal(mine[k]); })) needResave = true;
+        // 1.10.0: 주요 날짜·사용자 일정·완료 표시도(dates 는 모두 빈 칸이면 빈 값으로 본다, blankField)
+        if (FIELDS_160.concat(FIELDS_170, FIELDS_190, FIELDS_1100).some(function (k) { return miss.indexOf(k) >= 0 && !blankField(mine[k]); })) needResave = true;
         return;
       }
       // 예전 버전 탭이 쓴 매물(또는 merge.js 를 못 불러옴): 매물 단위로 더 나중 것
       if ((p.updatedAt || 0) > (mine.updatedAt || 0)) {
         var keep = {};
         (missing && hasOwn(missing, p.id) ? missing[p.id] : []).forEach(function (k) {
-          if (!blankVal(mine[k])) keep[k] = mine[k];
+          if (!blankField(mine[k])) keep[k] = mine[k];
         });
         Object.assign(mine, p, keep);
         if (Object.keys(keep).length) needResave = true;
@@ -1512,10 +1695,19 @@
     var na = numOrNull(target.ui.deviceNameAt) || 0;
     var nb = numOrNull(incoming.ui.deviceNameAt) || 0;
     if (nb > na) { target.ui.deviceName = incoming.ui.deviceName; target.ui.deviceNameAt = nb; changed = true; }
-    // 1.7.0: 전역 대출 조건은 더 나중에 바꾼 쪽
+    // 1.7.0: 전역 대출 조건은 더 나중에 바꾼 쪽. 1.10.0: 일정 설정(대출 종류)은 따로 비교(scheduleAt)
     var ta = target.settings ? numOrNull(target.settings.financeAt) || 0 : 0;
     var tb = incoming.settings ? numOrNull(incoming.settings.financeAt) || 0 : 0;
-    if (tb > ta) { target.settings = normalizeSettingsState(incoming.settings); changed = true; }
+    var sa = target.settings ? numOrNull(target.settings.scheduleAt) || 0 : 0;
+    var sb = incoming.settings ? numOrNull(incoming.settings.scheduleAt) || 0 : 0;
+    if (tb > ta || sb > sa) {
+      var ns = normalizeSettingsState(target.settings);
+      var inc = normalizeSettingsState(incoming.settings);
+      if (tb > ta) { ns.finance = inc.finance; ns.financeAt = inc.financeAt; }
+      if (sb > sa) { ns.schedule = inc.schedule; ns.scheduleAt = inc.scheduleAt; }
+      target.settings = ns;
+      changed = true;
+    }
     return changed;
   }
 
@@ -1529,6 +1721,8 @@
     var changed = mergeInto(state, normalizeState(obj), missingNewFields(obj), oldTabProps(obj));
     // 1.7.0: 예전 탭이 settings 키 없이 썼는데 내게 대출 조건이 있으면 저장본에도 되돌린다
     if (!hasOwn(obj, 'settings') && state.settings && state.settings.finance) needResave = true;
+    // 1.10.0: 예전(1.9.0 이하) 탭이 settings 를 schedule 키 없이 썼는데 내게 일정 설정이 있으면 저장본에도 되돌린다
+    if (!(obj.settings && typeof obj.settings === 'object' && hasOwn(obj.settings, 'schedule')) && state.settings && state.settings.schedule) needResave = true;
     knownRev = str(obj.rev);
     return changed;
   }
@@ -1548,6 +1742,7 @@
       writeSide(state); // 1.6.0 검토 반영: 1.6.0 필드 사본(예전 탭이 지워도 되살리게)
       writeFinSide(state); // 1.7.0: 대출·비용 값·대출 조건 사본
       writeRealSide(state); // 1.9.0 검토 반영: 실거래 거래일·층 사본(예전 탭이 지워도 되살리게)
+      writeSchedSide(state); // 1.10.0: 주요 날짜·사용자 일정·완료 표시·일정 설정 사본
       dirty = false;
       lastSavedAt = Date.now();
       if (saveFailed) { saveFailed = false; showSaveError(null); }
@@ -1576,6 +1771,7 @@
       writeSide(candidate);
       writeFinSide(candidate); // 1.7.0
       writeRealSide(candidate); // 1.9.0 검토 반영
+      writeSchedSide(candidate); // 1.10.0
       return true;
     } catch (e) {
       // 1.4.5: 실패 표시를 남겨야 다음 성공 저장(saveNow)이 빨간 띠를 지운다(전에는 새로고침할 때까지 남았음)
@@ -3089,7 +3285,9 @@
             h('span', { class: 'sr-only', text: ', ' + realWhenSpeech(p) })) : null) : null,
         // 1.7.0: KB시세 작은 칩(없으면 생략). 칩 앞의 공백은 화면 읽기에서 숫자가 붙어 읽히지 않게
         p.kbPrice ? ' ' : null,
-        p.kbPrice ? h('span', { class: 'kb-chip', title: 'KB시세' + (p.kbAt ? ' (' + formatISODate(p.kbAt) + ')' : ''), text: 'KB ' + kbShort(p.kbPrice) }) : null
+        p.kbPrice ? h('span', { class: 'kb-chip', title: 'KB시세' + (p.kbAt ? ' (' + formatISODate(p.kbAt) + ')' : ''), text: 'KB ' + kbShort(p.kbPrice) }) : null,
+        // 1.10.0: 가장 가까운 미완료 기한 칩 "D-3 잔금"(지난 것은 빨강 "D+2 전입신고"). 없으면 생략
+        schedChip(p)
       ),
       makeBar(prog.pct, '진행 ' + prog.pct + '%', { ariaLabel: '체크리스트 진행률' }).el,
       h('div', { class: 'pcard-meta' },
@@ -3785,8 +3983,10 @@
   // 전화 걸기·실거래가 찾기로 다른 앱에 다녀오는 사이 iOS 가 앱을 내려도 입력이 남는다.
   var DRAFT_FIELDS = ['name', 'dong', 'ho', 'area', 'floor', 'direction', 'ask', 'real', 'realAt', 'realFloor', 'agentName', 'agentPhone', 'sellerName', 'sourceUrl', 'memo', 'dropReason']; // 1.9.0: realAt·realFloor
   var pendingFocus = null; // 다음에 그릴 수정 폼에서 초점을 줄 칸('ho'). 가져오기 직후·상세의 [입력하기]
-  // 1.5.0: 다음에 그릴 상세 화면에서 열고 스크롤할 섹션 id. 수정 폼의 [저장하고 등기부 보기], 요약의 [등기부 보기]
+  // 1.5.0: 다음에 그릴 상세 화면에서 열고 스크롤할 섹션 id. 수정 폼의 [저장하고 등기부 보기], 요약의 [등기부 보기]. 1.10.0: 'dates' 면 '주요 날짜' 카드
   var pendingSection = null;
+  // 1.10.0: 다음에 그릴 상세 화면에서 펼치고 스크롤할 항목 id(일정 탭의 줄을 눌렀을 때. 섹션을 열고 jumpToItem)
+  var pendingItem = null;
 
   /** 폼의 링크 칸: 앞에 http(s):// 가 없으면 붙여 보고, http/https 주소만 받는다 */
   function formUrl(text) {
@@ -4448,6 +4648,8 @@
     v.refs.prevStopCount = prop.status === 'dropped' ? 0 : flagsYes(prop, 'stop').length;
     main.append(v.refs.alerts);
     renderAlerts(prop); // 제안 줄(refreshFlowHint)도 이 안에서 같이 그린다
+    // 1.10.0: '주요 날짜' 카드(계약일·잔금일 등 5칸, 입력 즉시 저장). 접힌 머리 줄에 가장 가까운 기한. 일정 탭이 같은 카드를 쓴다
+    main.append(datesCard(prop));
     // 1.7.0: 대출·비용(추정) 카드. 접힌 머리 줄에 필요 현금·대출 한도 요약(펼친 상태는 이 탭에서 기억)
     main.append(finCard(prop));
 
@@ -4479,7 +4681,14 @@
     if (pendingSection) {
       var ps = pendingSection;
       pendingSection = null;
-      if (v.refs.secs[ps]) setTimeout(function () { if (view === v) jumpToSection(ps); }, 0);
+      if (ps === 'dates') setTimeout(function () { if (view === v) openDatesCard(); }, 0); // 1.10.0: 일정 탭에서 '주요 날짜' 카드로
+      else if (v.refs.secs[ps]) setTimeout(function () { if (view === v) jumpToSection(ps); }, 0);
+    }
+    // 1.10.0: 일정 탭의 줄에서 왔으면 그 항목을 펼치고 스크롤(섹션은 jumpToItem 이 연다)
+    if (pendingItem) {
+      var pi = pendingItem;
+      pendingItem = null;
+      if (CL.itemById[pi]) setTimeout(function () { if (view === v) jumpToItem(pi); }, 0);
     }
 
     loadPhotosInto(v, prop.id);
@@ -8644,6 +8853,555 @@
     if (CL.version) main.append(h('p', { class: 'about', text: '체크리스트 기준: ' + CL.version }));
   }
 
+  // =====================================================
+  // 1.10.0 일정: 주요 날짜(dates)·기한 계산(schedule.js)·사용자 일정(customEvents)·완료 표시(scheduleDone)·.ics 내보내기
+  //   - 날짜 계산은 schedule.js(SCHED)의 순수 함수. 여기서는 저장·화면만. SCHED 가 없으면 날짜 입력·저장은 되고 기한 계산 자리에 안내
+  //   - 문구: 판정·추천 없음. 법정 기한은 근거를 작은 글씨로, "확인하세요" 톤. 공휴일은 모른다
+  // =====================================================
+  /** 일정 계산에 줄 설정: 생애최초(대출 조건 finance.firstHome, 기본 켬)·대출 종류(settings.schedule.loanType, 기본 'bank') */
+  function schedSettings() {
+    var fs = finSettings();
+    var sc = state.settings && state.settings.schedule;
+    return { firstHome: fs ? !!fs.firstHome : true, loanType: sc && LOAN_TYPES[sc.loanType] ? sc.loanType : 'bank' };
+  }
+  /** 일정 설정(대출 종류) 저장. 두 기기 합치기는 scheduleAt 이 더 나중인 쪽(대출 조건 financeAt 과 따로). 같으면 false */
+  function setLoanType(t) {
+    if (!LOAN_TYPES[t] || schedSettings().loanType === t) return false;
+    var prev = state.settings || emptyState().settings;
+    state.settings = Object.assign({}, prev, { schedule: { loanType: t }, scheduleAt: stampAfter(Date.now(), prev.scheduleAt) });
+    saveNow();
+    return true;
+  }
+  var visitDefsCache = null;
+  /** 체크리스트의 임장(visit) 항목 정의 [{ id, text }](데이터는 안 바뀌므로 한 번만) */
+  function visitDefs() {
+    if (!visitDefsCache) visitDefsCache = allItems().filter(function (it) { return it.type === 'visit'; }).map(function (it) { return { id: it.id, text: it.text }; });
+    return visitDefsCache;
+  }
+  /** 매물들의 일정 항목(schedule.js buildSchedule). 파일을 못 불러왔으면 빈 배열 */
+  function buildSchedule(props, today) {
+    if (!SCHED) return [];
+    return SCHED.buildSchedule(props, schedSettings(), today || todayISO(), { visits: visitDefs() });
+  }
+  /** 홈 카드 가격 줄 끝의 기한 칩 "D-3 잔금"(가장 가까운 미완료 날짜 항목. 지난 것은 빨강 "D+2 전입신고"). 탈락 매물·없으면 null */
+  function schedChip(p) {
+    if (!SCHED || p.status === 'dropped') return null;
+    var today = todayISO();
+    var it = SCHED.nextFor(buildSchedule([p], today), today);
+    if (!it) return null;
+    var past = it.date < today;
+    var dl = SCHED.dLabel(it.date, today);
+    return [' ', h('span', { class: 'kb-chip sched-chip' + (past ? ' is-past' : ''), title: it.title + ' · ' + formatISODate(it.date) },
+      h('span', { 'aria-hidden': 'true', text: dl + ' ' + it.short }),
+      // 읽기 도구용은 D 표기를 말로 풀고 날짜는 년·월·일로(1.9.0 실거래 칩과 같은 방식)
+      h('span', { class: 'sr-only', text: (past ? '지난 기한: ' : '다음 기한: ') + it.short + ', ' + SCHED.dSpoken(it.date, today) + ' (' + SCHED.longDate(it.date) + ')' }))];
+  }
+  /** 매물의 주요 날짜 한 칸 저장. 값이 같으면 false. 시각은 fieldsAt['dates.<칸>'](merge.js DATE_FIELDS) */
+  function setPropDate(prop, k, value) {
+    var iso = isoDateOr(value);
+    if (DATE_KEYS.indexOf(k) < 0 || !prop.dates || prop.dates[k] === iso) return false;
+    var now = stampAfter(Date.now(), prop.fieldsAt && prop.fieldsAt['dates.' + k], prop.legacyAt);
+    prop.dates[k] = iso;
+    if (!prop.fieldsAt || typeof prop.fieldsAt !== 'object') prop.fieldsAt = {};
+    prop.fieldsAt['dates.' + k] = now;
+    touch(prop, now);
+    saveNow();
+    return true;
+  }
+  /**
+   * 일정 항목 완료 표시. 체크리스트 항목과 이어진 것(doneBy 'item': 등기부 재열람·임장)은 그 항목의 done 을 쓰고,
+   * 나머지는 scheduleDone[key] = 완료 시각(취소하면 음수 시각 — 다른 기기의 예전 '완료'가 합칠 때 되살아나지 않게)
+   */
+  function setScheduleDone(prop, it, done) {
+    var prev = null; // 이어진 항목의 이전 상태(되돌리기용). 아니면 null
+    if (it.doneBy === 'item' && it.itemId) {
+      var st = getItemState(prop, it.itemId);
+      prev = { done: !!st.done, date: str(st.date || ''), dateChanged: false };
+      var patch = { done: done };
+      // 검토 반영: 임장 예정(미래 날짜)을 여기서 체크하면 체크리스트의 '다녀옴'과 같은 뜻이 되게 다녀온 날짜를 오늘로 맞춘다
+      if (it.kind === 'visit' && done && (!prev.date || prev.date > todayISO())) { patch.date = todayISO(); prev.dateChanged = true; }
+      setItemState(prop, it.itemId, patch);
+    } else {
+      if (!prop.scheduleDone || typeof prop.scheduleDone !== 'object') prop.scheduleDone = {};
+      var cur = prop.scheduleDone[it.key];
+      var t = stampAfter(Date.now(), typeof cur === 'number' ? Math.abs(cur) : 0, prop.legacyAt);
+      prop.scheduleDone[it.key] = done ? t : -t;
+      touch(prop, t);
+    }
+    saveNow();
+    return prev;
+  }
+  function findEvent(prop, id) {
+    var list = prop.customEvents || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  /** 사용자 일정 추가(ev 없음)·고치기. vals: { at, title, memo } */
+  function saveCustomEvent(prop, ev, vals) {
+    var now = Date.now();
+    if (!Array.isArray(prop.customEvents)) prop.customEvents = [];
+    if (ev) {
+      var e = findEvent(prop, ev.id);
+      if (!e) return;
+      e.at = vals.at; e.title = vals.title; e.memo = vals.memo;
+      e.t = stampAfter(now, e.t, prop.legacyAt);
+      prop.customEvents = normalizeEvents(prop.customEvents);
+      touch(prop, e.t);
+    } else {
+      var ne = { id: uid(), at: vals.at, title: vals.title, memo: vals.memo, t: stampAfter(now, prop.legacyAt) };
+      prop.customEvents = normalizeEvents(prop.customEvents.concat([ne]));
+      touch(prop, ne.t);
+    }
+    saveNow();
+  }
+  /** 사용자 일정 지우기: 목록에서 빼고 지운 표시(customEventsRemoved)를 남긴다(다른 기기 사본과 합칠 때 되살아나지 않게) */
+  function removeCustomEvent(prop, id) {
+    var e = findEvent(prop, id);
+    if (!e) return;
+    var now = stampAfter(Date.now(), e.t, prop.legacyAt);
+    prop.customEvents = prop.customEvents.filter(function (x) { return x.id !== id; });
+    if (!prop.customEventsRemoved || typeof prop.customEventsRemoved !== 'object') prop.customEventsRemoved = {};
+    prop.customEventsRemoved[id] = now;
+    // 검토 반영: 이 일정의 완료 표시는 고아로 남기지 않고 취소 시각(음수)으로 바꿔 둔다(180일 뒤 정리, 합칠 때 예전 '완료'가 되살아나지 않음)
+    var dk = prop.id + ':custom:' + id;
+    if (prop.scheduleDone && typeof prop.scheduleDone === 'object' && hasOwn(prop.scheduleDone, dk)) {
+      var cur = prop.scheduleDone[dk];
+      prop.scheduleDone[dk] = -stampAfter(now, typeof cur === 'number' ? Math.abs(cur) : 0);
+    }
+    touch(prop, now);
+    saveNow();
+  }
+  /**
+   * 일정 추가·고치기 대화상자. prop 이 없으면 매물 고르는 select(choices 또는 탈락 아닌 매물). ev 가 있으면 고치기([이 일정 지우기] 포함).
+   * 결과 Promise<바뀌었는지>
+   */
+  function editCustomEvent(prop, ev, choices) {
+    var list = choices || state.properties.filter(function (p) { return p.status !== 'dropped'; });
+    if (!prop && !list.length) { toast('먼저 매물을 추가해 주세요'); return Promise.resolve(false); }
+    var propSel = prop ? null : h('select', { class: 'select', id: 'ce-prop' }, list.map(function (p) {
+      return h('option', { value: p.id, text: p.name + (unitText(p) ? ' ' + unitText(p) : '') });
+    }));
+    var date = h('input', { type: 'date', class: 'input', id: 'ce-date', value: ev ? ev.at : '' });
+    var title = h('input', { type: 'text', class: 'input', id: 'ce-title', value: ev ? ev.title : '', maxlength: EVENT_TITLE_MAX, placeholder: '예: 법무사 만나기', autocomplete: 'off', enterkeyhint: 'done' });
+    var memo = h('textarea', { class: 'input', id: 'ce-memo', rows: 2, value: ev ? ev.memo : '', maxlength: EVENT_MEMO_MAX, placeholder: '메모 (선택)' });
+    var err = h('p', { class: 'field-error', id: 'ce-err', role: 'alert', hidden: true });
+    var fields = [propSel, date, title].filter(Boolean);
+    // 검토 반영: 다른 폼(매물·실거래)과 같이 틀린 칸에 aria-invalid·aria-describedby 를 주고, 고치기 시작하면 지운다
+    function clearInvalid(el) { el.removeAttribute('aria-invalid'); el.removeAttribute('aria-describedby'); }
+    fields.forEach(function (el) { ['input', 'change'].forEach(function (evName) { el.addEventListener(evName, function () { clearInvalid(el); }); }); });
+    function fail(msg, el) {
+      err.textContent = msg; err.hidden = false;
+      if (el) { el.setAttribute('aria-invalid', 'true'); el.setAttribute('aria-describedby', 'ce-err'); try { el.focus(); } catch (e) { /* 무시 */ } }
+      return false;
+    }
+    function validate() {
+      fields.forEach(clearInvalid);
+      var p = prop || findProp(propSel.value);
+      if (!p) return fail('매물을 골라 주세요', propSel);
+      if (!isoDateOr(date.value)) return fail('날짜를 골라 주세요', date);
+      if (!cleanLine(title.value, EVENT_TITLE_MAX)) return fail('할 일을 적어 주세요', title);
+      if (!ev && (p.customEvents || []).length >= CUSTOM_EVENTS_MAX) return fail('일정은 매물마다 ' + CUSTOM_EVENTS_MAX + '개까지예요. 지난 일정을 지워 주세요');
+      err.hidden = true;
+      return true;
+    }
+    var content = h('div', { class: 'form ce-form' },
+      propSel ? h('div', { class: 'field' }, h('label', { for: 'ce-prop', text: '매물' }), propSel) : null,
+      h('div', { class: 'field' }, h('label', { for: 'ce-date', text: '날짜' }), date),
+      h('div', { class: 'field' }, h('label', { for: 'ce-title', text: '할 일' }), title),
+      h('div', { class: 'field' }, h('label', { for: 'ce-memo', text: '메모' }), memo),
+      err);
+    var buttons = [{ label: '저장', value: 'save', validate: validate }, { label: '취소', value: null, kind: 'secondary' }];
+    if (ev) buttons.push({ label: '이 일정 지우기', value: 'delete', kind: 'danger-ghost' });
+    return openDialog({ title: ev ? '일정 고치기' : '일정 추가', content: content, className: 'ce-modal', initialFocus: propSel || date, buttons: buttons }).then(function (r) {
+      var p = prop || findProp(propSel.value);
+      if (!p) return false;
+      if (r.value === 'delete') {
+        return confirmDialog({ title: '이 일정을 지울까요?', message: ev.title + ' · ' + formatISODate(ev.at), confirmText: '지우기', danger: true }).then(function (ok) {
+          if (!ok) return false;
+          removeCustomEvent(p, ev.id);
+          toast('일정을 지웠어요');
+          return true;
+        });
+      }
+      if (r.value !== 'save') return false;
+      saveCustomEvent(p, ev, { at: isoDateOr(date.value), title: cleanLine(title.value, EVENT_TITLE_MAX), memo: cleanText(memo.value, EVENT_MEMO_MAX) });
+      toast(ev ? '일정을 고쳤어요' : '일정을 추가했어요');
+      return true;
+    });
+  }
+  /** 일정 줄을 누르면 매물 상세의 그 자리로(항목이면 펼치고, 아니면 '주요 날짜' 카드). 이미 그 매물 상세면 바로 옮긴다 */
+  function goToScheduleItem(it) {
+    var link = str(it.link);
+    var item = link.indexOf('item:') === 0 ? link.slice(5) : '';
+    var sec = link.indexOf('section:') === 0 ? link.slice(8) : '';
+    if (view.name === 'detail' && view.prop && view.prop.id === it.propId) {
+      if (item && CL.itemById[item]) jumpToItem(item);
+      else if (sec && view.refs.secs[sec]) jumpToSection(sec);
+      else openDatesCard();
+      return;
+    }
+    pendingItem = item && CL.itemById[item] ? item : null;
+    pendingSection = pendingItem ? null : (sec || 'dates');
+    navigate('/p/' + it.propId);
+  }
+  /** 상세의 '주요 날짜' 카드를 펼치고 그리로 스크롤·초점 */
+  function openDatesCard() {
+    var r = view.refs.sched;
+    if (!r) return;
+    r.card.open = true;
+    try { r.card.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' }); } catch (e) { /* 무시 */ }
+    setTimeout(function () { try { r.summary.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }, 350);
+  }
+  /**
+   * 일정 줄 하나. 왼쪽 체크(완료), 가운데는 D-n · 매물명 · 할 일 · 근거(작은 글씨) · 날짜(누르면 상세의 그 자리로), 사용자 일정은 끝에 [고치기].
+   * opts: { hideProp(매물 하나만 볼 때 이름 생략), mini(근거 숨김), scope(이 줄이 든 영역 선택자 — 다시 그린 뒤 초점 복원용), onChange(kind, it, scope) }
+   * 검토 반영: 완료하면 토스트 [되돌리기], 읽기 도구용으로 D 표기를 말로 풀고(.sr-only) 조각 사이에 쉼표, 지난 '할 일'은 회색(kind-* 클래스)
+   */
+  function schedRow(it, today, opts) {
+    opts = opts || {};
+    var prop = findProp(it.propId);
+    var past = !it.undated && it.date < today;
+    var isToday = it.date === today;
+    var li = h('li', { class: 'sched-row sev-' + it.severity + ' kind-' + it.kind + (it.done ? ' is-done' : '') + (past ? ' is-past' : '') + (isToday ? ' is-today' : '') + (it.dropped ? ' is-dropped' : ''), 'data-key': it.key });
+    var cb = h('button', { type: 'button', class: 'sched-check', role: 'checkbox', 'aria-checked': String(!!it.done), 'aria-label': '완료: ' + it.title + (opts.hideProp ? '' : ' (' + it.propName + ')') },
+      h('span', { class: 'check-box', 'aria-hidden': 'true' }));
+    cb.addEventListener('click', function () {
+      if (!prop) return;
+      var done = !it.done;
+      var prev = setScheduleDone(prop, it, done);
+      it.done = done;
+      cb.setAttribute('aria-checked', String(done));
+      li.classList.toggle('is-done', done);
+      if (done) {
+        toast(prev && prev.dateChanged ? '다녀온 것으로 표시하고 날짜를 오늘로 적었어요' : '완료했어요', {
+          duration: 6000,
+          action: { label: '되돌리기', fn: function () {
+            var p2 = findProp(it.propId);
+            if (!p2) return;
+            if (prev && it.doneBy === 'item' && it.itemId) { setItemState(p2, it.itemId, { done: prev.done, date: prev.date }); saveNow(); }
+            else setScheduleDone(p2, it, false);
+            it.done = false;
+            if (opts.onChange) opts.onChange('done', it, opts.scope);
+          } }
+        });
+      }
+      if (opts.onChange) opts.onChange('done', it, opts.scope);
+    });
+    function sep() { return h('span', { class: 'sr-only', text: ', ' }); }
+    var kindText = it.kind === 'deadline' ? '기한' : it.kind === 'visit' ? '임장' : it.kind === 'custom' ? '내 일정' : '할 일';
+    var dateText = it.undated ? '가계약금 보내기 전 · ' + kindText
+      : SCHED.shortDate(it.date, today) + ' · ' + (past && !it.done ? (it.kind === 'deadline' ? '지난 기한' : '지난 ' + kindText + ' — 했으면 체크해 두세요') : kindText);
+    var main = h('a', { class: 'sched-main', href: '#/p/' + encodeURIComponent(it.propId) },
+      h('span', { class: 'sr-only', text: (it.undated ? '가계약금 보내기 전' : SCHED.dSpoken(it.date, today)) + ', ' }),
+      h('span', { class: 'sched-d', 'aria-hidden': 'true', text: it.undated ? '가계약 전' : SCHED.dLabel(it.date, today) }),
+      h('span', { class: 'sched-body' },
+        h('span', { class: 'sched-top' },
+          opts.hideProp ? null : h('span', { class: 'sched-prop' }, it.propName + (it.dropped ? ' (탈락)' : ''), sep()),
+          h('span', { class: 'sched-title', text: it.title }), sep()),
+        it.why && !opts.mini ? h('span', { class: 'sched-why', text: it.why }) : null,
+        it.why && !opts.mini ? sep() : null,
+        h('span', { class: 'sched-date', text: dateText })));
+    main.addEventListener('click', function (e) { e.preventDefault(); goToScheduleItem(it); });
+    li.append(cb, main);
+    if (it.kind === 'custom' && prop) {
+      var evId = str(it.link).slice(7);
+      li.append(h('button', {
+        type: 'button', class: 'icon-btn sched-edit', 'aria-label': '일정 고치기: ' + it.title,
+        onclick: function () {
+          var ev = findEvent(prop, evId);
+          if (!ev) return;
+          editCustomEvent(prop, ev).then(function (ch) { if (ch && opts.onChange) opts.onChange('event', it, opts.scope); });
+        }
+      }, icon('edit')));
+    }
+    return li;
+  }
+  /**
+   * '주요 날짜' 카드(상세 맨 위 근처·일정 탭). type=date 5칸(옆의 ✕ 로 비움), 바꾸면 바로 저장하고 아래 '다음 기한' 미리보기를 다시 그린다.
+   * opts: { inTab(일정 탭: 늘 펼침, 상세 링크 없음), onChange(날짜·일정·완료가 바뀌면) }
+   */
+  function datesCard(prop, opts) {
+    opts = opts || {};
+    var sumLine = h('span', { class: 'fin-sum-line sched-sum' });
+    var body = h('div', { class: 'fin-body sched-body-wrap' });
+    var open = opts.inTab ? true : sessionGet(SCHED_OPEN_KEY) === '1';
+    var summary = h('summary', { class: 'fin-summary sched-summary' },
+      h('span', { class: 'fin-title' }, '주요 날짜', h('span', { class: 'fin-est', text: ' (계약일·잔금일 등)' })),
+      sumLine,
+      icon('chevron', 'fin-chev'));
+    var card = h('details', { class: 'card fin-card sched-card', id: opts.inTab ? 'sched-card-tab' : 'sched-card', open: open }, summary, body);
+    if (!opts.inTab) card.addEventListener('toggle', function () { sessionSet(SCHED_OPEN_KEY, card.open ? '1' : '0'); });
+    var refs = { card: card, summary: summary, body: body, sumLine: sumLine, prop: prop, inputs: {}, opts: opts };
+    if (!opts.inTab) view.refs.sched = refs;
+    var grid = h('div', { class: 'sched-grid' });
+    DATE_KEYS.forEach(function (k) {
+      var id = (opts.inTab ? 't-date-' : 'd-date-') + k;
+      var inp = h('input', { type: 'date', class: 'input', id: id, value: prop.dates[k] || '', 'aria-describedby': id + '-hint' });
+      var clear = h('button', { type: 'button', class: 'icon-btn sched-clear', 'aria-label': DATE_LABELS[k] + ' 지우기', hidden: !prop.dates[k] }, icon('close'));
+      function apply(val) {
+        var iso = isoDateOr(val);
+        if (val && !iso) return; // 아직 다 치지 않은 날짜
+        if (!setPropDate(prop, k, iso)) return;
+        clear.hidden = !iso;
+        refreshDatesPreview(refs);
+        if (opts.onChange) opts.onChange('date', k);
+      }
+      inp.addEventListener('change', function () { apply(inp.value); });
+      clear.addEventListener('click', function () { inp.value = ''; apply(''); try { inp.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } });
+      grid.append(h('div', { class: 'field sched-field' },
+        h('label', { for: id, text: DATE_LABELS[k] }),
+        h('div', { class: 'input-clear' }, inp, clear),
+        h('p', { class: 'field-hint', id: id + '-hint', text: DATE_HINTS[k] })));
+      refs.inputs[k] = inp;
+    });
+    refs.note = h('p', { class: 'small sched-weekend', role: 'status', hidden: true });
+    refs.preview = h('div', { class: 'sched-preview' });
+    var foot = h('div', { class: 'btn-row sched-foot' });
+    if (!opts.inTab) {
+      foot.append(h('a', { class: 'btn btn-small btn-secondary', href: '#/schedule', onclick: function () { sessionSet(SCHED_PROP_KEY, prop.id); } },
+        icon('calendar', 'ic-sm'), '일정 탭에서 보기'));
+    }
+    foot.append(h('button', {
+      type: 'button', class: 'btn btn-small btn-ghost', id: opts.inTab ? 't-add-event' : 'd-add-event',
+      onclick: function () { editCustomEvent(prop, null).then(function (ch) { if (ch) { refreshDatesPreview(refs); if (opts.onChange) opts.onChange('event'); } }); }
+    }, icon('plus', 'ic-sm'), '일정 추가'));
+    body.append(grid, refs.note, refs.preview, foot,
+      h('p', { class: 'small muted', text: '기한은 안내일 뿐 법적 효력이 없어요. 공휴일은 반영하지 않아요(토·일만 봐요). 날짜는 중개사·은행·구청에 확인하세요.' }));
+    refreshDatesPreview(refs);
+    return card;
+  }
+  /**
+   * 카드 머리 줄(가장 가까운 기한. 지난 것이면 빨강 "지난 기한 D+4 …")·토·일 잔금 안내·'다음 기한' 미리보기(가까운 미완료 5개 + 지난 기한·할 일 수)를 다시 그린다.
+   * 검토 반영: 매물 하나를 보는 카드라 탈락 매물이어도 그 매물의 항목을 그대로 센다(머리 줄·목록·일정 탭이 같은 답). 토·일 잔금은 위 한 줄로 이미 보여 주므로 목록에서는 뺀다
+   */
+  function refreshDatesPreview(refs) {
+    var prop = refs.prop;
+    var today = todayISO();
+    var hasAny = DATE_KEYS.some(function (k) { return !!prop.dates[k]; });
+    refs.preview.textContent = '';
+    refs.sumLine.classList.remove('is-past');
+    if (!SCHED) {
+      refs.sumLine.textContent = hasAny ? '' : '날짜를 적어 두세요';
+      refs.note.hidden = true;
+      refs.preview.append(h('p', { class: 'small muted', text: '일정 계산 파일(schedule.js)을 못 불러와 기한을 계산하지 못해요. 날짜는 저장돼요. 인터넷에 연결해 새로고침해 주세요.' }));
+      return;
+    }
+    var items = buildSchedule([prop], today);
+    var next = SCHED.nextFor(items, today);
+    var nextPast = !!(next && next.date < today);
+    refs.sumLine.classList.toggle('is-past', nextPast);
+    refs.sumLine.textContent = next ? (nextPast ? '지난 기한 ' : '') + SCHED.dLabel(next.date, today) + ' ' + next.short + ' · ' + formatISODate(next.date)
+      : (hasAny || items.length ? '남은 기한 없음' : '날짜를 적으면 기한을 계산해요');
+    var b = prop.dates.balanceAt;
+    if (b && SCHED.isWeekend(b)) {
+      refs.note.textContent = '잔금일이 ' + SCHED.weekdayKo(b) + '요일이에요. 은행 대출 실행·등기 접수가 안 돼요. 공휴일은 직접 확인하세요.';
+      refs.note.hidden = false;
+    } else { refs.note.textContent = ''; refs.note.hidden = true; }
+    var scope = '#' + refs.card.id;
+    var up = SCHED.nextItems(items, today, 6, { includeDropped: true }).filter(function (it) { return it.key !== prop.id + ':balance-weekend'; }).slice(0, 5);
+    // 지난 미완료를 '기한'(kind deadline)과 '할 일'(그날 할 일·내 일정)로 나눠 센다(지난 할 일은 되돌릴 수 없는 날이라 '지난 기한'으로 세지 않음)
+    var pastDead = items.filter(function (it) { return !it.done && !it.undated && it.date < today && it.kind === 'deadline'; });
+    var pastTodo = items.filter(function (it) { return !it.done && !it.undated && it.date < today && it.kind !== 'deadline'; });
+    if (prop.status === 'dropped') refs.preview.append(h('p', { class: 'small muted', text: '탈락 매물이라 홈 카드에는 기한 칩을 달지 않아요. 일정 탭에서는 "탈락 매물의 일정도 보기"를 켜면 보여요.' }));
+    if (!up.length && !pastDead.length && !pastTodo.length) {
+      refs.preview.append(h('p', { class: 'small muted', text: hasAny ? '남은 기한이 없어요.' : '계약일·잔금일을 적으면 실거래 신고·전입신고·대출 전입 의무 같은 기한을 여기와 일정 탭에 보여 줘요.' }));
+      return;
+    }
+    refs.preview.append(h('h3', { class: 'fin-h', text: '다음 기한' }));
+    if (up.length) {
+      refs.preview.append(h('ul', { class: 'sched-list sched-mini' }, up.map(function (it) {
+        return schedRow(it, today, { hideProp: true, mini: true, scope: scope, onChange: function (kind, it2) { refreshDatesPreview(refs); if (refs.opts.onChange) refs.opts.onChange('done', it2, scope); } });
+      })));
+    }
+    var bits = [];
+    if (pastDead.length) bits.push('지난 기한 ' + pastDead.length + '개');
+    if (pastTodo.length) bits.push('지난 할 일 ' + pastTodo.length + '개');
+    if (bits.length) refs.preview.append(h('p', { class: 'sched-past-note' + (pastDead.length ? '' : ' is-todo'), text: bits.join(' · ') + ' — 일정 탭의 "지난 것"에서 확인하세요' }));
+  }
+  /** 캘린더 파일(.ics) 내려받기: 미완료·날짜 있는 항목만(종일 일정, UID 는 항목 key 로 늘 같음). 백업 내려받기와 같은 방식(downloadBlob) */
+  function exportICS(items) {
+    if (!SCHED) return;
+    var list = (items || []).filter(function (it) { return it.date && !it.done; });
+    if (!list.length) { toast('내보낼 일정이 없어요'); return; }
+    var text = SCHED.toICS(list, { now: new Date() });
+    downloadBlob(new Blob([text], { type: 'text/calendar;charset=utf-8' }), '임장일정-' + todayISO().replace(/-/g, '') + '.ics');
+    toast(isIOS() ? '캘린더 파일을 만들었어요. 공유 시트에서 "캘린더에 추가"를 고르세요' : '캘린더 파일(.ics)을 내려받았어요. 캘린더 앱에서 열면 들어가요', { duration: 6000 });
+  }
+  var schedKeep = null; // 검토 반영: 다시 그리는 동안 "다음에 할 일"에 이번 한 번 남겨 둘(방금 완료한) 줄의 key
+  /**
+   * 일정 탭을 다시 그리되 스크롤과 초점을 지킨다(키보드·VoiceOver — 검토 반영).
+   * opts: { key(그 줄의 체크 버튼으로), scope(그 줄을 먼저 찾을 영역 선택자. 없으면 "다음에 할 일" → 전체), sel(초점 둘 요소 선택자), keep(완료해도 "다음에 할 일"에 남길 key) }. 문자열이면 key
+   */
+  function rerenderSchedule(opts) {
+    if (typeof opts === 'string') opts = { key: opts };
+    opts = opts || {};
+    var y = window.scrollY;
+    schedKeep = opts.keep || null;
+    try { renderSchedule(); } finally { schedKeep = null; }
+    window.scrollTo(0, y);
+    var el = null;
+    if (opts.key) {
+      var q = '.sched-row[data-key="' + String(opts.key).replace(/"/g, '\\"') + '"] .sched-check';
+      el = (opts.scope ? document.querySelector('#main ' + opts.scope + ' ' + q) : null) || document.querySelector('#main .sched-next ' + q) || document.querySelector('#main ' + q);
+    } else if (opts.sel) el = document.querySelector(opts.sel);
+    if (el) { try { el.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+  }
+  /** 일정 탭 (#/schedule) */
+  function renderSchedule() {
+    var v = newView('schedule');
+    var props = state.properties.slice().sort(sortCompare('updated'));
+    var today = todayISO();
+    var showDropped = sessionGet(SCHED_DROPPED_KEY) === '1';
+    var visible = props.filter(function (p) { return showDropped || p.status !== 'dropped'; });
+    var filterId = sessionGet(SCHED_PROP_KEY) || '';
+    if (filterId && !visible.some(function (p) { return p.id === filterId; })) { filterId = ''; sessionSet(SCHED_PROP_KEY, ''); }
+    var sel = filterId ? findProp(filterId) : null;
+    setTopbar({
+      title: '일정',
+      actions: props.length && SCHED ? [h('button', {
+        type: 'button', class: 'tb-btn', 'aria-label': '일정 추가',
+        onclick: function () { editCustomEvent(sel, null, visible).then(function (ch) { if (ch) rerenderSchedule(); }); }
+      }, icon('plus'))] : []
+    });
+    updateTabbar('schedule');
+    var main = resetMain();
+    appendKid(main, dataWarning());
+    if (!SCHED) {
+      main.append(h('div', { class: 'notice notice-stop', role: 'alert' },
+        h('strong', { text: '일정 계산 파일을 못 불러왔어요' }),
+        h('p', { text: '지금은 기한을 계산할 수 없어요(schedule.js). 인터넷에 연결한 뒤 새로고침해 주세요. 매물 상세의 주요 날짜는 그대로 저장돼요.' }),
+        h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { location.reload(); } }, '새로고침')));
+      return;
+    }
+    if (!props.length) {
+      main.append(h('div', { class: 'card' },
+        h('p', { text: '매물이 아직 없어요. 매물을 추가하고 상세의 주요 날짜에 계약일·잔금일을 적으면 실거래 신고·전입신고 같은 기한을 여기서 계산해요.' }),
+        h('a', { class: 'btn btn-accent btn-block', href: '#/new' }, icon('plus'), '매물 추가')));
+      return;
+    }
+    var hasDropped = props.some(function (p) { return p.status === 'dropped'; });
+    var all = buildSchedule(visible, today);
+    var undoneBy = {};
+    var undoneAll = 0;
+    all.forEach(function (it) { if (!it.done) { undoneBy[it.propId] = (undoneBy[it.propId] || 0) + 1; undoneAll++; } });
+
+    // 1) 매물 필터 칩(전체 / 매물별). 숫자는 미완료 항목 수
+    function chip(id, label, n) {
+      return h('button', {
+        type: 'button', class: 'hf-chip', 'aria-pressed': filterId === id ? 'true' : 'false', 'data-prop': id,
+        onclick: function () { sessionSet(SCHED_PROP_KEY, id); rerenderSchedule({ sel: '.sched-chips .hf-chip[data-prop="' + String(id).replace(/"/g, '\\"') + '"]' }); }
+      }, h('span', { class: 'hf-pill' }, label, n ? ' ' : null, n ? h('span', { class: 'hf-n', text: String(n) }) : null));
+    }
+    var chips = h('div', { class: 'hf-chips sched-chips', role: 'group', 'aria-label': '매물 고르기' });
+    chips.append(chip('', '전체', undoneAll));
+    visible.forEach(function (p) { chips.append(chip(p.id, p.name + (p.status === 'dropped' ? ' (탈락)' : ''), undoneBy[p.id] || 0)); });
+    main.append(chips);
+
+    // 2) 고른 매물의 주요 날짜 카드(바로 편집)
+    // 검토 반영: 다시 그린 뒤 바꾼 날짜 칸·[일정 추가]·누른 체크로 초점을 돌려준다(상세 카드와 같은 느낌. iPad 외장 키보드로 다섯 칸 차례로 채우기)
+    if (sel) main.append(datesCard(sel, { inTab: true, onChange: function (kind, k, scope) {
+      if (kind === 'date' && k) rerenderSchedule({ sel: '#t-date-' + k });
+      else if (kind === 'done' && k && k.key) rerenderSchedule({ key: k.key, scope: scope || '#sched-card-tab' });
+      else rerenderSchedule({ sel: '#t-add-event' });
+    } }));
+    else main.append(h('p', { class: 'small muted sched-hint', text: '매물 칩을 고르면 그 매물의 주요 날짜를 여기서 바로 적을 수 있어요.' }));
+
+    // 3) 목록: 다음에 할 일 → 지난 것(접힘) · 오늘 · 이번 주 · 이후
+    var items = sel ? all.filter(function (it) { return it.propId === sel.id; }) : all;
+    // 줄의 체크·고치기 뒤 다시 그리기: 누른 줄의 체크로 초점. "다음에 할 일"에서 완료한 줄은 이번 한 번 그 자리에 줄 긋기로 남긴다(사라져 초점이 화면 밖으로 가지 않게)
+    function rowOptsFor(scope) {
+      return { hideProp: !!sel, scope: scope, onChange: function (kind, it, sc) {
+        rerenderSchedule({ key: it && it.key, scope: sc || scope, keep: kind === 'done' && (sc || scope) === '.sched-next' && it && it.done ? it.key : null });
+      } };
+    }
+    var nextOpts = rowOptsFor('.sched-next'), groupOpts = rowOptsFor('.sched-group');
+    function openPastGroup() {
+      var d = document.getElementById('sched-past');
+      if (!d) return;
+      d.open = true;
+      sessionSet(SCHED_PAST_KEY, '1');
+      try { d.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' }); } catch (e) { /* 무시 */ }
+      var sm = d.querySelector('summary');
+      if (sm) { try { sm.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+    }
+    if (!items.length) {
+      main.append(h('div', { class: 'notice notice-info sched-empty', role: 'note' },
+        h('strong', { text: '아직 계산할 날짜가 없어요' }),
+        h('p', { text: '매물 상세의 주요 날짜에 계약일·잔금일을 적으면 실거래 신고·전입신고·대출 전입 의무 같은 기한을 계산해요.' + (sel ? ' 위 카드에 적어 보세요.' : ' 아래에서 매물을 고르면 여기서 바로 적을 수 있어요.') }),
+        sel ? null : h('div', { class: 'btn-row sched-empty-btns' }, visible.slice(0, 4).map(function (p) {
+          return h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { sessionSet(SCHED_PROP_KEY, p.id); rerenderSchedule({ sel: '#t-date-contractAt' }); } }, p.name + ' 날짜 적기');
+        }))));
+    } else {
+      // 다음에 할 일: 최근 14일 안에 지난 진짜 기한 → 날짜 없음·1년 안 다가오는 것(schedule.js nextItems). 탈락은 visible 에서 이미 걸렀으므로 여기서는 그대로
+      var pool = schedKeep ? items.map(function (it) { return it.key === schedKeep && it.done ? Object.assign({}, it, { done: false, keptDone: true }) : it; }) : items;
+      var next = SCHED.nextItems(pool, today, 3, { includeDropped: true }).map(function (it) {
+        if (!it.keptDone) return it;
+        var o = Object.assign({}, it, { done: true }); delete o.keptDone; return o;
+      });
+      var pastDead = items.filter(function (it) { return !it.done && !it.undated && it.date < today && it.kind === 'deadline'; });
+      var pastTodo = items.filter(function (it) { return !it.done && !it.undated && it.date < today && it.kind !== 'deadline'; });
+      var nextCard = h('section', { class: 'card sched-next', 'aria-labelledby': 'sched-next-t' }, h('h2', { class: 'card-title', id: 'sched-next-t', text: '다음에 할 일' }));
+      if (next.length) nextCard.append(h('ul', { class: 'sched-list' }, next.map(function (it) { return schedRow(it, today, nextOpts); })));
+      else nextCard.append(h('p', { class: 'small muted', text: pastDead.length ? '1년 안에 다가오는 일정은 없어요. 지난 기한을 확인하세요.' : (pastTodo.length ? '1년 안에 다가오는 일정은 없어요.' : '남은 일정이 없어요.') }));
+      if (pastDead.length || pastTodo.length) {
+        var bits = [];
+        if (pastDead.length) bits.push('지난 기한 ' + pastDead.length + '개');
+        if (pastTodo.length) bits.push('지난 할 일 ' + pastTodo.length + '개');
+        nextCard.append(h('button', { type: 'button', class: 'sched-past-btn' + (pastDead.length ? '' : ' is-todo'), id: 'sched-past-open', onclick: openPastGroup }, bits.join(' · ') + ' — 아래 "지난 것" 열기'));
+      }
+      main.append(nextCard);
+      SCHED.groupItems(items, today).forEach(function (g) {
+        if (!g.items.length) return;
+        var ul = h('ul', { class: 'sched-list' }, g.items.map(function (it) { return schedRow(it, today, groupOpts); }));
+        var count = h('span', { class: 'count', text: g.items.length + '개' });
+        if (g.id === 'past') {
+          var undoneDead = g.items.filter(function (it) { return !it.done && it.kind === 'deadline'; }).length;
+          var undoneTodo = g.items.filter(function (it) { return !it.done && it.kind !== 'deadline'; }).length;
+          var parts = [];
+          if (undoneDead) parts.push('기한 ' + undoneDead);
+          if (undoneTodo) parts.push('할 일 ' + undoneTodo);
+          count.textContent = g.items.length + '개' + (parts.length ? ' · 미완료 ' + parts.join(' · ') : '');
+          // summary 안도 h2 로(VoiceOver 로터의 제목 이동에 "지난 것"이 들어가게). 머리 글자와 수 사이는 공백 한 칸
+          var det = h('details', { class: 'sched-group sched-group-past', id: 'sched-past', open: sessionGet(SCHED_PAST_KEY) === '1' },
+            h('summary', { class: 'sched-gh' }, h('h2', { class: 'h2 sched-gt' }, g.label, ' ', count), icon('chevron', 'ic-sm sched-gchev')), ul);
+          det.addEventListener('toggle', function () { sessionSet(SCHED_PAST_KEY, det.open ? '1' : '0'); });
+          main.append(det);
+        } else {
+          main.append(h('section', { class: 'sched-group', 'data-group': g.id }, h('h2', { class: 'h2 sched-gt' }, g.label, ' ', count), ul));
+        }
+      });
+    }
+
+    // 4) 계산 조건(대출 종류·생애최초)·탈락 매물 보기
+    var dropToggle = h('input', { type: 'checkbox', id: 'sched-dropped', checked: showDropped });
+    dropToggle.addEventListener('change', function () { sessionSet(SCHED_DROPPED_KEY, dropToggle.checked ? '1' : '0'); rerenderSchedule({ sel: '#sched-dropped' }); });
+    var loanSel = h('select', { class: 'select', id: 'sched-loan', 'aria-describedby': 'sched-loan-hint' }, Object.keys(LOAN_TYPES).map(function (k) { return h('option', { value: k, text: LOAN_TYPES[k] }); }));
+    loanSel.value = schedSettings().loanType;
+    loanSel.addEventListener('change', function () {
+      if (setLoanType(loanSel.value)) { toast('대출 종류를 바꿨어요. 전입 의무 기한을 다시 계산했어요'); rerenderSchedule({ sel: '#sched-loan' }); }
+    });
+    var fs = finSettings();
+    main.append(h('section', { class: 'card', 'aria-labelledby': 'sched-opt' },
+      h('h2', { class: 'card-title', id: 'sched-opt', text: '계산 조건' }),
+      h('div', { class: 'field' },
+        h('label', { for: 'sched-loan', text: '대출 종류 (전입 의무 기한)' }),
+        loanSel,
+        h('p', { class: 'field-hint', id: 'sched-loan-hint', text: '디딤돌은 잔금일부터 1개월(사유서로 2개월 연장), 은행 주택담보대출·보금자리론은 6개월(수도권, 2025-06-27 대책) 안에 전입해요. 내 대출의 조건은 은행에 확인하세요.' })),
+      h('p', { class: 'small muted', text: '생애최초 취득세 감면 유지 기한(취득일부터 3년 안에 팔거나 세 주면 추징)은 대출·비용의 계산 조건 "생애최초"가 켜져 있을 때만 보여요. 지금: ' + (fs ? (fs.firstHome ? '생애최초 켜짐' : '생애최초 꺼짐') : '대출·비용 파일 없음') }),
+      FIN ? h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { editFinSettings(null).then(function (ch) { if (ch) rerenderSchedule(); }); } }, '대출 조건 바꾸기') : null,
+      hasDropped ? h('label', { class: 'toggle' }, dropToggle, h('span', { text: '탈락 매물의 일정도 보기' })) : null));
+
+    // 5) 캘린더로 내보내기(미완료·날짜 있는 항목)
+    var exportable = items.filter(function (it) { return it.date && !it.done; });
+    main.append(h('section', { class: 'card', 'aria-labelledby': 'sched-ics' },
+      h('h2', { class: 'card-title', id: 'sched-ics', text: '캘린더로 내보내기' }),
+      h('p', { class: 'small muted', text: '미완료 일정 ' + exportable.length + '개를 캘린더 파일(.ics)로 내려받아요. ' +
+        (isIOS() ? 'iPhone·iPad에서는 내려받은 뒤 공유 시트에서 "캘린더에 추가"를 고르세요.' : 'Mac·PC에서는 파일을 열면 캘린더 앱이 넣어 줘요.') + ' 같은 항목은 다시 내보내도 겹치지 않아요.' }),
+      h('button', { type: 'button', class: 'btn btn-block', id: 'sched-ics-btn', disabled: !exportable.length, onclick: function () { exportICS(exportable); } },
+        icon('share', 'ic-sm'), '캘린더로 내보내기' + (exportable.length ? ' (' + exportable.length + '개)' : ''))));
+    main.append(h('p', { class: 'about', text: '기한은 안내일 뿐 법적 효력이 없어요. 공휴일은 반영하지 않아요(토·일만 봐요). 날짜는 중개사·은행·구청에 확인하세요.' }));
+  }
+
   // ---------------- 설정 ----------------
   var photoBytesCache = null; // 1.4.5: { count, docs(1.6.0 서류 수), bytes } 설정을 열 때 센 사진·서류 크기 합(이 세션 안에서만, 수가 같으면 다시 읽지 않음)
   function renderSettings() {
@@ -9335,6 +10093,7 @@
       candidate = merged.state;
       report = merged.report;
       dups = crossDuplicates(merged.before, candidate.properties);
+      capCustomEvents(candidate.properties); // 1.10.0 검토 반영: 합집합이 50개를 넘으면 바로 정리(다음 로드까지 60개로 두지 않음)
     }
 
     if (!tryWriteState(candidate)) {
@@ -10239,6 +10998,7 @@
   var TABS = [
     { id: 'home', href: '#/', label: '매물', icon: 'home' },
     { id: 'compare', href: '#/compare', label: '비교', icon: 'compare' },
+    { id: 'schedule', href: '#/schedule', label: '일정', icon: 'calendar' }, // 1.10.0
     { id: 'glossary', href: '#/glossary', label: '용어·링크', icon: 'book' }, // 1.4.5: 바로가기가 있다는 것이 이름에 보이게
     { id: 'settings', href: '#/settings', label: '설정', icon: 'gear' }
   ];
@@ -10273,6 +11033,7 @@
     [/^\/p\/([^/]+)\/summary$/, function (m) { renderSummary(m[1]); }],
     [/^\/p\/([^/]+)\/edit$/, function (m) { return renderForm(m[1]); }],
     [/^\/compare$/, function () { renderCompare(); }],
+    [/^\/schedule$/, function () { renderSchedule(); }], // 1.10.0
     [/^\/glossary$/, function () { renderGlossary(); }],
     [/^\/settings$/, function () { renderSettings(); }],
     [/^\/import(?:\?(.*))?$/, function (m) { renderImport(m[1] || ''); }]
