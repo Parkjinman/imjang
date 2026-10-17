@@ -29,7 +29,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.8.1';
+  var APP_VERSION = '1.9.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -37,6 +37,9 @@
   // 1.7.0: 매물의 1.7.0 필드(KB시세·관리비·리모델링비 등)와 전역 대출 조건(settings)의 사본. 예전(1.6.0 이하) 탭이 이것을 빼고 저장해도
   // 되살린다. 1.6.0 은 REG_SIDE_KEY 를 통째로 다시 쓰므로 키를 따로 둔다(그 키에 넣으면 1.6.0 탭이 지움)
   var FIN_SIDE_KEY = 'imjang.v1.fin';
+  // 1.9.0 검토 반영: 매물의 최근 실거래 거래일·층 사본 { v: 1, props: { 매물id: { price, at, floor } } }. 1.7.0~1.8.1 은 FIN_SIDE_KEY 를
+  // 통째로 다시 쓰므로(그 키의 real 항목은 예전 탭이 한 번 저장하면 사라짐) 1.6.0→1.7.0 때처럼 키를 따로 둔다. 예전 탭은 이 키를 모른다
+  var REAL_SIDE_KEY = 'imjang.v1.real';
   var SCHEMA_VERSION = 1;
   var PHOTO_DB_NAME = 'imjang-photos';
   var PHOTO_STORE = 'photos';
@@ -887,6 +890,11 @@
   // 그중 fieldsAt 으로 시각을 남기는 칸(merge.js FIN_FIELDS 와 같음). 사본에 시각도 함께 둔다
   var FIN_TIMED = ['kbPrice', 'dealPrice', 'remodelCost', 'publicPrice', 'naverLoanLimit', 'naverRate',
     'feeMonthly', 'feeAvg', 'feeSummer', 'feeWinter', 'feeRecent', 'acqTaxNaver', 'propertyTaxNaver'];
+  // 1.9.0 에서 늘어난 매물 필드: 최근 실거래의 거래일 realAt('YYYY-MM-DD'|'')·층 realFloor(1~99|null). realPrice 가 없으면 둘 다 비운다.
+  // 시각은 따로 두지 않고 fieldsAt.realPrice 와 함께 움직인다(merge.js FIELD_GROUPS.realPrice). 1.9.0 은 늘 이 키를 적으므로(값이 없어도 ''·null)
+  // 저장본 매물에 realAt 키가 아예 없으면 예전(1.8.1 이하) 탭이 쓴 것 → 사본(REAL_SIDE_KEY)에서 되살린다(restoreRealFromSide)
+  var FIELDS_190 = ['realAt', 'realFloor'];
+  var REAL_FLOOR_RANGE = [1, 99];
   var HIST_SOURCES = { naver: 1, code: 1, manual: 1 };
   var HISTORY_MAX = 20; // merge.js HISTORY_MAX 와 같음
   var ASK_RANGE = [1, 10000000];
@@ -948,6 +956,63 @@
     np.syncAt = timeMapOf(p.syncAt); // { 칸: 가져오기로 넣은 시각 }
     return np;
   }
+
+  // ---- 1.9.0: 최근 실거래의 거래일·층 ----
+  /** 실거래 층: 11, '11', '11층' → 11. 1~99 정수가 아니면 null */
+  function realFloorOr(v) {
+    var n = null;
+    if (typeof v === 'number') n = v;
+    else if (typeof v === 'string') {
+      var m = /^\s*(\d{1,3})\s*층?\s*$/.exec(v);
+      if (m) n = +m[1];
+    }
+    if (n === null || !isFinite(n) || n !== Math.floor(n)) return null;
+    return n >= REAL_FLOOR_RANGE[0] && n <= REAL_FLOOR_RANGE[1] ? n : null;
+  }
+  /** 매물 원본(p)의 실거래 거래일·층을 정리해 np 에 넣는다. np.realPrice 가 없으면 둘 다 비운다(normalizeProperty·restoreFinFromSide 가 같이 씀) */
+  function realFieldsInto(np, p) {
+    var has = np.realPrice !== null && np.realPrice !== undefined;
+    np.realAt = has ? isoDateOr(p.realAt) : '';
+    np.realFloor = has ? realFloorOr(p.realFloor) : null;
+    return np;
+  }
+  /** "1억 6,250만원"·"9,500만원"·"2억원" → 만원 수(16250·9500·20000). 모양이 다르면 null */
+  function manwonOfText(s) {
+    var t = str(s).replace(/\s+/g, '');
+    var m = /^(?:(\d+)억)?(?:(\d{1,3}(?:,\d{3})*|\d+)만)?원?$/.exec(t);
+    if (!m || (!m[1] && !m[2])) return null;
+    var n = (m[1] ? +m[1] * 10000 : 0) + (m[2] ? +m[2].replace(/,/g, '') : 0);
+    return n > 0 ? n : null;
+  }
+  // 1.8.1 이하가 메모에만 남긴 실거래 줄. 날짜·(층)·금액 순서(import-parser naverDeal 의 bits 순서. 금액 뒤의 '직거래'·'미등록'은 보지 않음)
+  var REAL_MEMO_RE = /^최근 실거래\(같은 면적\):\s*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일(?:\s*·\s*(\d{1,3})층)?\s*·\s*([\d,억만원 ]+?)(?:\s*·|\s*$)/m;
+  /**
+   * 1.9.0 되살리기(메모 → 값): realPrice 가 있고 realAt 이 비었는데 메모에 "최근 실거래(같은 면적): YYYY년 M월 D일 · (N층 ·)? <금액>" 줄이
+   * 있고 그 금액이 realPrice 와 같을 때만 realAt(·realFloor)을 채운다. 금액이 다르거나 "면적 확인 필요" 줄이면 그대로. 메모는 고치지 않는다.
+   * 1.9.0 검토 반영: 날짜가 오늘보다 뒤면(표에 연도 머리가 둘이라 1.8.1 메모가 잘못된 해를 붙인 경우) 채우지 않는다(가져오기 코드 정리 cleanDeal 과 같은 규칙).
+   * "한 번"은 부르는 쪽(normalizeProperty → realReviveAllowed)이 보장한다: 1.8.1 이하가 쓴 기록(realAt 키 없음)에만 쓴다
+   */
+  function reviveRealFromMemo(np) {
+    if (np.realPrice === null || np.realAt || !np.memo || np.memo.indexOf('최근 실거래(같은 면적)') < 0) return false;
+    var m = REAL_MEMO_RE.exec(np.memo);
+    if (!m) return false;
+    if (manwonOfText(m[5]) !== Math.round(np.realPrice)) return false;
+    var at = isoDateOr(m[1] + '-' + pad2(+m[2]) + '-' + pad2(+m[3]));
+    if (!at || at > todayISO()) return false;
+    np.realAt = at;
+    if (np.realFloor === null && m[4]) np.realFloor = realFloorOr(m[4]);
+    return true;
+  }
+  /**
+   * 1.9.0 검토 반영: 메모에서 되살려도 되는 기록인지(원본 p 기준). 1.9.0 은 늘 realAt 키를 적으므로 키가 있으면 1.9.0 이 쓴 것 —
+   * 사용자가 폼에서 지운 빈 값도 뜻이 있어 다시 채우지 않는다(전에는 열 때마다 채워 지운 날짜가 되살아났음). 키가 없어도(1.8.1 이하 탭이 씀)
+   * 가져온 뒤 실거래가를 손으로 고친 기록(handEdited: fieldsAt.realPrice 가 syncAt·importedAt 보다 나중)이면 그 메모 줄은 지금 값의 거래가
+   * 아닐 수 있어 건너뛴다(1.9.0 에서 지운 날짜를 예전 탭이 키째 빼고 저장한 경우도 여기에 걸린다)
+   */
+  function realReviveAllowed(p) {
+    if (!p || typeof p !== 'object' || hasOwn(p, 'realAt')) return false;
+    return !handEdited(p, 'realPrice');
+  }
   /** 1.7.0 전역 대출 조건 정리: { finance: 숫자·글·참거짓만 담은 객체 | null, financeAt: ms }. 값 검사는 finance.js normalizeSettings 가 계산 때 한다 */
   function normalizeSettingsState(v) {
     var out = { finance: null, financeAt: 0 };
@@ -981,6 +1046,8 @@
       direction: str(p.direction),         // 방향 (예: "남향")
       askPrice: numOrNull(p.askPrice),
       realPrice: numOrNull(p.realPrice),
+      realAt: '',      // 1.9.0: 최근 실거래의 거래일 'YYYY-MM-DD'(아래 realFieldsInto. realPrice 가 없으면 '')
+      realFloor: null, // 1.9.0: 최근 실거래의 층 1~99(realPrice 가 없으면 null)
       agentName: str(p.agentName),
       agentPhone: str(p.agentPhone),
       memo: str(p.memo),
@@ -1018,6 +1085,10 @@
     np.registrySnapshots = normalizeSnapshots(p.registrySnapshots, snapGone);
     if (Object.keys(snapGone).length) np.registrySnapshotsRemoved = snapGone;
     finFieldsInto(np, p); // 1.7.0: 대출·비용 값(늘 같은 키)
+    realFieldsInto(np, p); // 1.9.0: 실거래 거래일·층(늘 같은 키. realPrice 가 없으면 빈 값)
+    // 1.9.0: 1.8.1 이하가 메모에만 남긴 날짜·층을 한 번 채운다(메모는 그대로). 저장본을 읽으며 채웠으면 init 이 한 번 다시 저장(loadState)
+    // 1.9.0 검토 반영: 원본에 realAt 키가 있으면(1.9.0 이 씀 — 지운 빈 값 포함) 다시 채우지 않는다(realReviveAllowed). 가져오기 '담기'·폼은 키를 늘 넣는다
+    if (realReviveAllowed(p) && reviveRealFromMemo(np) && migrationStats) migrationStats.realRevived = (migrationStats.realRevived || 0) + 1;
     if (legacy && migrateInjunction(np.items) && migrationStats) migrationStats.inj++; // 1.5.0 검토 반영
     if (MG) return MG.fillTimes(np);
     // merge.js 를 못 불러왔을 때: 저장된 시각은 검사만 하고 그대로 둔다(버리면 다음 합치기에서 예전 값이 새 값을 이길 수 있음).
@@ -1120,6 +1191,8 @@
     // 1.6.0 검토 반영: 예전(1.5.x) 탭이 1.6.0 필드를 빼고 저장해 두었으면 따로 둔 키에서 되살리고 다시 저장한다
     if (restoreFromSide(s, obj)) migratedOnLoad = true;
     if (restoreFinFromSide(s, obj)) migratedOnLoad = true; // 1.7.0: 예전(1.6.0 이하) 탭이 지운 대출·비용 값·대출 조건
+    if (restoreRealFromSide(s, obj)) migratedOnLoad = true; // 1.9.0: 예전(1.8.1 이하) 탭이 지운 실거래 거래일·층(사본 REAL_SIDE_KEY)
+    if (migrationStats && migrationStats.realRevived) migratedOnLoad = true; // 1.9.0: 메모에서 되살린 실거래 거래일·층을 저장본에도
     // 1.5.0 검토 반영: 옛 저장본(1.4.x)을 처음 읽었으면 옮긴 수를 홈 안내(ui.dataNotice)에 남기고, init 이 dataVersion 을 적어 다시 저장한다
     var m = migrationStats;
     if (m && m.legacy) {
@@ -1227,6 +1300,7 @@
         FIN_TIMED.forEach(function (k) {
           if (p.fieldsAt && numOrNull(p.fieldsAt[k]) > 0) fa[k] = p.fieldsAt[k];
         });
+        // 1.9.0 검토 반영: 실거래 거래일·층 사본은 여기(FIN_SIDE_KEY)가 아니라 REAL_SIDE_KEY 에 둔다(1.7.0~1.8.1 이 이 키를 통째로 다시 쓰므로)
         if (!Object.keys(o).length && !Object.keys(fa).length) return;
         if (Object.keys(fa).length) o.fa = fa;
         props[p.id] = o;
@@ -1256,7 +1330,8 @@
     s.properties.forEach(function (p) {
       var r = hasOwn(rawById, p.id) ? rawById[p.id] : null;
       var d = hasOwn(sp, p.id) && !BAD_KEYS[p.id] ? sp[p.id] : null;
-      if (!r || !d || typeof d !== 'object' || hasOwn(r, 'kbHistory')) return;
+      if (!r || !d || typeof d !== 'object') return;
+      if (hasOwn(r, 'kbHistory')) return;
       var back = finFieldsInto({}, d);
       var fa = d.fa && typeof d.fa === 'object' ? d.fa : {};
       if (!p.fieldsAt || typeof p.fieldsAt !== 'object') p.fieldsAt = {};
@@ -1286,6 +1361,50 @@
   }
 
   /**
+   * 1.9.0 검토 반영: 최근 실거래 거래일·층 사본(REAL_SIDE_KEY)을 쓴다 — { v: 1, props: { 매물id: { price, at, floor } } }.
+   * 그때의 금액(price)과 묶어 두어, 예전(1.8.1 이하) 탭이 금액을 고쳤으면 되살리지 않는다. 거래일·층이 모두 비면 항목을 두지 않고,
+   * 매물이 하나도 없으면 키를 지운다(전체 삭제 뒤 saveNow 도 여기를 거친다). 1.7.0~1.8.1 은 이 키를 모른다(FIN_SIDE_KEY 는 통째로 다시 씀).
+   * 본 저장이 된 뒤에만 부르고, 실패해도 조용히 넘어간다
+   */
+  function writeRealSide(s) {
+    try {
+      var props = {};
+      (s.properties || []).forEach(function (p) {
+        if (p.realPrice === null || p.realPrice === undefined) return;
+        if (blankVal(p.realAt) && blankVal(p.realFloor)) return;
+        props[p.id] = { price: p.realPrice, at: p.realAt, floor: p.realFloor };
+      });
+      if (Object.keys(props).length) localStorage.setItem(REAL_SIDE_KEY, JSON.stringify({ v: 1, props: props }));
+      else localStorage.removeItem(REAL_SIDE_KEY);
+    } catch (e) { /* 저장 공간 부족 등: 본 저장은 됐다. 다음 저장 때 다시 */ }
+  }
+  /**
+   * 1.9.0 검토 반영: 저장본 원문(raw)에 realAt 키가 아예 없는 매물(1.8.1 이하 탭이 씀)에 사본의 거래일·층을 되살린다.
+   * 사본의 금액과 지금 금액이 같을 때만, 지금 비어 있는 칸만. 이미 값이 있으면(메모에서 되살림 등) 그대로. 되살렸으면 true(→ 다시 저장)
+   */
+  function restoreRealFromSide(s, raw) {
+    var side = null;
+    try { side = parseStored(localStorage.getItem(REAL_SIDE_KEY)); } catch (e) { return false; }
+    if (!side || typeof side !== 'object') return false;
+    var sp = side.props && typeof side.props === 'object' && !Array.isArray(side.props) ? side.props : {};
+    var rawById = {};
+    (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
+      if (p && typeof p === 'object' && p.id && !BAD_KEYS[p.id]) rawById[str(p.id)] = p;
+    });
+    var changed = false;
+    s.properties.forEach(function (p) {
+      var r = hasOwn(rawById, p.id) ? rawById[p.id] : null;
+      var d = hasOwn(sp, p.id) && !BAD_KEYS[p.id] ? sp[p.id] : null;
+      if (!r || !d || typeof d !== 'object' || hasOwn(r, 'realAt')) return;
+      if (p.realPrice === null || numOrNull(d.price) !== p.realPrice) return;
+      var rb = realFieldsInto({ realPrice: p.realPrice }, { realAt: d.at, realFloor: d.floor });
+      if (!p.realAt && rb.realAt) { p.realAt = rb.realAt; changed = true; }
+      if (p.realFloor === null && rb.realFloor !== null) { p.realFloor = rb.realFloor; changed = true; }
+    });
+    return changed;
+  }
+
+  /**
    * 저장본 원문에서 1.3.0 시각(fieldsAt)이 아예 없는 매물 { id: true }.
    * 업데이트 전에 열어 둔 1.2.x 이하 탭이 쓴 매물이다. 이 탭은 항목을 지울 때 키째 지우고 시각도 남기지 않으므로,
    * 항목 단위로 합치면 그 탭에서 지운 값이 되살아날 수 있다. 그래서 이런 매물은 예전처럼 매물 단위로 합친다.
@@ -1304,7 +1423,7 @@
     var out = {};
     (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
       if (!p || typeof p !== 'object' || !p.id || BAD_KEYS[p.id]) return;
-      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170).filter(function (k) { return !hasOwn(p, k); });
+      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170, FIELDS_190).filter(function (k) { return !hasOwn(p, k); });
       if (miss.length) out[str(p.id)] = miss;
     });
     return out;
@@ -1366,7 +1485,8 @@
         // 1.6.0: 예전(1.5.x) 탭이 새 필드를 모른 채 저장했으면 합친 결과(내 값)를 저장본에도 되돌린다
         var miss = missing && hasOwn(missing, p.id) ? missing[p.id] : [];
         // 1.7.0: 대출·비용 필드도 같은 방식(나중에 늘어난 칸이라 합치면 내 값이 이기고, 저장본에는 다시 써서 되돌린다)
-        if (FIELDS_160.concat(FIELDS_170).some(function (k) { return miss.indexOf(k) >= 0 && !blankVal(mine[k]); })) needResave = true;
+        // 1.9.0: 실거래 거래일·층도 같은 방식(저장본에 키가 없으면 예전 탭이 쓴 것. 합친 결과를 다시 써서 되돌린다)
+        if (FIELDS_160.concat(FIELDS_170, FIELDS_190).some(function (k) { return miss.indexOf(k) >= 0 && !blankVal(mine[k]); })) needResave = true;
         return;
       }
       // 예전 버전 탭이 쓴 매물(또는 merge.js 를 못 불러옴): 매물 단위로 더 나중 것
@@ -1427,6 +1547,7 @@
       knownRev = state.rev;
       writeSide(state); // 1.6.0 검토 반영: 1.6.0 필드 사본(예전 탭이 지워도 되살리게)
       writeFinSide(state); // 1.7.0: 대출·비용 값·대출 조건 사본
+      writeRealSide(state); // 1.9.0 검토 반영: 실거래 거래일·층 사본(예전 탭이 지워도 되살리게)
       dirty = false;
       lastSavedAt = Date.now();
       if (saveFailed) { saveFailed = false; showSaveError(null); }
@@ -1454,6 +1575,7 @@
       knownRev = candidate.rev;
       writeSide(candidate);
       writeFinSide(candidate); // 1.7.0
+      writeRealSide(candidate); // 1.9.0 검토 반영
       return true;
     } catch (e) {
       // 1.4.5: 실패 표시를 남겨야 다음 성공 저장(saveNow)이 빨간 띠를 지운다(전에는 새로고침할 때까지 남았음)
@@ -2958,7 +3080,13 @@
         diff !== null ? h('span', { class: 'pcard-diff', text: ' · 실거래 대비 ' + pctText(diff) }) : null,
         // 1.8.1: 최근 실거래가 작은 칩(없으면 생략). '실거래 대비'의 기준 금액을 함께 보이게
         p.realPrice ? ' ' : null,
-        p.realPrice ? h('span', { class: 'real-chip', title: '최근 실거래가', text: '실거래 ' + kbShort(p.realPrice) }) : null,
+        // 1.9.0: 거래일이 있으면 '실거래 1억 6,250 · 9.23'(올해가 아니면 '25.9.23'). title(마우스)에 날짜·층(·6개월 넘게 지난 거래).
+        // 검토 반영: 읽기 도구에는 sr-only 로 "거래일 2026년 9월 23일 · 11층(, 6개월 넘게 지난 거래)" — 층·오래됨이 title 에만 있어 iPhone 에서 못 들었음
+        p.realPrice ? h('span', { class: 'real-chip', title: realChipTitle(p) },
+          '실거래 ' + kbShort(p.realPrice),
+          p.realAt ? h('span', { class: 'real-when' },
+            h('span', { 'aria-hidden': 'true', text: ' · ' + realShortDate(p.realAt) }),
+            h('span', { class: 'sr-only', text: ', ' + realWhenSpeech(p) })) : null) : null,
         // 1.7.0: KB시세 작은 칩(없으면 생략). 칩 앞의 공백은 화면 읽기에서 숫자가 붙어 읽히지 않게
         p.kbPrice ? ' ' : null,
         p.kbPrice ? h('span', { class: 'kb-chip', title: 'KB시세' + (p.kbAt ? ' (' + formatISODate(p.kbAt) + ')' : ''), text: 'KB ' + kbShort(p.kbPrice) }) : null
@@ -3333,7 +3461,11 @@
     var sortSel = h('select', { class: 'select hf-sort', id: 'hf-sort', 'data-focus-key': 'hf-sort' },
       HOME_SORTS.map(function (s) { return h('option', { value: s.id, text: s.label }); }));
     sortSel.value = hf.sort;
-    sortSel.addEventListener('change', function () { hf.sort = sortSel.value; changed('sort'); });
+    // 1.9.0 검토 반영: '실거래 대비 낮은 순'을 고르면 정렬 아래 한 줄 설명(비교 화면 도움말과 같은 뜻. 날짜가 오래된 거래는 지금 시세와 다를 수 있음)
+    var sortHelp = h('p', { class: 'hf-sort-help', id: 'hf-sort-help', hidden: hf.sort !== 'diff',
+      text: '실거래 대비: 호가가 최근 실거래가보다 몇 % 높은지(+) 낮은지(−)예요. 그 거래의 날짜가 오래됐으면 지금 시세와 다를 수 있어요(카드의 실거래 칩에 날짜).' });
+    sortSel.setAttribute('aria-describedby', 'hf-sort-help');
+    sortSel.addEventListener('change', function () { hf.sort = sortSel.value; sortHelp.hidden = hf.sort !== 'diff'; changed('sort'); });
     // 1.5.1 검토 반영: "필터 N" 배지는 뺐다(켜진 칩 이름은 결과 줄에). [모두 해제]만 정렬 옆에 두어 320px 에서도 한 줄
     var resetBtn = h('button', { type: 'button', class: 'btn btn-small btn-ghost hf-reset', 'data-focus-key': 'hf-reset', onclick: function () { reset(); } }, '모두 해제');
     var result = h('p', { class: 'hf-result', role: 'status', 'aria-live': 'polite' });
@@ -3371,6 +3503,7 @@
       chipRow,
       h('div', { class: 'hf-tools' },
         h('label', { class: 'sr-only', for: 'hf-sort', text: '정렬' }), sortSel, resetBtn),
+      sortHelp, // 1.9.0 검토 반영
       result);
     return {
       el: el,
@@ -3650,7 +3783,7 @@
   // ---------------- 매물 추가·수정 폼 ----------------
   // 새 매물 폼은 제출 전까지 매물이 없으므로, 입력을 임시 저장(DRAFT_KEY)해 둔다.
   // 전화 걸기·실거래가 찾기로 다른 앱에 다녀오는 사이 iOS 가 앱을 내려도 입력이 남는다.
-  var DRAFT_FIELDS = ['name', 'dong', 'ho', 'area', 'floor', 'direction', 'ask', 'real', 'agentName', 'agentPhone', 'sellerName', 'sourceUrl', 'memo', 'dropReason'];
+  var DRAFT_FIELDS = ['name', 'dong', 'ho', 'area', 'floor', 'direction', 'ask', 'real', 'realAt', 'realFloor', 'agentName', 'agentPhone', 'sellerName', 'sourceUrl', 'memo', 'dropReason']; // 1.9.0: realAt·realFloor
   var pendingFocus = null; // 다음에 그릴 수정 폼에서 초점을 줄 칸('ho'). 가져오기 직후·상세의 [입력하기]
   // 1.5.0: 다음에 그릴 상세 화면에서 열고 스크롤할 섹션 id. 수정 폼의 [저장하고 등기부 보기], 요약의 [등기부 보기]
   var pendingSection = null;
@@ -3712,7 +3845,8 @@
     var restored = !editing && draftHasContent(draft);
     var src = editing || (restored ? {
       name: draft.name, dong: draft.dong, ho: draft.ho, area: draft.area, floor: draft.floor, direction: draft.direction,
-      askPrice: draft.ask, realPrice: draft.real, agentName: draft.agentName, agentPhone: draft.agentPhone, sellerName: draft.sellerName,
+      askPrice: draft.ask, realPrice: draft.real, realAt: draft.realAt, realFloor: draft.realFloor, // 1.9.0
+      agentName: draft.agentName, agentPhone: draft.agentPhone, sellerName: draft.sellerName,
       sourceUrl: draft.sourceUrl, memo: draft.memo, status: draft.status, dropReason: draft.dropReason
     } : { status: 'review' });
     // 호수 칸 강조: 가져오기 코드로 만든 매물(호수가 늘 비어 있음)이거나 [입력하기]로 들어왔을 때
@@ -3746,7 +3880,10 @@
     f.floor = h('input', { class: 'input', id: 'f-floor', type: 'text', value: val(src.floor), placeholder: '예: 12/25', autocomplete: 'off', enterkeyhint: 'next', maxlength: 20, 'aria-describedby': 'f-floor-hint' });
     f.direction = h('input', { class: 'input', id: 'f-dir', type: 'text', value: val(src.direction), placeholder: '예: 남향', autocomplete: 'off', enterkeyhint: 'next', maxlength: 20 });
     f.ask = h('input', { class: 'input', id: 'f-ask', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'next', value: val(src.askPrice), placeholder: '예: 85000', autocomplete: 'off', 'aria-describedby': 'f-ask-live f-ask-hint' });
-    f.real = h('input', { class: 'input', id: 'f-real', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'next', value: val(src.realPrice), placeholder: '예: 82000', autocomplete: 'off', 'aria-describedby': 'f-real-live f-real-hint' });
+    f.real = h('input', { class: 'input', id: 'f-real', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'next', value: val(src.realPrice), placeholder: '예: 82000', autocomplete: 'off', 'aria-describedby': 'f-real-live f-real-hint f-real-when-note' });
+    // 1.9.0: 그 실거래의 거래일(type=date: iOS 는 바퀴 선택기, 오늘까지)·층(숫자 1~99). 실거래가를 바꾸거나 지우면 함께 비운다(refreshLive·readForm)
+    f.realAt = h('input', { class: 'input', id: 'f-real-at', type: 'date', value: isoDateOr(src.realAt), max: todayISO(), autocomplete: 'off', 'aria-describedby': 'f-real-when-hint' });
+    f.realFloor = h('input', { class: 'input', id: 'f-real-floor', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', enterkeyhint: 'next', value: val(src.realFloor), placeholder: '예: 11', autocomplete: 'off', maxlength: 2, 'aria-describedby': 'f-real-when-hint' });
     f.agentName = h('input', { class: 'input', id: 'f-agent', type: 'text', value: val(src.agentName), placeholder: '예: 행복공인중개사 김OO', autocomplete: 'off', enterkeyhint: 'next', maxlength: 60 });
     f.agentPhone = h('input', { class: 'input', id: 'f-phone', type: 'tel', inputmode: 'tel', enterkeyhint: 'next', value: val(src.agentPhone), placeholder: '예: 010-1234-5678', autocomplete: 'off', maxlength: 30 });
     // 1.6.0: 매도인 이름(선택). 등기부 소유자와 같은지 비교하는 데 쓴다(applyRegistrySnapshot)
@@ -3755,7 +3892,7 @@
     f.memo = h('textarea', { class: 'input', id: 'f-memo', rows: 3, value: val(src.memo), placeholder: '예: 남향, 2026년 12월 입주 가능하다고 함' });
     f.dropReason = h('textarea', { class: 'input', id: 'f-drop', rows: 2, value: val(src.dropReason), placeholder: '예: 등기부에 신탁 기록' });
     // Return(다음) 키를 눌렀을 때 옮겨 갈 순서
-    var order = [f.name, f.dong, f.ho, f.area, f.floor, f.direction, f.ask, f.real, f.agentName, f.agentPhone, f.sellerName, f.sourceUrl, f.memo];
+    var order = [f.name, f.dong, f.ho, f.area, f.floor, f.direction, f.ask, f.real, f.realFloor, f.agentName, f.agentPhone, f.sellerName, f.sourceUrl, f.memo]; // 1.9.0: 거래일(date)은 건너뛰고 거래 층
 
     var nameErr = h('p', { class: 'field-error', id: 'f-name-err', hidden: true, text: '단지명을 입력해 주세요.' });
     var urlErr = h('p', { class: 'field-error', id: 'f-url-err', hidden: true, text: 'http:// 또는 https:// 로 시작하는 주소만 저장돼요.' });
@@ -3776,6 +3913,38 @@
     var hoField = field('호', f.ho, { unit: '호' });
     var askLive = h('p', { class: 'field-live', id: 'f-ask-live', 'aria-live': 'polite' });
     var realLive = h('p', { class: 'field-live', id: 'f-real-live', 'aria-live': 'polite' });
+    // 1.9.0 검토 반영: 폼을 열 때의 실거래가·거래일·층. 금액을 열 때 값과 다르게 바꾸면 열 때 그대로인(이 화면에서 새로 적지 않은) 거래일·층은
+    // 이전 거래의 것이라 비우고 안내 + [되돌리기](realCleared). 금액이 열 때 값으로 돌아오고(오타 복귀) 두 칸이 아직 비어 있으면 저절로 되돌린다.
+    // 입력 중의 빈 금액(백스페이스로 지우는 중)에는 두 칸을 건드리지 않는다(저장은 readForm 이 실거래가 없으면 빈 값으로)
+    var realOpen = parseIntInput(val(src.realPrice));
+    var realOpenAt = realOpen ? isoDateOr(src.realAt) : '';
+    var realOpenFloor = realOpen ? val(src.realFloor) : '';
+    var realCleared = null; // 비운 값 { at: 'YYYY-MM-DD'|null, floor: '11'|null } (되돌리기용. 비우지 않은 칸은 null — 이 화면에서 새로 적은 칸은 건드리지 않으므로 한쪽만 비울 수 있다)
+    var realUndone = false; // [되돌리기]를 눌렀으면 다시 비우지 않는다(새 금액에도 그 날짜·층이 맞다는 뜻)
+    /** 거래일 입력 → 'YYYY-MM-DD'. 오늘보다 뒤면 ''(max=오늘과 같은 규칙) */
+    function realAtInput(v) { var d = isoDateOr(v); return d && d <= todayISO() ? d : ''; }
+    /** 비운 칸이 아직 비어 있는지(사용자가 새로 적었으면 되돌리기·안내를 그만둔다) */
+    function realClearedStill() { return !!realCleared && (realCleared.at === null || !f.realAt.value) && (realCleared.floor === null || !f.realFloor.value); }
+    var realUndoBtn = h('button', {
+      type: 'button', class: 'btn btn-small btn-ghost', text: '되돌리기',
+      onclick: function () {
+        if (!realCleared) return;
+        if (realCleared.at !== null) f.realAt.value = realCleared.at;
+        if (realCleared.floor !== null) f.realFloor.value = realCleared.floor;
+        realCleared = null;
+        realUndone = true;
+        refreshLive();
+        applyChange();
+      }
+    });
+    var realClearedLabel = h('span', { text: '거래일·층' });
+    var realWhenNote = h('p', { class: 'field-hint real-when-note', id: 'f-real-when-note', role: 'note', 'aria-live': 'polite', hidden: true },
+      h('span', {}, '실거래가를 바꿔서 ', realClearedLabel, '을 비웠어요. 그 거래에 맞게 다시 적어 주세요. '), realUndoBtn);
+    // 거래일 옆 [거래일 지우기](값이 있을 때만 보임. iOS 날짜 선택기에는 지우기가 없음)
+    var realAtClear = h('button', {
+      type: 'button', class: 'icon-btn real-at-clear', 'aria-label': '거래일 지우기', title: '거래일 지우기', hidden: !isoDateOr(src.realAt),
+      onclick: function () { f.realAt.value = ''; refreshLive(); applyChange(); }
+    }, icon('close'));
     var diffBox = h('div', { class: 'diff-box', 'aria-live': 'polite' });
     var telLink = h('a', { class: 'btn btn-small btn-secondary', style: 'margin-top:8px', 'aria-label': '중개사에게 전화 걸기' }, icon('phone', 'ic-sm'), '전화 걸기');
 
@@ -3800,6 +3969,25 @@
       var real = parseIntInput(f.real.value);
       askLive.textContent = ask ? '= ' + formatManwon(ask) : '';
       realLive.textContent = real ? '= ' + formatManwon(real) : '';
+      // 1.9.0 검토 반영: 금액이 열 때 값과 달라졌는데 거래일·층이 열 때 값 그대로면(이 화면에서 새로 적은 값이 아님) 이전 거래의 것이라 비운다 —
+      // 안내 + [되돌리기]. 금액이 열 때 값으로 돌아오고 두 칸이 비어 있으면 되돌린다. 빈 금액(지우는 중)에는 두 칸을 건드리지 않는다
+      // 검토 반영(재검토): 칸마다 본다 — 열 때 값 그대로인 칸만 비우고(이전 거래의 것), 이 화면에서 새로 적은 칸은 그대로 둔다(그 칸은 새 거래의 것)
+      var atNow = f.realAt.value, flNow = f.realFloor.value;
+      if (real && realOpen && real !== realOpen && !realCleared && !realUndone) {
+        var clrAt = !!atNow && atNow === realOpenAt, clrFl = !!flNow && flNow === realOpenFloor;
+        if (clrAt || clrFl) {
+          realCleared = { at: clrAt ? atNow : null, floor: clrFl ? flNow : null };
+          if (clrAt) f.realAt.value = '';
+          if (clrFl) f.realFloor.value = '';
+          realClearedLabel.textContent = clrAt && clrFl ? '거래일·층' : clrAt ? '거래일' : '층';
+        }
+      } else if (real && realOpen && real === realOpen && realClearedStill()) {
+        if (realCleared.at !== null) f.realAt.value = realCleared.at;
+        if (realCleared.floor !== null) f.realFloor.value = realCleared.floor;
+        realCleared = null;
+      }
+      realWhenNote.hidden = !(real && realClearedStill());
+      realAtClear.hidden = !f.realAt.value;
       diffBox.textContent = '';
       if (ask && real) {
         var p = diffPercent(ask, real);
@@ -3839,6 +4027,9 @@
         direction: f.direction.value.trim(),
         askPrice: parseIntInput(f.ask.value),
         realPrice: parseIntInput(f.real.value),
+        // 1.9.0: 실거래가가 없으면 거래일·층도 빈 값(저장 모양은 normalizeProperty 와 같게). 검토 반영: 오늘보다 뒤인 날짜는 받지 않음(realAtInput)
+        realAt: parseIntInput(f.real.value) ? realAtInput(f.realAt.value) : '',
+        realFloor: parseIntInput(f.real.value) ? realFloorOr(f.realFloor.value) : null,
         agentName: f.agentName.value.trim(),
         agentPhone: f.agentPhone.value.trim(),
         sellerName: f.sellerName.value.replace(/\s+/g, ' ').trim().slice(0, SELLER_NAME_MAX), // 1.6.0
@@ -3862,7 +4053,8 @@
       if (!editing) {
         writeDraft({
           name: f.name.value, dong: f.dong.value, ho: f.ho.value, area: f.area.value, floor: f.floor.value, direction: f.direction.value,
-          ask: f.ask.value, real: f.real.value, agentName: f.agentName.value, agentPhone: f.agentPhone.value, sellerName: f.sellerName.value,
+          ask: f.ask.value, real: f.real.value, realAt: f.realAt.value, realFloor: f.realFloor.value, // 1.9.0
+          agentName: f.agentName.value, agentPhone: f.agentPhone.value, sellerName: f.sellerName.value,
           sourceUrl: f.sourceUrl.value, memo: f.memo.value,
           status: currentStatus(), dropReason: f.dropReason.value, savedAt: Date.now()
         });
@@ -3882,7 +4074,11 @@
         // 새 시각은 그 칸의 지금 시각보다 늘 나중(기기 시계가 늦어도 방금 고친 칸이 이김)
         var t;
         if (k === 'status' || k === 'dropReason') t = editing.statusAt = stampAfter(now, editing.statusAt, editing.legacyAt);
-        else t = editing.fieldsAt[k] = stampAfter(now, editing.fieldsAt[k], editing.legacyAt);
+        else {
+          // 1.9.0: 거래일·층은 실거래가와 한 묶음(merge.js FIELD_GROUPS.realPrice) — 시각은 realPrice 칸에 찍는다
+          var fk = (k === 'realAt' || k === 'realFloor') ? 'realPrice' : k;
+          t = editing.fieldsAt[fk] = stampAfter(now, editing.fieldsAt[fk], editing.legacyAt);
+        }
         if (t > last) last = t;
       });
       if (last) touch(editing, last); // input 뒤 change 처럼 같은 값이 다시 오면 고친 시각을 올리지 않는다
@@ -3944,6 +4140,12 @@
       h('div', { class: 'field-row' }, field('층', f.floor, { hint: '예: 12/25 (25층 중 12층)' }), field('방향', f.direction)),
       field('호가', f.ask, { unit: '만원', live: askLive, hint: '호가: 파는 사람이 부르는 가격. 만원 단위로 적어요. (8억 5천 → 85000)' }),
       field('최근 실거래가', f.real, { unit: '만원', live: realLive, hint: '실거래가: 실제로 거래돼 신고된 가격. 국토교통부 실거래가 공개시스템에서 같은 단지·비슷한 면적의 최근 거래를 찾아 적어요. 다른 앱에 다녀와도 입력은 남아 있어요.' }),
+      // 1.9.0: 그 거래의 날짜·층(실거래가 아래 2열). 검토 반영: 거래일 옆 [거래일 지우기](값이 있을 때만), 실거래가를 바꾸거나 지우면 함께 비움
+      h('div', { class: 'field-row real-when-row' },
+        h('div', { class: 'field' }, h('label', { for: f.realAt.id, text: '거래일' }), h('div', { class: 'input-clear' }, f.realAt, realAtClear)),
+        field('거래 층', f.realFloor, { unit: '층' })),
+      h('p', { class: 'field-hint', id: 'f-real-when-hint', text: '위 실거래가가 언제, 몇 층 거래인지예요. 네이버 글로 담으면 저절로 채워져요. 실거래가를 바꾸거나 지우면 함께 비워요.' }),
+      realWhenNote,
       diffBox,
       field('중개사 이름', f.agentName),
       h('div', { class: 'field' }, h('label', { for: f.agentPhone.id, text: '중개사 연락처' }), f.agentPhone, telLink),
@@ -4300,7 +4502,10 @@
     var diff = diffPercent(prop.askPrice, prop.realPrice);
     var dl = h('dl', { class: 'kv' },
       h('dt', { text: '호가' }), h('dd', { text: prop.askPrice ? formatManwon(prop.askPrice) : '입력 안 함' }),
-      h('dt', { text: '최근 실거래가' }), h('dd', { text: prop.realPrice ? formatManwon(prop.realPrice) : '입력 안 함' }),
+      // 1.9.0: 금액 뒤에 ' (2026.09.23 · 11층)' 작은 글씨(검토 반영: 글자 공백으로 띄움 — 공유 글과 같은 모양). 거래일이 6개월 넘게 지났으면 한 줄 더(사실만)
+      h('dt', { text: '최근 실거래가' }), h('dd', {}, prop.realPrice ? formatManwon(prop.realPrice) : '입력 안 함',
+        realWhenText(prop) ? h('span', { class: 'real-when', text: ' (' + realWhenText(prop) + ')' }) : null,
+        realIsOld(prop) ? h('span', { class: 'sub', text: REAL_OLD_NOTE }) : null),
       diff !== null ? h('dt', { text: '차이' }) : null,
       diff !== null ? h('dd', { class: diff > 0 ? 'diff-up' : 'diff-down' }, '실거래 대비 ' + pctText(diff), h('span', { class: 'sub', text: diffSentence(prop.askPrice, prop.realPrice) })) : null
     );
@@ -6876,9 +7081,11 @@
         ),
         statusChip(prop.status)
       ),
+      // 1.9.0 검토 반영: 거래일·층과 차이를 한 괄호에 "최근 실거래 1억 6,250만원 (2026.09.23 · 11층, +1.5%)"(날짜가 없으면 예전처럼 "(+1.5%)").
+      // 거래일이 6개월 넘게 지났으면 아래 한 줄(상세와 같은 문장)
       h('p', {}, '호가 ', h('strong', { text: prop.askPrice ? formatManwon(prop.askPrice) : '입력 안 함' }),
-        prop.realPrice ? ' · 최근 실거래 ' + formatManwon(prop.realPrice) : '',
-        diff !== null ? ' (' + pctText(diff) + ')' : ''),
+        prop.realPrice ? ' · 최근 실거래 ' + formatManwon(prop.realPrice) + realParen([realWhenText(prop), diff !== null ? pctText(diff) : '']) : '',
+        realIsOld(prop) ? h('span', { class: 'real-old-note', text: REAL_OLD_NOTE }) : null),
       sourceLink(prop),
       makeBar(o.pct, o.pct + '% (' + o.done + '/' + o.total + ')', { ariaLabel: '전체 진행률' }).el
     ));
@@ -6995,9 +7202,12 @@
     lines.push('작성: ' + formatDateTime(Date.now()));
     var price = [];
     if (prop.askPrice) price.push('호가 ' + formatManwon(prop.askPrice));
-    if (prop.realPrice) price.push('최근 실거래 ' + formatManwon(prop.realPrice));
     var diff = diffPercent(prop.askPrice, prop.realPrice);
-    if (price.length) lines.push(price.join(' / ') + (diff !== null ? ' (실거래 대비 ' + pctText(diff) + ')' : ''));
+    // 1.9.0 검토 반영: 거래일·층과 '실거래 대비'를 한 괄호에 "최근 실거래 1억 6,250만원 (2026.09.23 · 11층, 실거래 대비 +1.5%)"(날짜가 없으면 예전과 같은 글).
+    // 거래일이 6개월 넘게 지났으면 한 줄 더(상세·요약과 같은 문장)
+    if (prop.realPrice) price.push('최근 실거래 ' + formatManwon(prop.realPrice) + realParen([realWhenText(prop), diff !== null ? '실거래 대비 ' + pctText(diff) : '']));
+    if (price.length) lines.push(price.join(' / '));
+    if (realIsOld(prop)) lines.push('최근 실거래는 ' + REAL_OLD_NOTE);
     var spec = [prop.area ? '전용 ' + prop.area + '㎡' : '', floorText(prop.floor), str(prop.direction).trim()].filter(Boolean);
     if (spec.length) lines.push(spec.join(' · '));
     lines.push('상태: ' + STATUS_LABEL[prop.status] + ' · 체크 진행 ' + o.pct + '% · 등기부: ' + registryResult(prop).label);
@@ -7198,6 +7408,48 @@
     var t = FIN ? FIN.formatMan(v) : formatManwon(v).replace(/원$/, '');
     return /억/.test(t) ? t.replace(/만$/, '') : t;
   }
+  // ---- 1.9.0: 최근 실거래의 거래일·층 표시 ----
+  var REAL_OLD_DAYS = 183; // 거래일이 이보다 지났으면 "6개월 넘게 지난 거래"(판정이 아니라 사실만. 홈 칩 title·상세 작은 글씨)
+  var REAL_OLD_NOTE = '6개월 넘게 지난 거래예요. 지금 시세와 다를 수 있어요.';
+  /** 홈 칩용 짧은 거래일: 올해면 '9.23', 아니면 '25.9.23'(1.9.0 검토 반영: 점으로 통일 — 상세·비교·KB 칩의 '2026.09.23'과 같은 모양) */
+  function realShortDate(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+    if (!m) return '';
+    var y = +m[1];
+    return (y !== new Date().getFullYear() ? String(y).slice(2) + '.' : '') + (+m[2]) + '.' + (+m[3]);
+  }
+  /** '2026.09.23 · 11층'(거래일이 없으면 층만, 둘 다 없거나 실거래가가 없으면 '') */
+  function realWhenText(p) {
+    if (!p || !p.realPrice) return '';
+    return [p.realAt ? formatISODate(p.realAt) : '', p.realFloor ? p.realFloor + '층' : ''].filter(Boolean).join(' · ');
+  }
+  /** 괄호 묶음(요약·공유 글): ['2026.09.23 · 11층', '+1.5%'] → ' (2026.09.23 · 11층, +1.5%)'. 빈 것은 빼고 다 비면 '' (1.9.0 검토 반영: 괄호 두 번 → 하나) */
+  function realParen(bits) {
+    var b = bits.filter(Boolean);
+    return b.length ? ' (' + b.join(', ') + ')' : '';
+  }
+  /** 거래일이 REAL_OLD_DAYS 보다 지났는지(이 기기 날짜 기준. 거래일이 없으면 false) */
+  function realIsOld(p) {
+    var m = p && p.realPrice ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(p.realAt || '') : null;
+    if (!m) return false;
+    return Date.now() - new Date(+m[1], +m[2] - 1, +m[3]).getTime() > REAL_OLD_DAYS * 86400000;
+  }
+  /** 읽기 도구용(홈 칩 sr-only): '거래일 2026년 9월 23일 · 11층'(오래됐으면 ', 6개월 넘게 지난 거래'). 1.9.0 검토 반영: 층·오래됨이 title 에만 있었음 */
+  function realWhenSpeech(p) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(p.realAt || '');
+    if (!m) return '';
+    return '거래일 ' + (+m[1]) + '년 ' + (+m[2]) + '월 ' + (+m[3]) + '일' + (p.realFloor ? ' · ' + p.realFloor + '층' : '') + (realIsOld(p) ? ', 6개월 넘게 지난 거래' : '');
+  }
+  /** 홈 칩 title(마우스용): '최근 실거래가 2026.09.23 · 11층'(1.9.0 검토 반영: KB 칩과 같은 날짜 모양. 오래됐으면 ' · 6개월 넘게 지난 거래') */
+  function realChipTitle(p) {
+    return '최근 실거래가' + (p.realAt ? ' ' + formatISODate(p.realAt) : '') + (p.realFloor ? ' · ' + p.realFloor + '층' : '') + (realIsOld(p) ? ' · 6개월 넘게 지난 거래' : '');
+  }
+  /** 다시 붙여넣기 목록의 실거래 글: '1억 6,250만원 (2026.09.23 · 11층)'. 괄호 안은 줄이 갈리지 않게 붙임 공백(1.9.0 검토 반영, 320px) */
+  function realValText(price, at, floor) {
+    if (price === null || price === undefined || price === '') return '없음';
+    var w = [at ? formatISODate(at) : '', floor ? floor + '층' : ''].filter(Boolean).join(' · ');
+    return manText(price) + (w ? ' (' + w + ')' : '');
+  }
   function rateText(r) {
     if (!r) return '';
     return r.min + '%' + (r.max !== null && r.max !== undefined && r.max !== r.min ? '~' + r.max + '%' : '') + (r.bank ? ' · ' + r.bank : '');
@@ -7297,6 +7549,7 @@
     var o = finFieldsInto({}, np);
     o.askPrice = finNum(np.askPrice, 'askPrice');
     o.realPrice = finNum(np.realPrice, 'realPrice');
+    realFieldsInto(o, np); // 1.9.0: 거래일·층(실거래가가 없으면 빈 값)
     o.confirmedAt = str(np.confirmedAt).trim();
     return o;
   }
@@ -7307,7 +7560,7 @@
     if (kind === 'rate') return rateText(v);
     if (kind === 'recent') return monthText(v.month) + ' ' + wonText(v.amount);
     if (kind === 'date') return formatISODate(v);
-    return str(v);
+    return formatISODate(v); // 1.9.0 검토 반영: 확인매물 날짜('2026-10-01')도 다른 날짜와 같은 모양('2026.10.01'). ISO 가 아니면 그대로
   }
   function sameFinVal(a, b) {
     if (sameValue(a, b)) return true;
@@ -7337,6 +7590,17 @@
       if (nv === null || nv === undefined || nv === '') return;
       if (f.k === 'kbAt') { // KB시세가 그대로이고 새 기준일이 더 나중일 때만(값이 바뀌면 KB시세 줄이 함께 바꿈)
         if (prop.kbPrice === null || vals.kbPrice !== prop.kbPrice || !(nv > str(prop.kbAt))) return;
+      } else if (f.k === 'realPrice') {
+        // 1.9.0: 금액이 바뀌면 거래일·층도 함께 바뀐다. 금액이 같아도 새 글의 거래일이 더 나중이거나(새 거래), 같은 거래의 층이 새로 보이면 갱신 후보.
+        //   "이전 → 새"에 날짜·층을 함께 적는다
+        var sameP = sameFinVal(prop.realPrice, nv);
+        var at = vals.realAt, pat = str(prop.realAt);
+        var newerAt = !!at && at > pat;
+        var fillFl = vals.realFloor !== null && prop.realFloor === null && (!at || at === pat);
+        if (sameP && !newerAt && !fillFl) return;
+        out.push({ k: f.k, label: f.label, from: realValText(prop.realPrice, prop.realAt, prop.realFloor),
+          to: realValText(nv, vals.realAt, vals.realFloor), hand: !!f.hand && handEdited(prop, f.k) });
+        return;
       } else if (sameFinVal(prop[f.k], nv)) return;
       out.push({ k: f.k, label: f.label, from: finValText(f.kind, prop[f.k]), to: finValText(f.kind, nv), hand: !!f.hand && handEdited(prop, f.k) });
     });
@@ -7380,6 +7644,7 @@
         keepCurrentInHistory(prop, 'askHistory', prop.askPrice, askAt, askHand ? 'manual' : oldSrc, askT);
         prop.askHistory = pushHistory(prop.askHistory, { value: vals.askPrice, at: today, source: hsrc, t: t });
       }
+      if (fk === 'realPrice') { prop.realAt = vals.realAt || ''; prop.realFloor = vals.realFloor; } // 1.9.0: 거래일·층은 금액과 한 묶음
       prop[fk] = vals[fk];
     });
     touch(prop, last || now);
@@ -8104,7 +8369,7 @@
     main.append(
       tableWrap,
       h('div', { class: 'card', style: 'margin-top:14px' },
-        h('p', { class: 'small muted', text: '실거래 대비: 호가가 최근 실거래가보다 몇 % 높은지(+) 낮은지(−). 실거래가는 한 건의 거래라 층·향·수리 상태에 따라 차이가 날 수 있어요.' }),
+        h('p', { class: 'small muted', text: '실거래 대비: 호가가 최근 실거래가보다 몇 % 높은지(+) 낮은지(−). 실거래가는 한 건의 거래라 층·향·수리 상태에 따라 차이가 날 수 있어요. 그 거래의 날짜가 오래됐으면 지금 시세와 다를 수 있어요(금액 아래 날짜를 보세요). "실거래 대비 낮은 순" 정렬도 같은 숫자로 늘어놓은 것이에요.' }),
         h('p', { class: 'small muted', text: '주의: 현장 평가에서 "주의"로 표시한 항목 + 등기부에서 "주의" 신호가 있다고 표시한 항목 수. 참고: 지워진 지난 기록이 모두 지금 소유자가 사기 전 일이라 주의에서 뺀 것(등기부 기록으로 앱이 나눔).' }),
         // 1.7.0
         h('p', { class: 'small muted', text: '대출 한도·월 상환(첫 달)·필요 현금·1년 보유비용: 매물 상세 "대출·비용" 카드의 조건으로 계산한 추정이에요. 계산 매매가는 협상가가 있으면 협상가, 없으면 호가예요. 실제 한도는 소득(DSR)·은행 심사로, 세금은 위택스·구청에서 확인하세요.' })
@@ -8248,7 +8513,8 @@
           h('td', { class: 'num' + (diff !== null ? (diff > 0 ? ' diff-up' : ' diff-down') : ''), text: pctText(diff) }),
           h('td', { class: 'num', text: String(cautionCount(p)) + (reg.refs ? ' · 참고 ' + reg.refs : '') }), // 1.8.0: '참고'로 돌린 지난 기록은 따로
           h('td', {}, h('span', { class: 'mini-bar' }, makeBar(prog.pct, null, { thin: true, ariaLabel: p.name + ' 진행률' }).el), prog.pct + '%'),
-          h('td', { class: 'num', text: p.realPrice ? formatManwon(p.realPrice) : '-' }),
+          // 1.9.0: 금액 아래 작은 글씨로 거래일·층
+          h('td', { class: 'num' }, p.realPrice ? formatManwon(p.realPrice) : '-', realWhenText(p) ? h('span', { class: 'unit-sub', text: realWhenText(p) }) : null),
           h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' }),
           finCells(p)
         );
@@ -9617,7 +9883,7 @@
           h('strong', { class: 'imp-name', id: base + '-name', text: p.name || '단지명 없음' }),
           size ? h('span', { class: 'imp-line', id: base + '-size', text: size }) : null,
           h('span', { class: 'imp-price', id: base + '-price', text: price }),
-          p.realPrice ? h('span', { class: 'imp-line', text: '최근 실거래 ' + formatManwon(p.realPrice) }) : null,
+          p.realPrice ? h('span', { class: 'imp-line', text: '최근 실거래 ' + formatManwon(p.realPrice) + (realWhenText(p) ? ' (' + realWhenText(p) + ')' : '') }) : null, // 1.9.0: 거래일·층
           spec ? h('span', { class: 'imp-line', id: base + '-spec', text: spec }) : null,
           agent ? h('span', { class: 'imp-line', text: '중개사 ' + agent }) : null,
           p.sourceUrl ? h('span', { class: 'imp-line', text: '링크 ' + hostOf(p.sourceUrl) }) : null,
@@ -9892,6 +10158,7 @@
           id: uid(), name: p.name, dong: p.dong, ho: '', // 호수는 늘 사용자가 직접
           area: p.area, supplyArea: p.supplyArea, floor: p.floor, direction: p.direction,
           askPrice: p.askPrice, realPrice: p.realPrice, agentName: p.agentName, agentPhone: p.agentPhone,
+          realAt: p.realAt, realFloor: p.realFloor, // 1.9.0: 실거래 거래일·층(없으면 normalizeProperty 가 비움)
           memo: memo, sourceUrl: p.sourceUrl, articleNo: p.articleNo, confirmedAt: p.confirmedAt,
           importNotes: sp.notes,
           status: 'review', createdAt: now, updatedAt: now - i, // 코드 순서대로 목록 맨 위에

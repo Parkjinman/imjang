@@ -37,6 +37,7 @@
  *   - 1.7.0 대출·비용 칸(KB시세·협상가·리모델링비·공시가격·네이버 참고값)은 기본 정보처럼 fieldsAt 으로 비교하고 모두 LATE_FIELDS.
  *     KB시세의 기준일·출처(kbAt·kbSource)는 KB시세를 고른 쪽 것을 같이 쓴다(FIELD_GROUPS). 값 이력(kbHistory·askHistory)은 합집합,
  *     syncAt({ 칸: 가져오기로 값을 넣은 시각 })은 칸마다 큰 쪽. 전역 대출 조건(state.settings)은 financeAt 이 더 나중인 쪽(mergeSettings).
+ *   - 1.9.0 최근 실거래의 거래일·층(realAt·realFloor)은 realPrice 를 고른 쪽 것을 같이 쓴다(FIELD_GROUPS.realPrice). 따로 시각을 두지 않는다.
  *   - 매물 삭제는 deleted { 매물id: 지운 시각 } 로 전한다. 지운 시각보다 나중에 고친 매물은 지우지 않고 남긴다.
  *     전체 삭제·[덮어쓰기]로 지운 것(app.js localDeleted)은 이 기기 일이라 여기서 다루지 않는다.
  */
@@ -61,7 +62,10 @@
   var LATE_FIELDS = { sellerName: 1 };
   FIN_FIELDS.forEach(function (f) { LATE_FIELDS[f] = 1; });
   // 1.7.0: 함께 움직이는 칸. KB시세를 고른 쪽의 기준일(kbAt)·출처(kbSource)를 같이 쓴다(값과 날짜가 엇갈리지 않게)
-  var FIELD_GROUPS = { kbPrice: ['kbAt', 'kbSource'] };
+  // 1.9.0: 최근 실거래가(realPrice)를 고른 쪽의 거래일(realAt)·층(realFloor)도 같이 쓴다. 거래일·층만 고쳐도 app.js 는 fieldsAt.realPrice 를
+  //   올리므로(한 묶음), 세 값이 늘 같은 거래를 가리킨다. 예전(1.8.1 이하) 사본에는 이 두 칸이 없어, 그쪽 금액이 이기면 날짜·층은 비워진다
+  var FIELD_GROUPS = { kbPrice: ['kbAt', 'kbSource'], realPrice: ['realAt', 'realFloor'] };
+  var GROUPED_FIELDS = Object.keys(FIELD_GROUPS).reduce(function (a, k) { return a.concat(FIELD_GROUPS[k]); }, []);
   // 1.7.0: 값 이력(KB시세·호가). [{ value, at('YYYY-MM-DD'), source('naver'|'code'|'manual'), t(ms, 있으면) }] 합집합.
   // 날짜·값·출처·시각이 모두 같은 것만 하나로, 순서는 시각(t) → 날짜 → 값. 최근 HISTORY_MAX 개만
   var HISTORY_FIELDS = ['kbHistory', 'askHistory'];
@@ -149,7 +153,7 @@
   /** 두 매물의 내용이 같은지(시각·id 는 보지 않음) */
   function sameProperty(a, b) {
     if (!isObj(a) || !isObj(b)) return a === b;
-    var keys = FIELDS.concat(STATUS_FIELDS, OTHER_FIELDS, FIELD_GROUPS.kbPrice);
+    var keys = FIELDS.concat(STATUS_FIELDS, OTHER_FIELDS, GROUPED_FIELDS); // 1.9.0: kbAt·kbSource·realAt·realFloor
     for (var i = 0; i < keys.length; i++) if (!sameVal(a[keys[i]], b[keys[i]])) return false;
     for (var tm = 0; tm < TIME_MAP_FIELDS.length; tm++) { // 1.7.0
       if (stable(timeMap(a[TIME_MAP_FIELDS[tm]], 0)) !== stable(timeMap(b[TIME_MAP_FIELDS[tm]], 0))) return false;

@@ -31,6 +31,10 @@
  *   kbPrice(만원)·kbAt('YYYY-MM-DD')·naverLoanLimit(만원)·naverRate({min,max,bank})·feeMonthly·feeAvg·feeSummer·feeWinter(원)·
  *   feeRecent({month:'YYYY-MM',amount:원})·acqTaxNaver·propertyTaxNaver(원). 모두 네이버의 단순 계산·추정값이다(앱이 '추정'으로만 보여 줌).
  *   값이 있을 때만 매물(prop)에 키를 넣는다(없으면 키가 없음 → 예전 결과와 같은 모양). 자세한 규칙은 cleanFinance·naverFinance.
+ * 1.9.0: 최근 실거래의 거래일·층도 읽는다. 네이버 글의 '같은 면적' 실거래 표 첫 줄(naverDeal)에서 realAt('YYYY-MM-DD', 연도는
+ *   "N년 계약" 줄이나 날짜 칸의 연도. 모르거나 표 머리 앞에 "N년 계약" 줄이 둘 이상이면 빈 값)·realFloor(층 숫자 1~99, 'B1'·'저' 같은 칸은 null)를 realPrice 와 함께 돌려주고,
+ *   가져오기 코드의 같은 이름 필드도 받는다(cleanProperty: realPrice 가 있을 때만, 오늘보다 뒤인 날짜·범위 밖 층은 뺌).
+ *   값이 있을 때만 키를 넣고 메모 글("최근 실거래(같은 면적): …")은 그대로다.
  *
  * 보안: 붙여 넣은 글은 믿지 않는다. 아는 필드만 골라 읽고(길이·범위 검사), __proto__·constructor·prototype 키는
  *       버리고, 링크는 http/https 만 남긴다. 결과는 문자열·숫자뿐이며 화면에는 textContent 로만 넣는다.
@@ -84,6 +88,7 @@
     '  kbPrice(KB시세, 만원), naverLoanLimit(대출 한도의 "최대" 금액, 만원), naverRate(최저 금리 %. 범위면 {"min":3.5,"max":4.5}),',
     '  feeMonthly(기본 정보의 관리비), feeAvg·feeSummer·feeWinter(관리비의 월 평균·여름 평균·겨울 평균), feeRecent(관리비 맨 위의 달과 금액: {"month":"2026-07","amount":123450}),',
     '  acqTaxNaver(취득세 합계), propertyTaxNaver(재산세 합계). 관리비·세금은 원 단위 숫자 (예: 12만 3,450원 → 123450).',
+    '- 실거래가 표가 보이면 같은 면적의 가장 최근 거래를 realPrice(만원)에 넣고, 그 거래의 계약일을 realAt("YYYY-MM-DD"), 층을 realFloor(숫자)에 넣어 줘(취소·해제된 거래는 빼).',
     '- 매물이 여러 개면 properties에 모두 넣어 줘.',
     '```json',
     '{"imjang":1,"properties":[{"name":"단지명","dong":"101","area":84.97,"supplyArea":112.4,"askPrice":52000,"tradeType":"매매","floor":"12/25","direction":"남향","agentName":"","agentPhone":"","sourceUrl":"","articleNo":"","confirmedAt":"","memo":""}]}',
@@ -768,6 +773,48 @@
     return out;
   }
 
+  // ---------------- 최근 실거래의 거래일·층 (1.9.0) ----------------
+  var REAL_FLOOR_RANGE = [1, 99];
+  /** 실거래 층: 11, "11", "11층" → 11. 범위(1~99) 밖·숫자가 아님(B1·지하1층·저) → null */
+  function dealFloorOf(v) {
+    var n = NaN;
+    if (typeof v === 'number') n = v;
+    else if (typeof v === 'string') {
+      var m = /^\s*(\d{1,3})\s*층?\s*$/.exec(v);
+      if (m) n = +m[1];
+    }
+    if (!isFinite(n) || n !== Math.floor(n)) return null;
+    return n >= REAL_FLOOR_RANGE[0] && n <= REAL_FLOOR_RANGE[1] ? n : null;
+  }
+  /**
+   * 실거래 거래일·층 정리(가져오기 코드·네이버 글 후보 공통). realPrice 가 있을 때만 값이 있는 키를 돌려준다.
+   * 날짜는 'YYYY-MM-DD'(regDate: "2026-09-23"·"2026.9.23"·"2026년 9월 23일")이고 오늘(opts.today)보다 뒤면 뺀다. 층은 1~99 정수
+   */
+  function cleanDeal(raw, price, opts, notes) {
+    var out = {};
+    var rawAt = get(raw, 'realAt');
+    var rawFl = get(raw, 'realFloor');
+    var hasAt = rawAt !== undefined && rawAt !== null && rawAt !== '';
+    var hasFl = rawFl !== undefined && rawFl !== null && rawFl !== '';
+    if (price === null) {
+      if (hasAt || hasFl) addNote(notes, '실거래 거래일·층: 실거래가가 없어 뺐어요');
+      return out;
+    }
+    if (hasAt) {
+      var at = regDate(rawAt);
+      var today = todayOf(opts);
+      if (!at) addNote(notes, '실거래 거래일: 날짜를 읽지 못해 뺐어요');
+      else if (today && at > today) addNote(notes, '실거래 거래일: 오늘보다 뒤라 뺐어요');
+      else out.realAt = at;
+    }
+    if (hasFl) {
+      var fl = dealFloorOf(rawFl);
+      if (fl === null) addNote(notes, '실거래 층: 1~99 층 숫자가 아니라 뺐어요');
+      else out.realFloor = fl;
+    }
+    return out;
+  }
+
   /** 매물 하나 정리 → { prop, notes, warnings } (아는 필드만, 알 수 없는 필드는 무시). opts.today(1.7.0): KB시세 기준일 */
   function cleanProperty(raw, opts) {
     var notes = [];
@@ -810,6 +857,10 @@
     if (p.area && p.supplyArea && p.area >= p.supplyArea) {
       warnings.push({ code: 'swap', text: '전용면적이 공급면적보다 크거나 같아요. 화면에서 확인하세요' });
     }
+    // 1.9.0: 최근 실거래의 거래일·층. 실거래가가 있고 값이 맞을 때만 키로 넣는다(없으면 예전과 같은 모양)
+    var deal = cleanDeal(raw, p.realPrice, opts, notes);
+    if (has(deal, 'realAt')) p.realAt = deal.realAt;
+    if (has(deal, 'realFloor')) p.realFloor = deal.realFloor;
     // 1.7.0: 대출·관리비·세금 참고값. 값이 있는 것만 키로 넣는다(없으면 예전과 같은 모양)
     var fin = cleanFinance(raw, p, opts, notes, warnings);
     for (var fk in fin) if (has(fin, fk)) p[fk] = fin[fk];
@@ -1797,19 +1848,45 @@
   var DEAL_ROW_RE = new RegExp('^(' + DEAL_DATE + ')\\s+(?:(미등록|-|' + DEAL_DATE + ')\\s+)?(?:([A-Za-z가-힣]{0,4}\\d{1,3}층?|[저중고]층?)\\s+)?' +
     '(?:(?:최고|최저)\\s*)?((?:(?:직거래|중개거래|해제|취소)\\s*)?)(?:(?:최고|최저)\\s*)?(' + DEAL_PRICE + ')(?:\\s*만\\s*원?)?(?:\\s+\\D.*)?$');
   /**
-   * '실거래가' 묶음 [from, to) → 표의 첫 줄 { price(만원), memo, same(같은 면적 표) } 또는 null.
+   * 1.9.0: 실거래 표의 계약일 칸 → 'YYYY-MM-DD'. "9월 23일"은 year("N년 계약" 줄)가 있어야 하고, "2026.09.23."·"25.9.23"은 칸의 연도를
+   * 쓴다(두 자리면 20xx). 연도를 모르거나 없는 날짜면 ''
+   */
+  function dealDateIso(date, year) {
+    var m = /^(\d{1,2})월\s*(\d{1,2})일$/.exec(date);
+    var y, mo, d;
+    if (m) {
+      if (!year) return '';
+      y = +year; mo = +m[1]; d = +m[2];
+    } else {
+      var n = /^(\d{2,4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})\.?$/.exec(date);
+      if (!n) return '';
+      y = +n[1]; mo = +n[2]; d = +n[3];
+      if (n[1].length === 2) y += 2000;
+      else if (n[1].length === 3) return '';
+    }
+    if (y < 1990 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > daysIn(y, mo)) return '';
+    return y + '-' + pad2(mo) + '-' + pad2(d);
+  }
+  /**
+   * '실거래가' 묶음 [from, to) → 표의 첫 줄 { price(만원), memo, same(같은 면적 표), realAt, realFloor } 또는 null.
    * 표 머리("계약일 등기일 층 가격")가 탭으로 한 줄이든 칸마다 한 줄이든 읽는다. 표의 거래 종류가 매물과 다르면 읽지 않는다.
    * 1.4.1: 가격 칸은 '억'이나 천 단위 쉼표가 있는 모양만. 칸마다 한 줄이면 가격 칸이 나올 때까지(6칸) 이어 붙이고, 없으면 null
+   * 1.9.0: realAt('YYYY-MM-DD', dealDateIso. 연도를 모르면 '')·realFloor(층 숫자 1~99, dealFloorOf. 'B1'·'저' 같은 칸은 null)도 돌려준다.
+   *   price·same·memo 는 그대로(naverDetail 이 같은 면적 표일 때만 realPrice 와 함께 넣는다)
    */
   function naverDeal(L, from, to, trade) {
     var year = '';
+    // 1.9.0 검토 반영: 표 머리 앞에 나온 서로 다른 해의 수. 둘 이상이면 첫 줄의 해가 분명하지 않아 realAt 은 비운다(메모 글은 예전 그대로).
+    // 실제 네이버 글은 "2026년 계약" 줄과 "2026년 계약 매매 실거래가 표" 줄이 둘 다 있어 같은 해가 두 번 나오므로 줄 수가 아니라 해의 가짓수를 센다
+    var years = 0;
+    var seenYears = {};
     var same = false;
     var head = -1;
     for (var i = from; i < to; i++) {
       var f = flat(L[i]);
       if (/^동일\s*면적/.test(f)) same = true;
       var y = /^(\d{4})년\s*계약/.exec(f);
-      if (y && !year) year = y[1];
+      if (y) { if (!seenYears[y[1]]) { seenYears[y[1]] = 1; years++; } if (!year) year = y[1]; }
       if (/실거래가?\s*표$/.test(f)) {
         var t = /(매매|전세|월세)/.exec(f);
         if (t && trade && t[1] !== trade && !(trade === '단기임대' && t[1] === '월세')) return null;
@@ -1848,7 +1925,12 @@
     if (/\d$/.test(fl)) fl += '층'; // 층 칸에 "층"이 없던 표("2")
     var bits = [date, fl, priceText(ph), label, reg === '미등록' ? '미등록' : (reg && reg !== '-' ? '등기 ' + reg : '')];
     // 같은 면적 표가 아니면(다른 평형·전체 면적 표를 보고 있을 때) 실거래가 칸에는 넣지 않고 메모에만 남긴다(naverDetail)
-    return { price: price, same: same, memo: '최근 실거래' + (same ? '(같은 면적)' : '(면적 확인 필요)') + ': ' + bits.filter(Boolean).join(' · ') };
+    return {
+      price: price, same: same,
+      memo: '최근 실거래' + (same ? '(같은 면적)' : '(면적 확인 필요)') + ': ' + bits.filter(Boolean).join(' · '),
+      realAt: years > 1 ? '' : dealDateIso(m[1].replace(/\s+/g, ''), year), // 1.9.0(검토 반영: 연도 머리가 둘 이상이면 비움)
+      realFloor: dealFloorOf(fl)
+    };
   }
 
   // ---- 대출·관리비·세금 묶음 (1.7.0) ----
@@ -2180,7 +2262,7 @@
     var fin;
     try { fin = naverFinance(L, bEnd, fee ? fee[1] : ''); } catch (finErr) { fin = naverFinance([], 0, ''); }
 
-    return {
+    var out = {
       notes: notes,
       approx: { area: !!(excl && excl.py), supplyArea: !!(supply && supply.py) },
       raw: {
@@ -2212,6 +2294,12 @@
         propertyTaxNaver: fin.propertyTaxNaver
       }
     };
+    // 1.9.0: 같은 면적 표에서 실거래가를 넣을 때만 그 거래의 계약일·층도(값이 있을 때만 키를 둔다 → 예전 결과와 같은 모양)
+    if (out.raw.realPrice !== null && deal) {
+      if (deal.realAt) out.raw.realAt = deal.realAt;
+      if (deal.realFloor !== null) out.raw.realFloor = deal.realFloor;
+    }
+    return out;
   }
 
   /** "15평 (전용11)" → "15평(전용 11평)" */
@@ -2375,9 +2463,10 @@
    * opts.from: 'naver-text'(1.4.1) 이면 최상위에 "from" 을 넣는다. 앱(parse)이 보고 네이버 글 주의·출처를 쓴다
    * opts.registry(1.6.0): 등기부 기록(snapshot)이면 "registry" 로 넣는다(registryToCode). 매물이 없으면 properties 는 뺀다
    * 1.7.0: 대출·관리비·세금 참고값(FIN_FIELDS)은 confirmedAt 다음, memo 앞에 넣는다(값이 있을 때만. naverRate·feeRecent 는 객체 사본)
+   * 1.9.0: 실거래 거래일·층(realAt·realFloor)은 realPrice 바로 다음(값이 있을 때만)
    */
   function toCode(props, opts) {
-    var order = ['name', 'dong', 'area', 'supplyArea', 'askPrice', 'realPrice', 'tradeType', 'floor', 'direction',
+    var order = ['name', 'dong', 'area', 'supplyArea', 'askPrice', 'realPrice', 'realAt', 'realFloor', 'tradeType', 'floor', 'direction',
       'agentName', 'agentPhone', 'sourceUrl', 'articleNo', 'confirmedAt'].concat(FIN_FIELDS, ['memo']);
     var code = { imjang: CODE_VERSION };
     if (opts && opts.from === NAVER_SOURCE_ID) code.from = NAVER_SOURCE_ID;

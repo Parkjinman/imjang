@@ -807,7 +807,11 @@ textarea.input { resize: vertical; min-height: 76px; }
   background-size: 6px 6px, 6px 6px;
   background-repeat: no-repeat;
 }
-input[type="date"].input { min-height: 48px; text-align: left; }
+/* 1.9.0 검토 반영: 날짜 칸을 글 칸과 같은 상자(안쪽 여백 11px·줄높이 1.45)로 두고, Chrome 이 날짜 칸 안쪽 요소에 더하는 위아래 1px 여백을 없앤다
+   (전에는 2px 더 높아 2열에서 어긋났음. height 를 계산해 못박으면 테두리 반올림 때문에 1px 어긋나 — 측정 48.64 vs 49.64) */
+input[type="date"].input { height: auto; padding-top: 11px; padding-bottom: 11px; text-align: left; }
+input[type="date"].input::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+input[type="date"].input::-webkit-datetime-edit { padding: 0; }
 input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 .memo-wrap, .answer-wrap, .visit-fields { margin-top: 10px; }
 .visit-fields { display: grid; gap: 8px; }
@@ -1735,6 +1739,26 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 .kb-chip, .real-chip { display: inline-block; margin-left: 2px; padding: 0 7px; border-radius: 6px; background: var(--teal-soft); color: var(--teal-ink); font-size: 0.7647rem; font-weight: 700; line-height: 1.6; white-space: nowrap; vertical-align: 1px; }
 /* 1.8.1: 최근 실거래가 칩(KB 칩과 구분되게 중립색) */
 .real-chip { background: var(--chip); color: var(--text); }
+/* 1.9.0: 실거래 거래일·층 — 상세 '최근 실거래가' 금액 뒤의 작은 글씨(인라인, 글자 공백으로 띄우고 괄호 묶음은 한 덩어리로 줄 바꿈), 홈 칩 안의 날짜는 같은 칩 글씨 */
+.real-when { color: var(--muted); font-weight: 500; font-size: 0.8235rem; white-space: nowrap; }
+.real-chip .real-when { color: inherit; font-size: inherit; font-weight: 600; opacity: 0.85; }
+.ctable .unit-sub { white-space: nowrap; } /* 1.9.0 검토 반영: 비교 표의 '2026.09.23 · 11층'도 한 덩어리 */
+/* 1.9.0: 수정 폼의 거래일(type=date)·거래 층 2열. 날짜 칸은 안쪽 너비가 커서 1:1 이면 층 칸의 숫자가 잘렸다(320px) → 날짜 쪽을 넓게, 320px 대에서는 한 열씩 */
+.real-when-row { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
+.real-when-row .input { min-width: 0; }
+@media (max-width: 359px) { .real-when-row { grid-template-columns: 1fr; } }
+/* 1.9.0 검토 반영: 거래일 칸 옆 [거래일 지우기](값이 있을 때만). 날짜 칸 위에 겹치지 않게 옆에 둔다(Chrome 의 달력 아이콘과도 겹치지 않음) */
+.input-clear { display: flex; align-items: center; gap: 4px; }
+.input-clear .input { flex: 1 1 auto; min-width: 0; }
+.input-clear .real-at-clear { width: 40px; height: 40px; margin-right: -6px; }
+.input-clear .real-at-clear[hidden] { display: none; }
+/* 금액을 바꿔 거래일·층을 비웠을 때의 안내 + [되돌리기] */
+.real-when-note .btn { vertical-align: middle; min-height: 32px; padding: 4px 10px; }
+/* 요약 화면 가격 줄 아래 "6개월 넘게 지난 거래예요…"(상세의 .kv dd .sub 와 같은 글씨) */
+.real-old-note { display: block; color: var(--muted); font-weight: 500; font-size: 0.8235rem; margin-top: 2px; }
+/* 홈 정렬 '실거래 대비 낮은 순' 아래 한 줄 설명 */
+.hf-sort-help { font-size: 0.8235rem; color: var(--muted); margin: 6px 2px 0; }
+.hf-sort-help[hidden] { display: none; }
 
 /* 상세 '대출·비용' 카드(접힘). 머리 줄: 제목 + 요약 줄(필요 현금·대출) + 펼침 표시 */
 .fin-card > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 10px; min-height: 44px; }
