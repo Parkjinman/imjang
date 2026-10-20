@@ -43,6 +43,7 @@
  *     지운 일정은 customEventsRemoved { id: 지운 시각 } 합집합. 일정 완료 표시(scheduleDone { key: ms })는 key 마다 절댓값이 큰 쪽
  *     (양수 = 완료한 시각, 음수 = 완료를 취소한 시각. 취소를 음수로 남겨 다른 기기의 예전 '완료'가 되살아나지 않게).
  *     일정 설정(state.settings.schedule, scheduleAt)은 대출 조건(financeAt)과 따로 더 나중인 쪽(mergeSettings).
+ *   - 1.11.0 진행 지도 체크(journey { bankChecked: ±ms })는 scheduleDone 과 같은 모양이라 같은 규칙(key 마다 절댓값이 큰 쪽)으로 합친다.
  *   - 매물 삭제는 deleted { 매물id: 지운 시각 } 로 전한다. 지운 시각보다 나중에 고친 매물은 지우지 않고 남긴다.
  *     전체 삭제·[덮어쓰기]로 지운 것(app.js localDeleted)은 이 기기 일이라 여기서 다루지 않는다.
  */
@@ -82,7 +83,8 @@
   var DATE_FIELDS = ['contractAt', 'balanceAt', 'vacateAt', 'leaseEndAt', 'moveInAt'];
   function dateKey(f) { return 'dates.' + f; }
   // 1.10.0: 일정 완료 표시 { 항목 key: ms }. 양수 = 완료, 음수 = 완료 취소(그 시각의 음수). key 마다 절댓값이 큰 쪽(같으면 내 것)
-  var SIGNED_TIME_MAP_FIELDS = ['scheduleDone'];
+  // 1.11.0: 진행 지도 체크 journey { bankChecked: ±ms } 도 같은 모양·같은 규칙
+  var SIGNED_TIME_MAP_FIELDS = ['scheduleDone', 'journey'];
   // 진행 상태 묶음. statusAt 하나로 함께 움직인다(탈락 사유는 상태와 같이 정해지므로)
   var STATUS_FIELDS = ['status', 'dropReason'];
   // 가져오기 코드가 채우는 값. 사용자가 고치지 않으므로 시각 없이 "비어 있지 않은 쪽"

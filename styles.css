@@ -1961,3 +1961,98 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 /* 일정 추가·고치기 대화상자 */
 .ce-form { gap: 12px; text-align: left; }
 .ce-form .input { min-width: 0; }
+
+/* ---------- 1.11.0 매물 진행 지도 ---------- */
+/* 상세 맨 위 진행 띠(전체가 버튼 → #/p/:id/journey) */
+.jny-strip-box { margin: 0 0 12px; }
+.jny-strip {
+  display: block; width: 100%; min-height: 56px; text-align: left; cursor: pointer;
+  appearance: none; -webkit-appearance: none; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card); color: var(--text); box-shadow: var(--shadow); padding: 12px 14px; font: inherit;
+}
+.jny-strip:active { background: var(--card-2); }
+.jny-strip-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.jny-strip-top .ic { flex: none; color: var(--muted); }
+.jny-dots { display: inline-flex; gap: 5px; flex: none; }
+.jny-dot {
+  width: 11px; height: 11px; border-radius: 50%; display: inline-block;
+  border: 2px solid var(--muted); background: transparent; position: relative; overflow: hidden;
+}
+.jny-dot.st-done { background: var(--teal); border-color: var(--teal); }
+/* 지금 단계(◐): 왼쪽 반만 칠한다 */
+.jny-dot.st-active { border-color: var(--orange-btn); }
+.jny-dot.st-active::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 50%; background: var(--orange-btn); }
+.jny-dot.st-stopped { background: var(--stop-bg); border-color: var(--stop-bg); }
+.jny-dot.st-blocked { border-color: var(--line); }
+.jny-now { flex: 1; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jny-strip.is-stopped .jny-now { color: var(--red-ink); }
+.jny-strip.is-dropped { opacity: 0.75; }
+.jny-next {
+  display: block; margin-top: 4px; color: var(--muted); font-size: 0.8824rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 지도 화면: 세로 타임라인 */
+.jny-head { margin-top: 12px; }
+.jny-congrats { text-align: center; }
+.jny-congrats-line { margin: 0; font-size: 1.1765rem; font-weight: 800; }
+.jny-list { list-style: none; margin: 14px 0 0; padding: 0; }
+.jny-stage { position: relative; padding: 0 0 18px 44px; }
+.jny-stage::before { content: ""; position: absolute; left: 13px; top: 32px; bottom: -2px; width: 2px; background: var(--line); }
+.jny-stage:last-child::before { display: none; }
+.jny-mark {
+  position: absolute; left: 0; top: 2px; width: 28px; height: 28px; border-radius: 50%;
+  border: 2px solid var(--muted); background: var(--card); color: var(--muted);
+  display: flex; align-items: center; justify-content: center; font-size: 0.8235rem; font-weight: 800;
+}
+.jny-stage.st-done .jny-mark { background: var(--teal); border-color: var(--teal); color: #fff; }
+.jny-stage.st-active .jny-mark { background: var(--orange-soft); border-color: var(--orange-btn); color: var(--orange-ink); }
+.jny-stage.st-stopped .jny-mark { background: var(--stop-bg); border-color: var(--stop-bg); color: #fff; }
+/* 멈춤 뒤(blocked)·탈락(is-dropped) 흐림은 opacity 가 아니라 색 토큰으로: 통째 opacity 는 살아 있는
+   [바로 가기]·체크의 실효 대비를 4.5:1 아래로 떨어뜨리고, 비활성처럼 보이는데 눌리는 혼란을 준다(1.11.0 검토).
+   조작부(.jny-go 버튼·.jny-check)는 흐리지 않고 그대로 둔다 */
+.jny-stage.st-blocked .jny-card { background: var(--card-2); box-shadow: none; }
+.jny-stage.st-blocked .jny-title,
+.jny-stage.st-blocked .jny-sum { color: var(--muted); }
+.jny-stage.st-blocked .jny-mark { background: var(--card-2); border-color: var(--line); }
+.jny-list.is-dropped .jny-card { background: var(--card-2); box-shadow: none; }
+.jny-list.is-dropped .jny-title,
+.jny-list.is-dropped .jny-sum,
+.jny-list.is-dropped .jny-date { color: var(--muted); }
+/* 탈락 매물의 active 단계는 '지금'이 아니라 기록이라 주황 강조를 걷어낸다(칩 문구도 '여기까지 봤어요' — app.js, 1.11.0 검토) */
+.jny-list.is-dropped .jny-stage.st-active .jny-card { border-color: var(--line); }
+.jny-list.is-dropped .jny-stage.st-active .jny-mark { background: var(--card-2); border-color: var(--muted); color: var(--muted); }
+.jny-list.is-dropped .jny-stage.st-active .jny-state { background: var(--chip); color: var(--muted); }
+.jny-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 12px 14px; }
+.jny-stage.st-active .jny-card { border-color: var(--orange-btn); }
+.jny-stage.st-stopped .jny-card { border-color: var(--red); background: var(--red-soft); }
+.jny-h { margin: 0; font-size: 1rem; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.jny-title { font-weight: 800; }
+.jny-state { flex: none; font-size: 0.7647rem; font-weight: 700; padding: 2px 9px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+.jny-stage.st-done .jny-state { background: var(--green-soft); color: var(--green-ink); }
+.jny-stage.st-active .jny-state { background: var(--orange-soft); color: var(--orange-ink); }
+.jny-stage.st-stopped .jny-state { background: var(--stop-bg); color: #fff; }
+.jny-prog { margin-left: auto; font-size: 0.8235rem; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.jny-sum { margin: 6px 0 0; overflow-wrap: anywhere; }
+.jny-stage.st-stopped .jny-sum { color: var(--red-ink); font-weight: 700; }
+.jny-date { margin: 4px 0 0; font-size: 0.8824rem; font-weight: 700; color: var(--teal-ink); }
+.jny-why { margin: 4px 0 0; font-size: 0.8235rem; color: var(--muted); }
+.jny-go { margin-top: 10px; }
+.jny-foot { margin: 6px 2px calc(var(--tabbar-h) + 10px); }
+/* 5단계 체크 2개(일정 줄 체크와 같은 .check-box) */
+.jny-checks { margin-top: 8px; display: grid; gap: 2px; }
+.jny-check {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; width: 100%; text-align: left; cursor: pointer;
+  appearance: none; -webkit-appearance: none; border: 0; background: transparent; padding: 4px 0; font: inherit; color: var(--text);
+}
+.jny-check .check-box { margin-top: 0; width: 26px; height: 26px; flex: none; }
+/* 은행 체크는 role=checkbox(aria-checked), 협상가 체크는 일반 버튼이라 is-on 클래스로 같은 모양을 낸다(1.11.0 검토) */
+.jny-check[aria-checked="true"] .check-box, .jny-check.is-on .check-box { background: var(--teal); border-color: var(--teal); }
+.jny-check[aria-checked="true"] .check-box::after, .jny-check.is-on .check-box::after {
+  content: ""; position: absolute; left: 7px; top: 2px; width: 8px; height: 13px;
+  border: solid #fff; border-width: 0 3px 3px 0; transform: rotate(45deg);
+}
+.jny-check-label { min-width: 0; }
+.jny-check-sub { color: var(--muted); font-size: 0.8235rem; }
+/* 비교 표 '진행 단계' 칸: 판정 색 없음, 줄바꿈만 막음 */
+.ctable .jny-cell { white-space: nowrap; }

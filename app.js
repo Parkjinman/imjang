@@ -24,6 +24,10 @@
  *   등기부 기록(registrySnapshots)에서 그때그때 계산해 미리보기 꼬리표·항목 카드 안내·답하기 메모·주의/참고 개수·요약에 쓴다(historyEraOf).
  * 1.10.0: 일정 탭(#/schedule). 매물의 주요 날짜(dates)·사용자 일정(customEvents)·완료 표시(scheduleDone)와 대출 종류(settings.schedule)를 저장하고,
  *   기한 계산은 schedule.js(window.ImjangSchedule, finance.js 다음·이 파일 전에 로드)의 순수 함수가 맡는다. 상세 '주요 날짜' 카드·홈 카드 기한 칩·.ics 내보내기
+ * 1.11.0: 매물 진행 지도(#/p/:id/journey). 7단계(서류 거르기→가기 전 준비→집 보기→다시 가 보기→가격·대출→계약→잔금·입주) 판정은
+ *   journey.js(window.ImjangJourney, schedule.js 다음·이 파일 전에 로드)의 순수 함수가 맡고, 저장하지 않고 열 때마다 계산한다(journeyInput).
+ *   새 저장 필드는 property.journey { bankChecked: ±ms } 하나(5단계 "은행에서 한도·금리를 확인했다" 체크. 협상가 체크는 dealPrice 유무로 계산).
+ *   상세 맨 위 진행 띠(jny-strip)·비교 표 '진행 단계' 열. 홈 매물 카드는 그대로(칩 과밀)
  */
 (function () {
   'use strict';
@@ -31,7 +35,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.10.0';
+  var APP_VERSION = '1.11.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -87,6 +91,8 @@
   var FIN = window.ImjangFinance || null;
   // 1.10.0: 일정 계산(schedule.js). 파일이 없으면 null 이고, 그때는 일정 탭·주요 날짜 카드가 안내로 바뀐다(날짜 입력·저장은 그대로)
   var SCHED = window.ImjangSchedule || null;
+  // 1.11.0: 진행 지도 단계 계산(journey.js). 파일이 없으면 null 이고, 그때는 상세 진행 띠를 숨기고 지도 화면이 안내로 바뀐다(체크 저장은 그대로)
+  var JNY = window.ImjangJourney || null;
   // 1.10.0: 매물의 주요 날짜 칸(property.dates). schedule.js DATE_KEYS·DATE_LABELS 와 같아야 한다(저장 모양은 여기가 기준)
   var DATE_KEYS = ['contractAt', 'balanceAt', 'vacateAt', 'leaseEndAt', 'moveInAt'];
   var DATE_LABELS = { contractAt: '계약일', balanceAt: '잔금일', vacateAt: '집 비워 주는 날', leaseEndAt: '세입자 임대차 만기', moveInAt: '이사·입주일' };
@@ -921,6 +927,10 @@
   // 1.10.0 은 늘 이 키를 적으므로 저장본 매물에 dates 키가 아예 없으면 예전(1.9.0 이하) 탭이 쓴 것 → 사본(SCHED_SIDE_KEY)에서 되살린다(restoreSchedFromSide).
   // 날짜의 시각은 fieldsAt['dates.<칸>'](merge.js DATE_FIELDS), 사용자 일정은 항목마다 t, 지운 일정은 customEventsRemoved { id: 시각 }
   var FIELDS_1100 = ['dates', 'customEvents', 'scheduleDone'];
+  // 1.11.0 에서 늘어난 매물 필드: 진행 지도 체크 journey({ bankChecked: ±ms }. 양수 = 체크한 시각, 음수 = 체크를 지운 시각 — scheduleDone 과 같은 모양).
+  // 1.11.0 은 늘 이 키를 적는다. 탭끼리 합칠 때는 missingNewFields 로 지키지만, 사본 키(imjang.v1.sched 같은 것)는 따로 두지 않는다:
+  // 체크 1개뿐이라 예전(1.10.0 이하) 탭이 마지막으로 저장하고 닫히는 드문 경우에는 잃어도 다시 누르면 되는 값으로 둔다(SPEC 16.1)
+  var FIELDS_1110 = ['journey'];
   var REAL_FLOOR_RANGE = [1, 99];
   var HIST_SOURCES = { naver: 1, code: 1, manual: 1 };
   var HISTORY_MAX = 20; // merge.js HISTORY_MAX 와 같음
@@ -1062,6 +1072,20 @@
     });
     return out;
   }
+  /** 1.11.0: 진행 지도 체크 { bankChecked: ±ms }. 0 이 아닌 유한한 수만, 아는 키만. 체크를 지운 표시(음수)는 보관 기간(180일)이 지나면 버린다 */
+  var JOURNEY_KEYS = ['bankChecked'];
+  function normalizeJourney(v) {
+    var out = {};
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+    var cutoff = Date.now() - TOMBSTONE_KEEP_MS;
+    JOURNEY_KEYS.forEach(function (k) {
+      var t = typeof v[k] === 'number' ? v[k] : numOrNull(v[k]);
+      if (t === null || !isFinite(t) || t === 0) return;
+      if (t < 0 && -t < cutoff) return;
+      out[k] = t;
+    });
+    return out;
+  }
   /** 매물 원본(p)의 1.10.0 값을 정리해 np 에 넣는다(normalizeProperty·restoreSchedFromSide 가 같이 씀). 지운 일정 표시 뒤에 고치지 않은 일정은 뺀다 */
   function schedFieldsInto(np, p) {
     p = p && typeof p === 'object' ? p : {};
@@ -1194,6 +1218,7 @@
     finFieldsInto(np, p); // 1.7.0: 대출·비용 값(늘 같은 키)
     realFieldsInto(np, p); // 1.9.0: 실거래 거래일·층(늘 같은 키. realPrice 가 없으면 빈 값)
     schedFieldsInto(np, p); // 1.10.0: 주요 날짜·사용자 일정·일정 완료 표시(늘 같은 키)
+    np.journey = normalizeJourney(p.journey); // 1.11.0: 진행 지도 체크(늘 같은 키. 사본 키 없음 — FIELDS_1110 주석)
     // 1.9.0: 1.8.1 이하가 메모에만 남긴 날짜·층을 한 번 채운다(메모는 그대로). 저장본을 읽으며 채웠으면 init 이 한 번 다시 저장(loadState)
     // 1.9.0 검토 반영: 원본에 realAt 키가 있으면(1.9.0 이 씀 — 지운 빈 값 포함) 다시 채우지 않는다(realReviveAllowed). 가져오기 '담기'·폼은 키를 늘 넣는다
     if (realReviveAllowed(p) && reviveRealFromMemo(np) && migrationStats) migrationStats.realRevived = (migrationStats.realRevived || 0) + 1;
@@ -1604,7 +1629,7 @@
     var out = {};
     (raw && Array.isArray(raw.properties) ? raw.properties : []).forEach(function (p) {
       if (!p || typeof p !== 'object' || !p.id || BAD_KEYS[p.id]) return;
-      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170, FIELDS_190, FIELDS_1100).filter(function (k) { return !hasOwn(p, k); });
+      var miss = FIELDS_120.concat(FIELDS_160, FIELDS_170, FIELDS_190, FIELDS_1100, FIELDS_1110).filter(function (k) { return !hasOwn(p, k); });
       if (miss.length) out[str(p.id)] = miss;
     });
     return out;
@@ -1669,7 +1694,8 @@
         // 1.7.0: 대출·비용 필드도 같은 방식(나중에 늘어난 칸이라 합치면 내 값이 이기고, 저장본에는 다시 써서 되돌린다)
         // 1.9.0: 실거래 거래일·층도 같은 방식(저장본에 키가 없으면 예전 탭이 쓴 것. 합친 결과를 다시 써서 되돌린다)
         // 1.10.0: 주요 날짜·사용자 일정·완료 표시도(dates 는 모두 빈 칸이면 빈 값으로 본다, blankField)
-        if (FIELDS_160.concat(FIELDS_170, FIELDS_190, FIELDS_1100).some(function (k) { return miss.indexOf(k) >= 0 && !blankField(mine[k]); })) needResave = true;
+        // 1.11.0: 진행 지도 체크(journey)도 같은 방식(합치면 내 값이 남고, 저장본에 다시 써서 되돌린다. 사본 키는 없음)
+        if (FIELDS_160.concat(FIELDS_170, FIELDS_190, FIELDS_1100, FIELDS_1110).some(function (k) { return miss.indexOf(k) >= 0 && !blankField(mine[k]); })) needResave = true;
         return;
       }
       // 예전 버전 탭이 쓴 매물(또는 merge.js 를 못 불러옴): 매물 단위로 더 나중 것
@@ -4643,13 +4669,19 @@
 
     main.append(detailHeader(prop));
 
+    // 1.11.0: 진행 띠(알림·주요 날짜 카드보다 위). 전체가 버튼 — 진행 지도(#/p/:id/journey)로
+    v.refs.jnyBox = h('div', { class: 'jny-strip-box', id: 'jny-strip-box' });
+    main.append(v.refs.jnyBox);
+    drawJourneyStrip(prop);
+
     v.refs.alerts = h('div', { class: 'alerts', id: 'd-alerts' });
     // 화면을 처음 그릴 때는 경고를 다시 읽어 주지 않는다(새로 '있음'을 누를 때만 role=alert)
     v.refs.prevStopCount = prop.status === 'dropped' ? 0 : flagsYes(prop, 'stop').length;
     main.append(v.refs.alerts);
     renderAlerts(prop); // 제안 줄(refreshFlowHint)도 이 안에서 같이 그린다
     // 1.10.0: '주요 날짜' 카드(계약일·잔금일 등 5칸, 입력 즉시 저장). 접힌 머리 줄에 가장 가까운 기한. 일정 탭이 같은 카드를 쓴다
-    main.append(datesCard(prop));
+    // 1.11.0: 날짜·완료가 바뀌면 진행 띠(계약일 D-n 등)도 다시 그린다
+    main.append(datesCard(prop, { onChange: function () { drawJourneyStrip(prop); } }));
     // 1.7.0: 대출·비용(추정) 카드. 접힌 머리 줄에 필요 현금·대출 한도 요약(펼친 상태는 이 탭에서 기억)
     main.append(finCard(prop));
 
@@ -4682,6 +4714,7 @@
       var ps = pendingSection;
       pendingSection = null;
       if (ps === 'dates') setTimeout(function () { if (view === v) openDatesCard(); }, 0); // 1.10.0: 일정 탭에서 '주요 날짜' 카드로
+      else if (ps === 'fin') setTimeout(function () { if (view === v) openFinCardFocus(); }, 0); // 1.11.0: 진행 지도 5단계에서 협상가 칸으로
       else if (v.refs.secs[ps]) setTimeout(function () { if (view === v) jumpToSection(ps); }, 0);
     }
     // 1.10.0: 일정 탭의 줄에서 왔으면 그 항목을 펼치고 스크롤(섹션은 jumpToItem 이 연다)
@@ -4928,6 +4961,7 @@
       ));
     }
     refreshFlowHint(prop); // 1.5.0(L2): 멈춤 신호가 모두 "없음"이면 헤더 아래 "[임장 예정으로 바꾸기]" 제안 줄(경고 상자와 따로)
+    drawJourneyStrip(prop); // 1.11.0: 멈춤 신호·상태가 바뀌면 진행 띠도
   }
 
   function sectionChips(prop) {
@@ -5308,6 +5342,7 @@
         c.el.classList.toggle('is-complete', complete);
       }
     });
+    drawJourneyStrip(prop); // 1.11.0: 체크가 바뀌면 진행 띠(단계 진행·다음 할 일)도
   }
 
   function applyItemClasses(el, it, st) {
@@ -8344,6 +8379,7 @@
   function drawFinResults(prop) {
     var r = view.refs.fin;
     if (!r || view.prop !== prop || !r.results) return;
+    drawJourneyStrip(prop); // 1.11.0: 협상가(dealPrice)·KB시세가 바뀌면 진행 띠 5단계도
     var box = r.results;
     var top = r.top;
     box.textContent = '';
@@ -8695,6 +8731,7 @@
         h('th', { class: 'num', scope: 'col', text: '실거래 대비' }),
         h('th', { class: 'num', scope: 'col', text: '주의' }),
         h('th', { scope: 'col', text: '진행률' }),
+        h('th', { scope: 'col', text: '진행 단계' }), // 1.11.0: "3. 집 보기 (46/59)" — 숫자·사실만(판정 색 없음)
         h('th', { class: 'num', scope: 'col', text: '최근 실거래가' }),
         h('th', { class: 'num', scope: 'col', text: '전용면적' }),
         // 1.7.0: 대출·비용(추정). 숫자만 나란히(가장 낮은 값 강조 같은 판정 표시는 하지 않음).
@@ -8722,6 +8759,7 @@
           h('td', { class: 'num' + (diff !== null ? (diff > 0 ? ' diff-up' : ' diff-down') : ''), text: pctText(diff) }),
           h('td', { class: 'num', text: String(cautionCount(p)) + (reg.refs ? ' · 참고 ' + reg.refs : '') }), // 1.8.0: '참고'로 돌린 지난 기록은 따로
           h('td', {}, h('span', { class: 'mini-bar' }, makeBar(prog.pct, null, { thin: true, ariaLabel: p.name + ' 진행률' }).el), prog.pct + '%'),
+          h('td', { class: 'jny-cell', text: journeyStageText(p) }), // 1.11.0
           // 1.9.0: 금액 아래 작은 글씨로 거래일·층
           h('td', { class: 'num' }, p.realPrice ? formatManwon(p.realPrice) : '-', realWhenText(p) ? h('span', { class: 'unit-sub', text: realWhenText(p) }) : null),
           h('td', { class: 'num', text: p.area ? p.area + '㎡' : '-' }),
@@ -10982,6 +11020,227 @@
     if (initial) parseNow();
   }
 
+  // =====================================================
+  // 1.11.0 매물 진행 지도: 7단계 판정(journey.js)·상세 진행 띠·지도 화면(#/p/:id/journey)·비교 '진행 단계' 칸
+  //   - 단계는 저장하지 않고 열 때마다 계산한다(journeyInput → JNY.buildJourney). 새 저장 필드는 journey.bankChecked 하나(setJourneyChecked)
+  //   - 문구: 판정·추천 없음(멈춤 신호 문구는 기존 data.js 표현을 따름). 홈 매물 카드는 건드리지 않는다(칩 과밀)
+  // =====================================================
+  // final 섹션의 그룹 묶음. data.js(2026-10c)의 group 글과 같아야 한다(바뀌면 여기도 같이)
+  var JNY_FINAL_CONTRACT_GROUPS = ['가계약금 보내기 전', '계약서 쓰는 날'];
+  var JNY_FINAL_BALANCE_GROUPS = ['잔금일', '잔금 뒤'];
+  /** final 섹션에서 group 이 names 에 든 항목들의 진행 */
+  function finalGroupProgress(prop, names) {
+    var sec = CL.sectionById.final;
+    if (!sec) return { done: 0, total: 0, pct: 0 };
+    return progressOf(prop, sec.items.filter(function (it) { return names.indexOf(str(it.group)) >= 0; }));
+  }
+  /** 섹션 여러 개의 진행 합산(3단계 '집 보기' = 동네+단지+집 안+묻기) */
+  function sectionsProgress(prop, ids) {
+    var items = [];
+    ids.forEach(function (id) { var s = CL.sectionById[id]; if (s) items = items.concat(s.items); });
+    return progressOf(prop, items);
+  }
+  /** 재방문(visit) 항목의 가장 가까운 미래 날짜('YYYY-MM-DD'|'') — 4단계 "예정 M.D" */
+  function revisitPlannedAt(prop, today) {
+    var sec = CL.sectionById.revisit;
+    var best = '';
+    if (!sec) return best;
+    sec.items.forEach(function (it) {
+      if (it.type !== 'visit') return;
+      var d = isoDateOr(getItemState(prop, it.id).date);
+      if (d && d > today && (!best || d < best)) best = d;
+    });
+    return best;
+  }
+  /** 매물 → journey.js buildJourney 입력. 전부 기존 계산 함수(sectionProgress·gateStopState·flagsYes·stopIsLate·registryResult·finCalc)의 값 */
+  function journeyInput(prop) {
+    var today = todayISO();
+    var gs = gateStopState(prop);
+    var stops = flagsYes(prop, 'stop');
+    var rr = registryResult(prop);
+    var c = finCalc(prop);
+    return {
+      status: prop.status,
+      dropReason: prop.dropReason,
+      today: today,
+      registry: {
+        prog: CL.sectionById.registry ? sectionProgress(prop, CL.sectionById.registry) : { done: 0, total: 0 },
+        label: rr.label,
+        hasRecord: !!(prop.registrySnapshots && prop.registrySnapshots.length),
+        stopYes: stops.length,
+        stopUnanswered: gs.unanswered,
+        late: stopIsLate(prop, stops)
+      },
+      prep: CL.sectionById.prep ? sectionProgress(prop, CL.sectionById.prep) : { done: 0, total: 0 },
+      visit: sectionsProgress(prop, ['area', 'complex', 'unit', 'ask']),
+      revisit: {
+        prog: CL.sectionById.revisit ? sectionProgress(prop, CL.sectionById.revisit) : { done: 0, total: 0 },
+        plannedAt: revisitPlannedAt(prop, today)
+      },
+      money: {
+        bankChecked: !!(prop.journey && prop.journey.bankChecked > 0),
+        dealEntered: prop.dealPrice !== null && prop.dealPrice !== undefined,
+        kbText: prop.kbPrice !== null && prop.kbPrice !== undefined ? manText(prop.kbPrice) : '',
+        dealText: prop.dealPrice !== null && prop.dealPrice !== undefined ? manText(prop.dealPrice) : '',
+        cashText: c && c.cash ? manText(c.cash.cash) : ''
+      },
+      contract: { prog: finalGroupProgress(prop, JNY_FINAL_CONTRACT_GROUPS), at: prop.dates ? prop.dates.contractAt : '' },
+      balance: { prog: finalGroupProgress(prop, JNY_FINAL_BALANCE_GROUPS), at: prop.dates ? prop.dates.balanceAt : '', moveInAt: prop.dates ? prop.dates.moveInAt : '' }
+    };
+  }
+  /** 진행 지도 체크 저장: journey[key] = 체크하면 그 시각, 지우면 음수 시각(scheduleDone 과 같은 방식 — 합칠 때 예전 체크가 되살아나지 않게) */
+  function setJourneyChecked(prop, key, on) {
+    if (JOURNEY_KEYS.indexOf(key) < 0) return;
+    if (!prop.journey || typeof prop.journey !== 'object') prop.journey = {};
+    var cur = prop.journey[key];
+    var t = stampAfter(Date.now(), typeof cur === 'number' ? Math.abs(cur) : 0, prop.legacyAt);
+    prop.journey[key] = on ? t : -t;
+    touch(prop, t);
+    saveNow();
+  }
+  /** 상세 맨 위 진행 띠(점 7개 · 지금 단계 · 다음 할 일). 전체가 버튼 — 지도 화면으로. JNY 가 없으면 비워 둔다 */
+  function drawJourneyStrip(prop) {
+    var box = view.refs && view.refs.jnyBox;
+    if (!box || view.prop !== prop) return;
+    box.textContent = '';
+    if (!JNY) return;
+    var j = JNY.buildJourney(journeyInput(prop));
+    var dots = h('span', { class: 'jny-dots', 'aria-hidden': 'true' }, j.stages.map(function (st) {
+      return h('i', { class: 'jny-dot st-' + st.state });
+    }));
+    var now = j.dropped ? '탈락 처리한 매물이에요'
+      : j.allDone ? '축하해요, 끝났어요 🎉'
+        : '지금: ' + j.current + '. ' + j.stages[j.current - 1].title;
+    // 멈춤이면 바로 아래 빨간 경고 카드(renderAlerts)가 같은 문구를 크게 보여 줘, 띠에서는 짧게 가리키기만 한다(1.11.0 검토)
+    var next = j.dropped || j.allDone ? '' : '다음 할 일: ' + (j.stopped ? '아래 멈춤 경고를 확인해요' : j.next);
+    box.append(h('button', {
+      type: 'button', id: 'jny-strip',
+      class: 'jny-strip' + (j.stopped ? ' is-stopped' : '') + (j.dropped ? ' is-dropped' : ''),
+      'aria-label': '진행 지도 열기. ' + now + (next ? '. ' + next : ''),
+      onclick: function () { navigateNow('/p/' + prop.id + '/journey'); }
+    },
+      h('span', { class: 'jny-strip-top' }, dots, h('span', { class: 'jny-now', text: now }), icon('forward', 'ic-sm')),
+      next ? h('span', { class: 'jny-next', text: next }) : null));
+  }
+  /** 비교 표 '진행 단계' 칸: "3. 집 보기 (46/59)". 숫자·사실만(판정 색 없음) */
+  function journeyStageText(p) {
+    if (!JNY) return '-';
+    if (p.status === 'dropped') return '탈락';
+    var j = JNY.buildJourney(journeyInput(p));
+    if (j.allDone) return '모두 끝났어요';
+    var st = j.stages[j.current - 1];
+    var pr = st.progress && st.progress.total ? ' (' + st.progress.done + '/' + st.progress.total + ')' : '';
+    return st.n + '. ' + st.title + pr + (j.stopped ? ' · 멈춤 신호' : '');
+  }
+  /** [바로 가기]: 지도 단계 → 상세의 그 자리(섹션 또는 대출·비용 카드의 협상가 칸) */
+  function goToJourneyLink(prop, link) {
+    pendingSection = str(link).indexOf('section:') === 0 ? str(link).slice(8) : 'fin';
+    navigateNow('/p/' + prop.id);
+  }
+  /** 상세의 '대출·비용' 카드를 펼치고 협상가 칸으로 스크롤·초점(pendingSection 'fin' — 지도 5단계에서 옴) */
+  function openFinCardFocus() {
+    var card = document.getElementById('fin-card');
+    if (!card) return;
+    card.open = true;
+    sessionSet(FIN_OPEN_KEY, '1');
+    var inp = document.getElementById('fin-deal');
+    var target = inp || card;
+    try { target.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center' }); } catch (e) { /* 무시 */ }
+    setTimeout(function () { try { target.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }, 350);
+  }
+  var JNY_STATE_LABEL = { done: '완료', active: '지금 여기', todo: '아직', stopped: '멈춤', blocked: '멈춤 해결 후' };
+  /** 지도 화면을 스크롤 유지한 채 다시 그린다(5단계 체크 토글 뒤). focusSel 로 초점 복원 */
+  function rerenderJourney(focusSel) {
+    var y = window.scrollY;
+    renderPath(currentPath());
+    window.scrollTo(0, y);
+    if (focusSel) {
+      var el = document.querySelector(focusSel);
+      if (el) { try { el.focus({ preventScroll: true }); } catch (e) { /* 무시 */ } }
+    }
+  }
+  /** 전체 지도 화면 (#/p/:id/journey) */
+  function renderJourney(id) {
+    var prop = findProp(id);
+    if (!prop) return renderNotFound();
+    var v = newView('journey', prop);
+    setTopbar({ title: prop.name, back: '/p/' + encodeURIComponent(id) });
+    updateTabbar('home');
+    var main = resetMain();
+    appendKid(main, dataWarning());
+    if (!JNY) {
+      main.append(h('div', { class: 'notice', role: 'note' },
+        h('strong', { text: '진행 지도 파일(journey.js)을 불러오지 못했어요' }),
+        h('p', { text: '인터넷에 연결한 뒤 새로고침해 주세요. 체크한 기록은 그대로 있어요.' }),
+        h('a', { class: 'btn btn-small btn-secondary', href: '#/p/' + encodeURIComponent(id) }, '매물 상세로')));
+      return;
+    }
+    var j = JNY.buildJourney(journeyInput(prop));
+    main.append(h('p', { class: 'page-sub', text: '아파트 매수의 일반적인 흐름 7단계예요. 단계마다 어디까지 왔는지 보여 줘요.' }));
+    if (j.dropped) {
+      main.append(h('div', { class: 'alert alert-dropped jny-head', id: 'jny-dropped' },
+        h('p', { class: 'alert-title' }, icon('alert'), '탈락 처리한 매물이에요'),
+        h('p', { text: prop.dropReason ? '사유: ' + prop.dropReason : '사유를 적지 않았어요.' }),
+        h('p', { class: 'small', text: '아래 지도는 탈락 전까지의 기록이에요.' })));
+    } else if (j.allDone) {
+      main.append(h('div', { class: 'card jny-head jny-congrats', id: 'jny-congrats', role: 'status' },
+        h('p', { class: 'jny-congrats-line', text: '축하해요, 끝났어요 🎉' }),
+        h('p', { class: 'small muted', text: '7단계 체크를 모두 마쳤어요.' })));
+    }
+    // role=list: list-style:none 인 목록은 iPhone·iPad Safari VoiceOver 가 리스트 시맨틱을 지워 '7개 중 N번째' 안내가 빠진다(1.11.0 검토)
+    main.append(h('ol', { class: 'jny-list' + (j.dropped ? ' is-dropped' : ''), role: 'list', 'aria-label': '매수 진행 7단계' },
+      j.stages.map(function (st) { return journeyStageEl(prop, st); })));
+    main.append(h('p', { class: 'small muted jny-foot', role: 'note', text: '이 순서는 일반적인 흐름이에요. 상황에 따라 달라질 수 있어요.' }));
+  }
+  /** 지도 단계 하나(li). 5단계(가격·대출)에는 체크 2개 */
+  function journeyStageEl(prop, st) {
+    var body = [];
+    // 1.11.0 검토 반영 둘: ① 탈락 매물의 active 칩은 '지금 여기' 대신 기록형 '여기까지 봤어요'(머리글 "탈락 전까지의 기록"과 맞게),
+    // ② 상태 기준으로 끝난 단계(3 집 보기)에서 체크가 0이면 '완료'와 '0/59'가 한 줄에 모순돼 보여 머리줄 숫자를 생략(요약에는 그대로)
+    var chip = prop.status === 'dropped' && st.state === 'active' ? '여기까지 봤어요' : (JNY_STATE_LABEL[st.state] || st.state);
+    var showProg = st.progress && st.progress.total && !(st.state === 'done' && !st.progress.done);
+    body.push(h('h3', { class: 'jny-h' },
+      h('span', { class: 'jny-title', text: st.n + '. ' + st.title }),
+      h('span', { class: 'jny-state', text: chip }),
+      showProg ? h('span', { class: 'jny-prog', text: st.progress.done + '/' + st.progress.total }) : null));
+    body.push(h('p', { class: 'jny-sum', text: st.summary }));
+    if (st.date && st.state !== 'blocked') body.push(h('p', { class: 'jny-date', text: st.date.text }));
+    body.push(h('p', { class: 'jny-why', text: st.why }));
+    if (st.id === 'money' && st.state !== 'blocked') body.push(journeyMoneyChecks(prop));
+    body.push(h('div', { class: 'jny-go' },
+      h('button', {
+        type: 'button', class: 'btn btn-small btn-secondary',
+        'aria-label': st.n + '단계 ' + st.title + ' 바로 가기',
+        onclick: function () { goToJourneyLink(prop, st.link); }
+      }, '바로 가기')));
+    return h('li', { class: 'jny-stage st-' + st.state, 'data-n': String(st.n) },
+      h('span', { class: 'jny-mark', 'aria-hidden': 'true', text: st.state === 'done' ? '✓' : String(st.n) }),
+      h('div', { class: 'jny-card' }, body));
+  }
+  /** 5단계 카드 안 체크 2개: 은행 확인(journey.bankChecked 토글) · 협상가 입력(dealPrice 유무 자동, 누르면 협상가 칸으로) */
+  function journeyMoneyChecks(prop) {
+    var bankOn = !!(prop.journey && prop.journey.bankChecked > 0);
+    var dealOn = prop.dealPrice !== null && prop.dealPrice !== undefined;
+    var bank = h('button', {
+      type: 'button', class: 'jny-check', id: 'jny-bank-check', role: 'checkbox', 'aria-checked': String(bankOn),
+      onclick: function () {
+        setJourneyChecked(prop, 'bankChecked', !bankOn);
+        toast(bankOn ? '체크를 지웠어요' : '확인했다고 표시했어요', { duration: 1500 });
+        rerenderJourney('#jny-bank-check');
+      }
+    }, h('span', { class: 'check-box', 'aria-hidden': 'true' }), h('span', { class: 'jny-check-label', text: '은행에서 한도·금리를 확인했다' }));
+    // 협상가 체크는 눌러도 토글이 아니라 협상가 칸으로 이동하므로 checkbox 역할을 주지 않는다(1.11.0 검토 — ARIA 체크박스 패턴 위반).
+    // 상태(입력함/안 함)는 라벨 글에 담고, 체크 모양은 is-on 클래스의 aria-hidden 시각 요소로만 보여 준다
+    var deal = h('button', {
+      type: 'button', class: 'jny-check' + (dealOn ? ' is-on' : ''), id: 'jny-deal-check',
+      'aria-label': '협상가를 입력했다: ' + (dealOn ? manText(prop.dealPrice) : '아직 안 함') + '. 누르면 대출·비용 카드의 협상가 칸으로 가요',
+      onclick: function () { goToJourneyLink(prop, 'fin'); }
+    }, h('span', { class: 'check-box', 'aria-hidden': 'true' }),
+      h('span', { class: 'jny-check-label' }, '협상가를 입력했다',
+        h('span', { class: 'jny-check-sub', text: dealOn ? ' · ' + manText(prop.dealPrice) : ' · 누르면 협상가 칸으로' })));
+    return h('div', { class: 'jny-checks' }, bank, deal);
+  }
+
   function renderNotFound() {
     newView('notfound');
     setTopbar({ title: '찾을 수 없음', back: '/' });
@@ -11030,6 +11289,7 @@
     [/^\/?$/, function () { renderHome(); }],
     [/^\/new$/, function () { return renderForm(null); }],
     [/^\/p\/([^/]+)$/, function (m) { renderDetail(m[1]); }],
+    [/^\/p\/([^/]+)\/journey$/, function (m) { renderJourney(m[1]); }], // 1.11.0: 진행 지도
     [/^\/p\/([^/]+)\/summary$/, function (m) { renderSummary(m[1]); }],
     [/^\/p\/([^/]+)\/edit$/, function (m) { return renderForm(m[1]); }],
     [/^\/compare$/, function () { renderCompare(); }],
