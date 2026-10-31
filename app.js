@@ -35,7 +35,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.14.0';
+  var APP_VERSION = '1.14.1';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -9579,7 +9579,13 @@
       main.append(card);
     });
 
-    // 3) 다음 할 일
+    // 3) 방공제 — 어느 대출이든 한도에서 빠지는 돈이라 결과 밑에 한 번만 설명(자세한 대처는 용어 "방공제")
+    main.append(h('section', { class: 'card' },
+      h('h2', { class: 'card-title', text: '방공제 — 위 한도에서 빠지는 돈' }),
+      h('p', { class: 'small', text: '집이 경매로 넘어가도 소액 세입자가 먼저 돌려받는 몫(서울 5,500만 원, 지역별 2,500만~5,500만 원)을 은행이 한도에서 미리 빼요. 아파트도 1개분을 빼니, 위 한도에서 이만큼 빠진다고 보고 자금 계획을 잡아요.' }),
+      h('p', { class: 'small muted', text: '안 빼는 방법(MCI·MCG 보험)과 대처 방법은 용어 "방공제"에 정리해 뒀어요. 매물마다 하는 대출·비용 계산도 방공제를 기본으로 빼고 계산해요.' })));
+
+    // 4) 다음 할 일
     var next = h('section', { class: 'card' }, h('h2', { class: 'card-title', text: '다음 할 일' }));
     var fundOk = ['newborn', 'didimdol'].some(function (id) { return byId[id].verdict !== 'no'; });
     if (fundOk) {
