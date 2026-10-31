@@ -9,8 +9,8 @@
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#F2F5F6",
-  "theme_color": "#0F4C5C",
+  "background_color": "#F5F7F1",
+  "theme_color": "#1D1D1F",
   "categories": ["education", "productivity", "utilities"],
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

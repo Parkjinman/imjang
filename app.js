@@ -35,7 +35,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.11.0';
+  var APP_VERSION = '1.12.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -3150,8 +3150,10 @@
     }
     appendKid(left, o.left); // 뒤로 가기 대신 둘 버튼(홈 선택 모드의 [전체 선택])
     // tabindex=-1: 화면이 바뀌면 이 제목으로 초점을 옮겨 VoiceOver 가 새 화면 이름을 읽게 한다
+    var titleEl = h('h1', { class: 'tb-title', id: 'tb-title', tabindex: '-1', text: o.title });
     bar.append(left, h('div', { class: 'tb-center' },
-      h('h1', { class: 'tb-title', id: 'tb-title', tabindex: '-1', text: o.title }),
+      // 1.12.0: 홈 화면 제목 앞에 ShineMuscat 로고 마크(꾸밈 그림이라 alt 비움)
+      o.brand ? h('div', { class: 'tb-brand' }, h('img', { class: 'tb-logo', src: 'icons/shinemuscat-mark-green.svg', alt: '', width: '16', height: '20' }), titleEl) : titleEl,
       versionBadge()
     ), h('div', { class: 'tb-right' }, o.actions || []));
     document.title = o.title && o.title !== '임장 체크리스트' ? o.title + ' · 임장체크' : '임장 체크리스트';
@@ -3787,6 +3789,7 @@
       actions: [h('button', { type: 'button', class: 'tb-btn tb-text', 'data-focus-key': 'sel-cancel', onclick: function () { setHomeSelect(false); } }, '취소')]
     } : {
       title: '임장 체크리스트',
+      brand: true,
       actions: [h('a', { class: 'tb-btn', href: '#/new', 'aria-label': '매물 추가' }, icon('plus'))]
     });
     updateTabbar('home');

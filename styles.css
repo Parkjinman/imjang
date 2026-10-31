@@ -5,13 +5,15 @@
    ========================================================= */
 
 :root {
-  /* 브랜드 */
-  --teal: #0F4C5C;
-  --teal-strong: #0B3B47;
-  --teal-soft: #E4EEF0;
-  --teal-ink: #0F4C5C;
-  --orange: #E36414;      /* 막대·아이콘 같은 강조(글자를 올리지 않는 곳) */
-  --orange-btn: #B8500F;  /* 흰 글자를 올리는 주황 바탕(대비 4.5:1 이상) */
+  /* 브랜드 — 1.12.0: ShineMuscat 디자인(ShineDesign 로고 키트: 머스캣 그린 + 니어블랙 잉크).
+     --teal* 이름은 그대로 두고 값만 그린으로 바꿨다(앱 전체가 이 이름을 씀). 주황은 '먼저 볼 것·아직 안 함' 같은 주의 표시로만 남긴다 */
+  --brand: #67A22C;       /* 로고 마크 그린: 점·아이콘(글자를 올리지 않는 곳) */
+  --teal: #4E8420;        /* 체크·선택 바탕(흰 글자 4.5:1) */
+  --teal-strong: #3F6F18;
+  --teal-soft: #EEF6DF;   /* 머스캣 소프트: 선택 줄·보조 버튼 */
+  --teal-ink: #3F6F18;    /* 밝은 바탕 위 그린 글자(흰 바탕 6.0:1) */
+  --orange: #E36414;      /* 주의 강조(막대·테두리, 글자를 올리지 않는 곳) */
+  --orange-btn: #4E8420;  /* 1.12.0: 주요 버튼은 브랜드 그린(흰 글자 4.5:1). 이름은 예전 그대로 */
   --orange-ink: #B34A08;
   --orange-soft: #FDEBDD;
 
@@ -29,18 +31,18 @@
   --green-ink: #1B5E20;
 
   /* 바탕 */
-  --bg: #F2F5F6;
+  --bg: #F5F7F1;
   --card: #FFFFFF;
-  --card-2: #F7F9FA;
-  --text: #13222B;
-  --muted: #56666F;
-  --line: #DDE4E7;
-  --chip: #ECF0F2;
-  --shadow: 0 1px 2px rgba(10, 40, 50, 0.06), 0 4px 14px rgba(10, 40, 50, 0.06);
-  --topbar-bg: #0F4C5C;
+  --card-2: #F8FAF5;
+  --text: #1D1D1F;
+  --muted: #5E5E63;
+  --line: #E4E8DD;
+  --chip: #EEF1EA;
+  --shadow: 0 1px 2px rgba(29, 29, 31, 0.06), 0 4px 14px rgba(29, 29, 31, 0.06);
+  --topbar-bg: #1D1D1F;   /* 니어블랙 잉크 + 흰 글자, 로고는 그린 마크 */
   --topbar-ink: #FFFFFF;
   --tabbar-bg: rgba(255, 255, 255, 0.92);
-  --focus: #E36414;
+  --focus: #4E8420;
 
   /* 크기 */
   --radius: 16px;
@@ -58,10 +60,11 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --teal: #1F7A8C;        /* 어두운 카드 위에서도 체크·완료 표시가 보이게(카드 대비 3:1 이상, 흰 글자 4.5:1 이상) */
-    --teal-strong: #17606F;
-    --teal-soft: #12343C;
-    --teal-ink: #8FD3E2;
+    --brand: #A8D45C;
+    --teal: #4E8420;        /* 어두운 카드 위에서도 체크·완료 표시가 보이게(카드 대비 3:1 이상, 흰 글자 4.5:1 이상) */
+    --teal-strong: #3F6F18;
+    --teal-soft: #243318;
+    --teal-ink: #A8D45C;
     --orange-ink: #FFAE78;
     --orange-soft: #3D2413;
     --red: #EF5350;
@@ -74,17 +77,17 @@
     --green: #5CB860;
     --green-soft: #142D17;
     --green-ink: #A5E0A8;
-    --bg: #0C1316;
-    --card: #152025;
-    --card-2: #1A272D;
-    --text: #E6EEF1;
-    --muted: #9AACB4;
-    --line: #26363C;
-    --chip: #1F2D33;
+    --bg: #0F1110;
+    --card: #1A1C1A;
+    --card-2: #202320;
+    --text: #ECEFE8;
+    --muted: #A3A8A0;
+    --line: #2C302B;
+    --chip: #242823;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --topbar-bg: #0A2F38;
-    --tabbar-bg: rgba(18, 28, 32, 0.92);
-    --focus: #FF8A3D;
+    --topbar-bg: #151517;
+    --tabbar-bg: rgba(22, 24, 22, 0.92);
+    --focus: #A8D45C;
   }
 }
 
@@ -109,7 +112,7 @@ body {
   min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
   font-size: 1rem;
   line-height: 1.55;
   word-break: keep-all;
@@ -190,7 +193,7 @@ ul, ol { margin: 0; padding: 0; }
   text-decoration: none;
 }
 .tb-btn:active { background: rgba(255, 255, 255, 0.14); }
-.tb-btn:focus-visible { outline-color: #FFC59E; }
+.tb-btn:focus-visible { outline-color: #C9EA86; }
 .tb-btn.tb-text { padding: 0 14px; border: 1.5px solid rgba(255, 255, 255, 0.45); min-height: 44px; margin: 0 2px; }
 
 /* ---------- 본문 ---------- */
@@ -1000,7 +1003,7 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 }
 .tab .ic { width: 26px; height: 26px; }
 .tab[aria-current="page"] { color: var(--teal-ink); }
-.tab[aria-current="page"] .ic { color: var(--orange); }
+.tab[aria-current="page"] .ic { color: var(--brand); }
 .tab:active { opacity: 0.7; }
 /* 1.10.0: 탭이 5개라 좁은 화면에서 '용어·링크'가 잘리지 않게 — 글자는 한 줄, 320px 대에서는 글자·아이콘을 조금 줄인다(모양은 그대로) */
 .tab > span { max-width: 100%; padding: 0 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1021,7 +1024,7 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
   max-width: min(92vw, 520px);
   padding: 12px 16px;
   border-radius: 14px;
-  background: #1E2B31;
+  background: #1D1D1F;
   color: #fff;
   font-size: 0.8824rem;
   font-weight: 600;
@@ -1034,8 +1037,8 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 /* 버튼이 있는 토스트만 터치를 받는다(버튼 없는 알림이 아래 항목을 가리지 않게) */
 .toast.show.has-action { pointer-events: auto; }
-.toast-btn { border: 0; background: transparent; color: #FFB37F; font-weight: 800; min-height: 44px; padding: 0 8px; }
-@media (prefers-color-scheme: dark) { .toast { background: #E6EEF1; color: #13222B; } .toast-btn { color: var(--orange-ink); color: #B34A08; } }
+.toast-btn { border: 0; background: transparent; color: #C9EA86; font-weight: 800; min-height: 44px; padding: 0 8px; }
+@media (prefers-color-scheme: dark) { .toast { background: #ECEFE8; color: #1D1D1F; } .toast-btn { color: #3F6F18; } }
 
 /* ---------- 모달 ---------- */
 .modal-overlay {
@@ -1296,7 +1299,7 @@ details.imp-how-more[open] > summary { margin-bottom: 4px; }
   font: inherit; font-size: 12px; font-weight: 700; line-height: 1.2; cursor: pointer;
 }
 .tb-ver-update::before { content: ""; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px; }
-.tb-ver-update:focus-visible { outline: 2px solid #FFC59E; outline-offset: 2px; }
+.tb-ver-update:focus-visible { outline: 2px solid #C9EA86; outline-offset: 2px; }
 
 /* ---------- 1.4.1: 되돌리기 줄(홈 맨 위), 지우기 확인의 매물 정보 ---------- */
 .undo-bar {
@@ -2056,3 +2059,7 @@ a.need-ho-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 
 .jny-check-sub { color: var(--muted); font-size: 0.8235rem; }
 /* 비교 표 '진행 단계' 칸: 판정 색 없음, 줄바꿈만 막음 */
 .ctable .jny-cell { white-space: nowrap; }
+
+/* ---------- 1.12.0 ShineMuscat 브랜드: 상단 바 로고 ---------- */
+.tb-brand { display: inline-flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; }
+.tb-logo { width: 16px; height: 20px; flex: 0 0 auto; }

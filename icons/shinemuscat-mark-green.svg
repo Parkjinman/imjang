@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 150">
+  <defs>
+    <mask id="shine">
+      <rect width="120" height="150" fill="white"/>
+      <path d="M93 40 L96.2 50.8 L107 54 L96.2 57.2 L93 68 L89.8 57.2 L79 54 L89.8 50.8 Z" fill="black"/>
+    </mask>
+  </defs>
+  <g fill="#67A22C" mask="url(#shine)">
+    <path d="M60 36 C60 24 62 14 69 7" fill="none" stroke="#67A22C" stroke-width="6" stroke-linecap="round"/>
+    <path d="M69 10 C80 1 95 5 99 16 C90 25 74 23 69 10 Z"/>
+    <path d="M27 58 L93 58 L60 122 Z"/>
+    <circle cx="27" cy="58" r="21"/>
+    <circle cx="93" cy="58" r="21"/>
+    <circle cx="60" cy="54" r="21"/>
+    <circle cx="43" cy="90" r="21"/>
+    <circle cx="77" cy="90" r="21"/>
+    <circle cx="60" cy="122" r="21"/>
+  </g>
+</svg>
