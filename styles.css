@@ -944,7 +944,8 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 .gloss { list-style: none; display: grid; gap: 10px; }
 .gloss li { background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 14px 16px; }
 .gloss dt, .gloss .term { font-weight: 800; font-size: 1rem; color: var(--teal-ink); }
-.gloss .desc { margin-top: 4px; font-size: 0.9412rem; }
+/* 1.13.0: 용어 설명의 줄바꿈(\n)을 그대로 보여 준다 — "디딤돌대출"처럼 서류 목록을 줄로 나눠 적은 용어용 */
+.gloss .desc { margin-top: 4px; font-size: 0.9412rem; white-space: pre-line; }
 .gloss mark { background: var(--orange-soft); color: inherit; border-radius: 3px; padding: 0 1px; }
 .links { list-style: none; display: grid; gap: 10px; }
 .link-card {
