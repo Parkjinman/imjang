@@ -944,6 +944,35 @@ input[type="date"].input::-webkit-date-and-time-value { text-align: left; }
 .gloss { list-style: none; display: grid; gap: 10px; }
 .gloss li { background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 14px 16px; }
 .gloss dt, .gloss .term { font-weight: 800; font-size: 1rem; color: var(--teal-ink); }
+/* ===== 대출 길잡이 (1.14.0) ===== */
+.lg-progress { display: flex; align-items: center; gap: 10px; margin: 2px 2px 12px; }
+.lg-progress .bar { flex: 1; }
+.lg-q { font-size: 1.18rem; font-weight: 800; margin: 0 0 4px; }
+.lg-hint { color: var(--muted); font-size: 0.9rem; margin: 0 0 12px; }
+.lg-opts { display: grid; gap: 8px; }
+.lg-opt {
+  display: block; width: 100%; text-align: left; font: inherit; font-weight: 600; color: var(--text);
+  background: var(--card-2); border: 1.5px solid var(--line); border-radius: var(--radius-sm);
+  padding: 13px 14px; cursor: pointer;
+}
+.lg-opt:active { background: var(--teal-soft); }
+.lg-opt.is-on { border-color: var(--teal); background: var(--teal-soft); }
+.lg-opt-hint { display: block; font-weight: 400; font-size: 0.86rem; color: var(--muted); margin-top: 2px; }
+.lg-check { align-items: flex-start; padding: 6px 2px; }
+.lg-check .lg-opt-hint { display: inline; }
+.lg-pick { border-left: 4px solid var(--teal); }
+.lg-pick-name { font-size: 1.25rem; font-weight: 800; color: var(--teal-ink); margin: 2px 0 8px; }
+.lg-prod { padding: 14px 16px; }
+.lg-prod-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.lg-prod-name { font-size: 1rem; font-weight: 800; margin: 0; }
+.lg-chip { flex: 0 0 auto; font-size: 0.8rem; font-weight: 700; border-radius: 99px; padding: 3px 10px; }
+.lg-ok { background: var(--green-soft); color: var(--green-ink); }
+.lg-maybe { background: var(--yellow-soft); color: var(--yellow-ink); }
+.lg-no { background: var(--red-soft); color: var(--red-ink); }
+.lg-reasons { margin: 8px 0 4px; padding-left: 18px; font-size: 0.9rem; display: grid; gap: 4px; }
+.lg-spec { font-size: 0.9rem; margin: 6px 0 0; }
+.lg-prod .small.muted { margin: 6px 0 0; }
+
 /* 1.13.0: 용어 설명의 줄바꿈(\n)을 그대로 보여 준다 — "디딤돌대출"처럼 서류 목록을 줄로 나눠 적은 용어용 */
 .gloss .desc { margin-top: 4px; font-size: 0.9412rem; white-space: pre-line; }
 .gloss mark { background: var(--orange-soft); color: inherit; border-radius: 3px; padding: 0 1px; }

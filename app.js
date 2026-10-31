@@ -35,7 +35,7 @@
   // =====================================================
   // 1. 상수
   // =====================================================
-  var APP_VERSION = '1.13.0';
+  var APP_VERSION = '1.14.0';
   var STORAGE_KEY = 'imjang.v1';
   var DRAFT_KEY = 'imjang.v1.draft'; // 새 매물 폼 임시 저장(앱이 내려가도 남도록 localStorage)
   // 1.6.0 검토 반영: 매물의 1.6.0 필드(등기부 기록·지운 기록 표시·매도인 이름) 사본. 예전(1.5.x) 탭이 이 필드를 빼고 저장해도 되살린다
@@ -91,6 +91,10 @@
   var FIN = window.ImjangFinance || null;
   // 1.10.0: 일정 계산(schedule.js). 파일이 없으면 null 이고, 그때는 일정 탭·주요 날짜 카드가 안내로 바뀐다(날짜 입력·저장은 그대로)
   var SCHED = window.ImjangSchedule || null;
+  // 1.14.0: 대출 길잡이(질문 → 디딤돌·신생아 특례·보금자리론·은행 판정)는 loanpath.js 가 맡는다. 없으면 길잡이 화면만 안내로
+  var LOAN = window.ImjangLoanPath || null;
+  var LOAN_ANS_KEY = 'imjang.loan.answers'; // 길잡이 답(sessionStorage JSON) — 개인 소득·자산이라 영구 저장하지 않는다
+  var LOAN_STEP_KEY = 'imjang.loan.step';
   // 1.11.0: 진행 지도 단계 계산(journey.js). 파일이 없으면 null 이고, 그때는 상세 진행 띠를 숨기고 지도 화면이 안내로 바뀐다(체크 저장은 그대로)
   var JNY = window.ImjangJourney || null;
   // 1.10.0: 매물의 주요 날짜 칸(property.dates). schedule.js DATE_KEYS·DATE_LABELS 와 같아야 한다(저장 모양은 여기가 기준)
@@ -8885,6 +8889,7 @@
 
     main.append(
       h('div', { class: 'search-wrap' }, icon('search'), search),
+      loanGuideCard() || '', // 1.14.0: 용어 탭에서도 길잡이로
       linksBlock,
       h('h2', { class: 'h2', id: 'gloss-terms' }, '용어'),
       countEl,
@@ -9413,7 +9418,8 @@
       });
     }
 
-    // 4) 계산 조건(대출 종류·생애최초)·탈락 매물 보기
+    // 4) 계산 조건(대출 종류·생애최초)·탈락 매물 보기. 1.14.0: 그 앞에 대출 길잡이 카드
+    appendKid(main, loanGuideCard());
     var dropToggle = h('input', { type: 'checkbox', id: 'sched-dropped', checked: showDropped });
     dropToggle.addEventListener('change', function () { sessionSet(SCHED_DROPPED_KEY, dropToggle.checked ? '1' : '0'); rerenderSchedule({ sel: '#sched-dropped' }); });
     var loanSel = h('select', { class: 'select', id: 'sched-loan', 'aria-describedby': 'sched-loan-hint' }, Object.keys(LOAN_TYPES).map(function (k) { return h('option', { value: k, text: LOAN_TYPES[k] }); }));
@@ -9441,6 +9447,158 @@
       h('button', { type: 'button', class: 'btn btn-block', id: 'sched-ics-btn', disabled: !exportable.length, onclick: function () { exportICS(exportable); } },
         icon('share', 'ic-sm'), '캘린더로 내보내기' + (exportable.length ? ' (' + exportable.length + '개)' : ''))));
     main.append(h('p', { class: 'about', text: '기한은 안내일 뿐 법적 효력이 없어요. 공휴일은 반영하지 않아요(토·일만 봐요). 날짜는 중개사·은행·구청에 확인하세요.' }));
+  }
+
+  // ---------------- 대출 길잡이 (1.14.0) ----------------
+  // 질문 7개(loanpath.js QUESTIONS)에 답하면 신생아 특례 → 디딤돌 → 보금자리론 → 은행 주담대 순서로
+  // 되는지/안 되는지(사유)를 한 번에 보여 준다. 답은 소득·자산이라 sessionStorage 에만 둔다(백업에 안 들어감)
+  function loanAnswers() {
+    try { var a = JSON.parse(sessionGet(LOAN_ANS_KEY) || '{}'); return a && typeof a === 'object' ? a : {}; }
+    catch (e) { return {}; }
+  }
+  /** 일정·용어 탭에서 길잡이로 가는 카드. LOAN 이 없으면 null(버튼 자체를 숨김) */
+  function loanGuideCard() {
+    if (!LOAN) return null;
+    return h('a', { class: 'link-card', href: '#/loan' },
+      h('span', { class: 'lc-main' },
+        h('span', { class: 'lc-label', text: '대출 길잡이' }),
+        h('span', { class: 'lc-desc', style: 'display:block', text: '디딤돌이 될까? 안 되면 다음 플랜은? 질문 몇 개로 경우의 수를 따져 봐요.' })),
+      icon('forward'));
+  }
+  var LOAN_VERDICT = {
+    ok: { label: '이 기준으로는 돼요', cls: 'lg-ok' },
+    maybe: { label: '확인 필요', cls: 'lg-maybe' },
+    no: { label: '이 기준으로는 안 돼요', cls: 'lg-no' }
+  };
+  function renderLoanGuide() {
+    newView('loan');
+    setTopbar({ title: '대출 길잡이', back: '/schedule' });
+    updateTabbar('schedule');
+    var main = resetMain();
+    if (!LOAN) {
+      main.append(h('div', { class: 'notice', role: 'alert' },
+        h('strong', { text: '대출 길잡이를 불러오지 못했어요.' }),
+        h('p', { text: 'loanpath.js 파일이 index.html 과 같은 폴더에 있는지 확인하고 새로고침해 주세요.' })));
+      return;
+    }
+    var qs = LOAN.QUESTIONS;
+    var answers = loanAnswers();
+    var step = parseInt(sessionGet(LOAN_STEP_KEY) || '0', 10);
+    if (!(step >= 0 && step <= qs.length)) step = 0;
+    // 앞 질문에 답이 없으면 그 질문부터(링크로 결과에 바로 들어오는 경우). multi(family)는 비워 둔 것도 답
+    for (var i = 0; i < step && i < qs.length; i++) {
+      var q0 = qs[i];
+      if (q0.type === 'multi' ? !Array.isArray(answers[q0.id]) : !answers[q0.id]) { step = i; break; }
+    }
+    function go(nextStep) {
+      sessionSet(LOAN_ANS_KEY, JSON.stringify(answers));
+      sessionSet(LOAN_STEP_KEY, String(nextStep));
+      renderLoanGuide();
+    }
+
+    if (step >= qs.length) { loanResult(main, answers, go); return; }
+
+    // ── 질문 화면 ──
+    var q = qs[step];
+    var bar = makeBar(Math.round(step / qs.length * 100), null, { thin: true, ariaLabel: '길잡이 진행률' });
+    main.append(h('div', { class: 'lg-progress' }, bar.el, h('span', { class: 'small muted', text: '질문 ' + (step + 1) + ' / ' + qs.length })));
+    var card = h('section', { class: 'card', 'aria-labelledby': 'lg-q' });
+    card.append(h('h2', { class: 'lg-q', id: 'lg-q', text: q.text }));
+    if (q.hint) card.append(h('p', { class: 'lg-hint', text: q.hint }));
+    if (q.type === 'multi') {
+      var sel = Array.isArray(answers[q.id]) ? answers[q.id].slice() : [];
+      var boxes = q.options.map(function (o) {
+        var cb = h('input', { type: 'checkbox', checked: sel.indexOf(o.id) >= 0 });
+        cb.addEventListener('change', function () {
+          var at = sel.indexOf(o.id);
+          if (cb.checked && at < 0) sel.push(o.id);
+          if (!cb.checked && at >= 0) sel.splice(at, 1);
+        });
+        return h('label', { class: 'toggle lg-check' }, cb,
+          h('span', {}, o.label, o.hint ? h('span', { class: 'lg-opt-hint', text: ' — ' + o.hint }) : null));
+      });
+      card.append(h('div', { class: 'lg-opts' }, boxes));
+      card.append(h('button', {
+        type: 'button', class: 'btn btn-block', style: 'margin-top:12px',
+        onclick: function () { answers[q.id] = sel; go(step + 1); }
+      }, '다음', icon('forward', 'ic-sm')));
+    } else {
+      card.append(h('div', { class: 'lg-opts' }, q.options.map(function (o) {
+        return h('button', {
+          type: 'button', class: 'lg-opt' + (answers[q.id] === o.id ? ' is-on' : ''),
+          onclick: function () { answers[q.id] = o.id; go(step + 1); }
+        }, h('span', { text: o.label }), o.hint ? h('span', { class: 'lg-opt-hint', text: o.hint }) : null);
+      })));
+    }
+    main.append(card);
+    if (step > 0) {
+      main.append(h('button', { type: 'button', class: 'btn btn-small btn-secondary', onclick: function () { go(step - 1); } },
+        icon('back', 'ic-sm'), '이전 질문'));
+    }
+    main.append(h('p', { class: 'about', text: '답은 이 기기의 이번 사용에만 남고 백업·기록에는 들어가지 않아요.' }));
+  }
+
+  /** 결과 화면: 추천 + 상품별 경우의 수(사유) + 다음 할 일 */
+  function loanResult(main, answers, go) {
+    var r = LOAN.evaluate(answers);
+    var byId = {};
+    r.products.forEach(function (p) { byId[p.id] = p; });
+    var pick = byId[r.pickId] || null;
+
+    // 1) 추천
+    var head = h('section', { class: 'card lg-pick' });
+    if (pick && r.pickId === 'bank' && r.maybeIds.length) {
+      head.append(h('p', { class: 'small muted', text: '지금 답 기준으로는' }),
+        h('h2', { class: 'lg-pick-name', text: '먼저 "확인 필요"부터 따져 보세요' }),
+        h('p', { class: 'small', text: r.maybeIds.map(function (id) { return byId[id].name; }).join(', ') +
+          '이(가) 조건에 따라 될 수 있어요. 아래 사유를 보고 은행·기금e든든에서 확인한 뒤, 안 되면 은행 주택담보대출로 가요.' }));
+    } else if (pick) {
+      head.append(h('p', { class: 'small muted', text: '지금 답 기준으로 가장 유리한 선택은' }),
+        h('h2', { class: 'lg-pick-name', text: pick.name }));
+      pick.specs.forEach(function (s) {
+        head.append(h('p', { class: 'lg-spec' }, h('b', { text: s.label + ' ' }), s.value));
+      });
+    }
+    main.append(head);
+
+    // 2) 경우의 수 전체(순서 = 보통 유리한 차례)
+    main.append(h('h2', { class: 'h2', text: '경우의 수 한눈에' }));
+    r.products.forEach(function (p, idx) {
+      var vd = LOAN_VERDICT[p.verdict] || LOAN_VERDICT.maybe;
+      var card = h('section', { class: 'card lg-prod' },
+        h('div', { class: 'lg-prod-head' },
+          h('h3', { class: 'lg-prod-name', text: (idx + 1) + '순위 · ' + p.name }),
+          h('span', { class: 'lg-chip ' + vd.cls, text: vd.label })));
+      if (p.reasons.length) {
+        card.append(h('ul', { class: 'lg-reasons' }, p.reasons.map(function (t) { return h('li', { text: t }); })));
+      }
+      if (p.verdict !== 'no') {
+        p.specs.forEach(function (s) { card.append(h('p', { class: 'lg-spec' }, h('b', { text: s.label + ' ' }), s.value)); });
+      }
+      p.notes.forEach(function (t) { card.append(h('p', { class: 'small muted', text: '· ' + t })); });
+      main.append(card);
+    });
+
+    // 3) 다음 할 일
+    var next = h('section', { class: 'card' }, h('h2', { class: 'card-title', text: '다음 할 일' }));
+    var fundOk = ['newborn', 'didimdol'].some(function (id) { return byId[id].verdict !== 'no'; });
+    if (fundOk) {
+      appendKid(next, extLink('기금e든든', '기금e든든에서 자격 확인·신청하기', 'btn btn-small btn-secondary'));
+      next.append(h('p', { class: 'small muted', text: '서류 묶음은 용어 "디딤돌대출"에 정리해 뒀어요.' }));
+    }
+    if (byId.bogeumjari.verdict !== 'no') appendKid(next, extLink('주택금융공사', '주택금융공사에서 보금자리론 확인하기', 'btn btn-small btn-secondary'));
+    next.append(h('p', { class: 'small', text: '어느 쪽이든 가계약금을 보내기 전에 은행에서 이 집 기준 한도를 확인해요(체크리스트 "은행 상담" 항목).' }));
+    next.append(h('button', {
+      type: 'button', class: 'btn btn-small btn-secondary', onclick: function () {
+        sessionSet(LOAN_ANS_KEY, '{}');
+        go(0);
+      }
+    }, '처음부터 다시 하기'));
+    main.append(next);
+    main.append(h('p', {
+      class: 'about', text: '기준·숫자는 ' + LOAN.BASIS + ' 확인(기금포털·주택금융공사) 기준이고 자주 바뀌어요. 한도는 2025-06-28 이후 계약 기준이에요. ' +
+        '안내일 뿐 법적 효력이 없으니 최종 가능 여부는 은행·기금e든든에서 확인하세요.'
+    }));
   }
 
   // ---------------- 설정 ----------------
@@ -11297,6 +11455,7 @@
     [/^\/p\/([^/]+)\/edit$/, function (m) { return renderForm(m[1]); }],
     [/^\/compare$/, function () { renderCompare(); }],
     [/^\/schedule$/, function () { renderSchedule(); }], // 1.10.0
+    [/^\/loan$/, function () { renderLoanGuide(); }], // 1.14.0: 대출 길잡이
     [/^\/glossary$/, function () { renderGlossary(); }],
     [/^\/settings$/, function () { renderSettings(); }],
     [/^\/import(?:\?(.*))?$/, function (m) { renderImport(m[1] || ''); }]
